@@ -6,7 +6,7 @@
 
 [![npm version](https://img.shields.io/npm/v/@hueyexe/opencode-ensemble.svg)](https://www.npmjs.com/package/@hueyexe/opencode-ensemble)
 [![npm downloads](https://img.shields.io/npm/dm/@hueyexe/opencode-ensemble.svg)](https://www.npmjs.com/package/@hueyexe/opencode-ensemble)
-[![tests](https://img.shields.io/badge/tests-568%20passing-brightgreen.svg)]()
+[![tests](https://img.shields.io/badge/tests-623%20passing-brightgreen.svg)]()
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue.svg)]()
 [![OpenCode SDK](https://img.shields.io/badge/deps-OpenCode%20SDK%20only-blue.svg)]()
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
@@ -19,7 +19,7 @@ Plugin built on the public OpenCode SDK. No internal dependencies.
 
 ```json
 {
-  "plugin": ["@hueyexe/opencode-ensemble@0.14.2"]
+  "plugin": ["@hueyexe/opencode-ensemble@0.15.0"]
 }
 ```
 
@@ -152,6 +152,7 @@ A real-time mission control dashboard runs at `http://localhost:4747` while Open
 - **Timeline** — horizontal event strip showing spawns, messages, completions, shutdowns
 - **Keyboard shortcuts** — `j/k` navigate agents, `Enter` opens drawer, `Esc` closes, `?` shows help
 - **Live clock** — current time + team session duration
+- **Project outline** — collapsible per-project grouping when teams span multiple working directories
 
 Configure the port in `.opencode/ensemble.json`:
 
@@ -182,7 +183,7 @@ Add to your OpenCode config with a pinned version. Project-level or global.
 
 ```json
 {
-  "plugin": ["@hueyexe/opencode-ensemble@0.14.2"]
+  "plugin": ["@hueyexe/opencode-ensemble@0.15.0"]
 }
 ```
 
@@ -190,7 +191,7 @@ Add to your OpenCode config with a pinned version. Project-level or global.
 
 ```json
 {
-  "plugin": ["@hueyexe/opencode-ensemble@0.14.2"]
+  "plugin": ["@hueyexe/opencode-ensemble@0.15.0"]
 }
 ```
 
@@ -244,7 +245,7 @@ Build with `bun run build`, then restart OpenCode to pick up changes.
 
 | Tool | What it does |
 |------|-------------|
-| `team_create` | Create a team. Caller becomes the lead. |
+| `team_create` | Create a team. Caller becomes the lead. Accepts optional `project_name` to label the project. |
 | `team_spawn` | Start a new teammate with a task. Supports `plan_approval` mode. |
 | `team_shutdown` | Ask a teammate to stop. Preserves their branch before aborting. Supports `force` flag. |
 | `team_merge` | Merge a shutdown teammate's branch into working directory (unstaged). Blocks if you have local changes to overlapping files. |
@@ -454,7 +455,7 @@ Same coordination model (shared tasks, peer messaging, lead coordination) with s
 ```bash
 bun install
 bun run typecheck
-bun test             # 568 tests
+bun test             # 623 tests
 bun run build
 ```
 
