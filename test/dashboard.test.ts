@@ -23,7 +23,8 @@ function insertMessage(db: Database, teamId: string, id: string, fromName: strin
 
 // biome-lint: use Record for JSON response shape
 interface HealthResponse { ensemble: boolean; pid: number }
-interface StateResponse { teams: Array<{ id: string; name: string; status: string; timeCreated: number; timeUpdated: number; members: Array<Record<string, unknown>>; tasks: Array<Record<string, unknown>>; messages: Array<Record<string, unknown>> }> }
+interface DashboardTeam { id: string; name: string; projectId: string; status: string; timeCreated: number; timeUpdated: number; members: Array<Record<string, unknown>>; tasks: Array<Record<string, unknown>>; messages: Array<Record<string, unknown>> }
+interface StateResponse { projects: Array<{ id: string; name: string; path: string; activeTeams: number; workingAgents: number; teams: DashboardTeam[] }>; teams: DashboardTeam[] }
 
 describe("dashboard", () => {
   let db: Database
@@ -60,7 +61,7 @@ describe("dashboard", () => {
       expect(res.status).toBe(200)
       expect(res.headers.get("access-control-allow-origin")).toBe("*")
       const body = (await res.json()) as StateResponse
-      expect(body).toEqual({ teams: [] })
+      expect(body).toEqual({ projects: [], teams: [] })
     })
 
     test("returns team with members, tasks, messages", async () => {
@@ -77,6 +78,7 @@ describe("dashboard", () => {
       const team = body.teams[0]!
       expect(team.id).toBe("t1")
       expect(team.name).toBe("alpha")
+      expect(team.projectId).toBe("/tmp/test-project")
       expect(team.status).toBe("active")
       expect(typeof team.timeCreated).toBe("number")
       expect(typeof team.timeUpdated).toBe("number")
@@ -99,6 +101,35 @@ describe("dashboard", () => {
       expect(team.messages[0]!.fromName).toBe("alice")
       expect(team.messages[0]!.toName).toBe("lead")
       expect(team.messages[0]!.content).toBe("Done with auth fix")
+      expect(body.projects).toHaveLength(1)
+      expect(body.projects[0]!.id).toBe("/tmp/test-project")
+      expect(body.projects[0]!.path).toBe("/tmp/test-project")
+      expect(body.projects[0]!.activeTeams).toBe(1)
+      expect(body.projects[0]!.workingAgents).toBe(1)
+      expect(body.projects[0]!.teams[0]!.id).toBe("t1")
+    })
+
+    test("summarizes progress across projects", async () => {
+      insertTeam(db, "t1", "alpha", "lead-1")
+      db.run("INSERT OR IGNORE INTO project (id, name, path, status, time_created, time_updated) VALUES (?, ?, ?, 'active', ?, ?)", ["/tmp/project-a", "project-a", "/tmp/project-a", Date.now(), Date.now()])
+      db.run("UPDATE team SET project_id = ? WHERE id = ?", ["/tmp/project-a", "t1"])
+      insertMember(db, "t1", "alice", "sess-a", "busy", "running")
+
+      insertTeam(db, "t2", "beta", "lead-2")
+      db.run("INSERT OR IGNORE INTO project (id, name, path, status, time_created, time_updated) VALUES (?, ?, ?, 'active', ?, ?)", ["/tmp/project-b", "project-b", "/tmp/project-b", Date.now(), Date.now()])
+      db.run("UPDATE team SET project_id = ? WHERE id = ?", ["/tmp/project-b", "t2"])
+      insertMember(db, "t2", "bob", "sess-b", "ready", "idle")
+
+      server = await startDashboard(db, port)
+      const res = await fetch(`http://localhost:${port}/api/state`)
+      const body = (await res.json()) as StateResponse
+
+      const projects = [...body.projects].sort((a, b) => a.id.localeCompare(b.id))
+      expect(projects.map(project => ({ id: project.id, activeTeams: project.activeTeams, workingAgents: project.workingAgents }))).toEqual([
+        { id: "/tmp/project-a", activeTeams: 1, workingAgents: 1 },
+        { id: "/tmp/project-b", activeTeams: 1, workingAgents: 0 },
+      ])
+      expect(body.teams.map(team => team.projectId).sort()).toEqual(["/tmp/project-a", "/tmp/project-b"])
     })
 
     test("returns archived teams", async () => {

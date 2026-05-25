@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, realpath, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
@@ -8,8 +8,9 @@ const tempDirs: string[] = []
 
 async function createTempDir(): Promise<string> {
   const dir = await mkdtemp(path.join(tmpdir(), "opencode-ensemble-desktop-"))
-  tempDirs.push(dir)
-  return dir
+  const resolved = await realpath(dir)
+  tempDirs.push(resolved)
+  return resolved
 }
 
 async function buildForNode(entrypoint: string, outdir: string): Promise<string> {

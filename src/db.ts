@@ -89,9 +89,8 @@ function openDatabase(filename: string): Database {
 }
 
 /**
- * Resolve the path for the ensemble SQLite database.
- * Always uses the global ~/.config/opencode/ directory, never the project directory.
- * Accepts an env override for testability.
+ * Resolve the path for the global ensemble SQLite database.
+ * Project data is logically isolated by project_id inside this DB.
  */
 export function getDbPath(env: Record<string, string | undefined> = process.env): string {
   const home = env.HOME ?? env.USERPROFILE ?? "~"

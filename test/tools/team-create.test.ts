@@ -18,13 +18,44 @@ describe("team_create", () => {
     const row = deps.db.query("SELECT * FROM team WHERE name = ?").get("my-team") as Record<string, unknown>
     expect(row).toBeTruthy()
     expect(row.lead_session_id).toBe("lead-sess")
+    expect(row.project_id).toBe("/tmp/test-project")
     expect(row.status).toBe("active")
+
+    const project = deps.db.query("SELECT id, name, path FROM project WHERE id = ?").get("/tmp/test-project") as Record<string, unknown>
+    expect(project.path).toBe("/tmp/test-project")
+    expect(typeof project.name).toBe("string")
+    expect(project.name).not.toBe("test-project")
+  })
+
+  test("uses explicit project name on first team in a project", async () => {
+    await executeTeamCreate(deps, { name: "my-team", project_name: "silver-river" }, "lead-sess")
+
+    const project = deps.db.query("SELECT name FROM project WHERE id = ?").get("/tmp/test-project") as { name: string }
+    expect(project.name).toBe("silver-river")
+  })
+
+  test("rejects invalid explicit project name", async () => {
+    await expect(executeTeamCreate(deps, { name: "my-team", project_name: "Silver River" }, "lead-sess"))
+      .rejects.toThrow("Project name")
   })
 
   test("rejects duplicate team name", async () => {
     await executeTeamCreate(deps, { name: "my-team" }, "lead-sess")
     await expect(executeTeamCreate(deps, { name: "my-team" }, "other-sess"))
       .rejects.toThrow("already exists")
+  })
+
+  test("allows same active team name in different projects", async () => {
+    await executeTeamCreate(deps, { name: "my-team" }, "lead-sess")
+
+    const otherDeps = setupDeps(deps.db)
+    otherDeps.directory = "/tmp/other-project"
+
+    await executeTeamCreate(otherDeps, { name: "my-team" }, "other-sess")
+
+    const rows = deps.db.query("SELECT name, project_id FROM team WHERE name = ? ORDER BY project_id").all("my-team") as Array<{ name: string; project_id: string }>
+    expect(rows).toHaveLength(2)
+    expect(rows.map(row => row.project_id)).toEqual(["/tmp/other-project", "/tmp/test-project"])
   })
 
   test("rejects if session already leads a team", async () => {

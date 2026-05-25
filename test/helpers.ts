@@ -100,8 +100,12 @@ export function setupDeps(db?: EnsembleDatabase): ToolDeps & { client: ReturnTyp
 /** Insert a team directly into the DB. */
 export function insertTeam(db: EnsembleDatabase, id: string, name: string, leadSession: string, status = "active") {
   db.run(
-    "INSERT INTO team (id, name, lead_session_id, status, delegate, time_created, time_updated) VALUES (?, ?, ?, ?, 0, ?, ?)",
-    [id, name, leadSession, status, Date.now(), Date.now()]
+    "INSERT OR IGNORE INTO project (id, name, path, status, time_created, time_updated) VALUES (?, ?, ?, 'active', ?, ?)",
+    ["/tmp/test-project", "test-project", "/tmp/test-project", Date.now(), Date.now()]
+  )
+  db.run(
+    "INSERT INTO team (id, name, project_id, lead_session_id, status, delegate, time_created, time_updated) VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
+    [id, name, "/tmp/test-project", leadSession, status, Date.now(), Date.now()]
   )
 }
 

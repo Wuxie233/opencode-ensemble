@@ -2,19 +2,29 @@ import { createServer } from "node:http"
 import type { IncomingMessage, Server, ServerResponse } from "node:http"
 import type { Database } from "./db"
 import { DASHBOARD_HEAD } from "./dashboard-html"
-import { DASHBOARD_JS_PART1 } from "./dashboard-js-part1"
-import { DASHBOARD_JS_PART2 } from "./dashboard-js-part2"
-import { DASHBOARD_JS_PART3 } from "./dashboard-js-part3"
+import { DASHBOARD_JS_CORE } from "./dashboard-js-core"
+import { DASHBOARD_JS_EVENTS } from "./dashboard-js-events"
+import { DASHBOARD_JS_RENDER } from "./dashboard-js-render"
 import { log } from "./log"
 
 /** Assemble the full dashboard HTML from parts. */
-const DASHBOARD_HTML = DASHBOARD_HEAD + "\n<script>" + DASHBOARD_JS_PART1 + DASHBOARD_JS_PART2 + DASHBOARD_JS_PART3 + "<\/script>\n</body></html>"
+const DASHBOARD_HTML = DASHBOARD_HEAD + "\n<script>" + DASHBOARD_JS_CORE + DASHBOARD_JS_RENDER + DASHBOARD_JS_EVENTS + "<\/script>\n</body></html>"
 
 interface TeamRow {
   id: string
   name: string
+  project_id: string
   status: string
   lead_agent: string | null
+  time_created: number
+  time_updated: number
+}
+
+interface ProjectRow {
+  id: string
+  name: string
+  path: string
+  status: string
   time_created: number
   time_updated: number
 }
@@ -68,32 +78,35 @@ function parseDependsOn(value: string | null): string[] {
   return []
 }
 
-function buildState(db: Database): { teams: unknown[] } {
-  const teams = db.query("SELECT id, name, status, lead_agent, time_created, time_updated FROM team ORDER BY time_created DESC").all() as TeamRow[]
+function buildState(db: Database): { projects: unknown[]; teams: unknown[] } {
+  const projects = db.query("SELECT id, name, path, status, time_created, time_updated FROM project ORDER BY time_updated DESC").all() as ProjectRow[]
+  const teams = db.query("SELECT id, name, project_id, status, lead_agent, time_created, time_updated FROM team ORDER BY time_created DESC").all() as TeamRow[]
   const memberStmt = db.query("SELECT name, agent, status, execution_status, worktree_branch, prompt, model, plan_approval, time_created, time_updated FROM team_member WHERE team_id = ?")
   const taskStmt = db.query("SELECT id, content, status, priority, assignee, depends_on, time_created, time_updated FROM team_task WHERE team_id = ?")
   const msgStmt = db.query("SELECT id, from_name, to_name, content, delivered, read, time_created FROM team_message WHERE team_id = ? ORDER BY time_created DESC LIMIT 50")
 
-  return {
-    teams: teams.map((t) => ({
+  const mappedTeams = teams.map((t) => {
+    const members = (memberStmt.all(t.id) as MemberRow[]).map((m) => ({
+      name: m.name,
+      agent: m.agent,
+      status: m.status,
+      executionStatus: m.execution_status,
+      worktreeBranch: m.worktree_branch,
+      prompt: m.prompt,
+      model: m.model,
+      planApproval: m.plan_approval,
+      timeCreated: m.time_created,
+      timeUpdated: m.time_updated,
+    }))
+    return {
       id: t.id,
       name: t.name,
+      projectId: t.project_id,
       status: t.status,
       leadAgent: t.lead_agent,
       timeCreated: t.time_created,
       timeUpdated: t.time_updated,
-      members: (memberStmt.all(t.id) as MemberRow[]).map((m) => ({
-        name: m.name,
-        agent: m.agent,
-        status: m.status,
-        executionStatus: m.execution_status,
-        worktreeBranch: m.worktree_branch,
-        prompt: m.prompt,
-        model: m.model,
-        planApproval: m.plan_approval,
-        timeCreated: m.time_created,
-        timeUpdated: m.time_updated,
-      })),
+      members,
       tasks: (taskStmt.all(t.id) as TaskRow[]).map((tk) => ({
         id: tk.id,
         content: tk.content,
@@ -113,7 +126,35 @@ function buildState(db: Database): { teams: unknown[] } {
         read: msg.read === 1,
         timeCreated: msg.time_created,
       })),
-    })),
+    }
+  })
+
+  const teamsByProject = new Map<string, unknown[]>()
+  mappedTeams.forEach(team => {
+    const projectId = (team as { projectId: string }).projectId
+    teamsByProject.set(projectId, [...(teamsByProject.get(projectId) ?? []), team])
+  })
+
+  return {
+    projects: projects.flatMap(project => {
+      const projectTeams = teamsByProject.get(project.id) ?? []
+      if (projectTeams.length === 0) return []
+      return {
+        id: project.id,
+        name: project.name,
+        path: project.path,
+        status: project.status,
+        timeCreated: project.time_created,
+        timeUpdated: project.time_updated,
+        activeTeams: projectTeams.filter(team => (team as { status: string }).status === "active").length,
+        workingAgents: projectTeams.reduce<number>((count, team) => {
+          const members = (team as { members: Array<{ status: string }> }).members
+          return count + members.filter(member => member.status === "busy").length
+        }, 0),
+        teams: projectTeams,
+      }
+    }),
+    teams: mappedTeams,
   }
 }
 

@@ -45,7 +45,7 @@ const DEFAULT_WATCHDOG_CHECK_MS = 60 * 1000 // 60 seconds
  * peer-to-peer communication, shared task management, and coordinated execution.
  */
 const plugin: Plugin = async (input) => {
-  // Initialize SQLite database in the global OpenCode config directory
+  // Initialize SQLite database in the global OpenCode config directory.
   const dbPath = getDbPath()
   mkdirSync(path.dirname(dbPath), { recursive: true })
   const db = createDb(dbPath)
@@ -212,16 +212,14 @@ const plugin: Plugin = async (input) => {
               "SELECT worktree_branch, name, team_id FROM team_member WHERE session_id = ?"
             ).get(sessionID) as { worktree_branch: string | null; name: string; team_id: string } | null
             if (member?.worktree_branch && !member.worktree_branch.startsWith("ensemble/preserved/")) {
-              const teamRow = deps.db.query("SELECT name FROM team WHERE id = ?").get(member.team_id) as { name: string } | null
-              if (teamRow) {
-                const { preserveBranch: preserve, preservedBranchName: branchName } = await import("./tools/merge-helper")
-                const safeBranch = branchName(teamRow.name, member.name)
-                const ok = await preserve(member.worktree_branch, safeBranch, deps.directory)
-                if (ok) {
-                  deps.db.run("UPDATE team_member SET worktree_branch = ? WHERE team_id = ? AND name = ?",
-                    [safeBranch, member.team_id, member.name])
-                  log(`busy_while_shutdown:branch:preserved src=${member.worktree_branch} target=${safeBranch}`)
-                }
+              const { getTeamResourceParts, preserveBranch: preserve, preservedBranchName: branchName } = await import("./tools/merge-helper")
+              const resource = getTeamResourceParts(deps.db, member.team_id)
+              const safeBranch = branchName(resource.projectName, resource.teamName, resource.teamId, member.name)
+              const ok = await preserve(member.worktree_branch, safeBranch, deps.directory)
+              if (ok) {
+                deps.db.run("UPDATE team_member SET worktree_branch = ? WHERE team_id = ? AND name = ?",
+                  [safeBranch, member.team_id, member.name])
+                log(`busy_while_shutdown:branch:preserved src=${member.worktree_branch} target=${safeBranch}`)
               }
             }
             try {
@@ -372,6 +370,7 @@ const plugin: Plugin = async (input) => {
         description: "Create a new agent team. You become the team lead. Use this before spawning teammates.",
         args: {
           name: tool.schema.string().describe("Team name (lowercase alphanumeric with hyphens, 1-64 chars)"),
+          project_name: tool.schema.string().optional().describe("Project display name for first use of this working directory. If omitted, a short random name is generated."),
         },
         async execute(args, ctx) {
           const result = await executeTeamCreate(deps, args, ctx.sessionID)

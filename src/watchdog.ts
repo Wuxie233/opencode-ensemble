@@ -185,18 +185,19 @@ export class Watchdog {
 
     const cutoff = Date.now() - this.ttlMs
     const stale = this.db.query(
-      `SELECT tm.team_id, tm.name, tm.session_id, tm.worktree_branch, t.name as team_name
+      `SELECT tm.team_id, tm.name, tm.session_id, tm.worktree_branch, t.name as team_name, p.name as project_name
        FROM team_member tm
        JOIN team t ON tm.team_id = t.id
+       JOIN project p ON t.project_id = p.id
        WHERE t.status = 'active'
          AND tm.status = 'busy'
          AND tm.time_updated < ?`
-    ).all(cutoff) as Array<{ team_id: string; name: string; session_id: string; worktree_branch: string | null; team_name: string }>
+    ).all(cutoff) as Array<{ team_id: string; name: string; session_id: string; worktree_branch: string | null; team_name: string; project_name: string }>
 
     for (const member of stale) {
       // Preserve branch BEFORE abort — session.abort() may destroy the worktree + branch
       if (this.cwd && member.worktree_branch && !member.worktree_branch.startsWith("ensemble/preserved/")) {
-        const safeBranch = preservedBranchName(member.team_name, member.name)
+        const safeBranch = preservedBranchName(member.project_name, member.team_name, member.team_id, member.name)
         const ok = await preserveBranch(member.worktree_branch, safeBranch, this.cwd)
         if (ok) {
           this.db.run("UPDATE team_member SET worktree_branch = ? WHERE team_id = ? AND name = ?",

@@ -1,10 +1,24 @@
 import { describe, test, expect, beforeEach } from "bun:test"
 import { Database } from "bun:sqlite"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import path from "node:path"
 import { applyMigrations } from "../src/schema"
 import { recoverStaleMembers, recoverUndeliveredMessages, rehydrateRegistry } from "../src/recovery"
 import type { PluginClient } from "../src/types"
 import { MemberRegistry } from "../src/state"
 import { sendMessage, broadcastMessage } from "../src/messaging"
+
+async function git(cwd: string, args: string[]): Promise<string> {
+  const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" })
+  const [stdout, stderr, exit] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ])
+  if (exit !== 0) throw new Error(stderr.trim() || `git ${args.join(" ")} exited with code ${exit}`)
+  return stdout
+}
 
 function setupDb(): Database {
   const db = new Database(":memory:")
@@ -149,6 +163,55 @@ describe("recoverStaleMembers", () => {
 
     const result = await recoverStaleMembers(db, client)
     expect(result.interrupted).toBe(0)
+  })
+
+  test("only recovers stale members for the current project when provided", async () => {
+    insertTeam(db, "t1", "my-team", "lead-sess")
+    db.run("INSERT OR IGNORE INTO project (id, name, path, status, time_created, time_updated) VALUES (?, ?, ?, 'active', ?, ?)", ["/tmp/project-a", "project-a", "/tmp/project-a", Date.now(), Date.now()])
+    db.run("UPDATE team SET project_id = ? WHERE id = ?", ["/tmp/project-a", "t1"])
+    insertMember(db, "t1", "alice", "sess-1", "busy", "running")
+
+    insertTeam(db, "t2", "other-team", "other-lead")
+    db.run("INSERT OR IGNORE INTO project (id, name, path, status, time_created, time_updated) VALUES (?, ?, ?, 'active', ?, ?)", ["/tmp/project-b", "project-b", "/tmp/project-b", Date.now(), Date.now()])
+    db.run("UPDATE team SET project_id = ? WHERE id = ?", ["/tmp/project-b", "t2"])
+    insertMember(db, "t2", "bob", "sess-2", "busy", "running")
+
+    const result = await recoverStaleMembers(db, client, "/tmp/project-a")
+    expect(result.interrupted).toBe(1)
+
+    const alice = db.query("SELECT status FROM team_member WHERE name = ?").get("alice") as { status: string }
+    const bob = db.query("SELECT status FROM team_member WHERE name = ?").get("bob") as { status: string }
+    expect(alice.status).toBe("error")
+    expect(bob.status).toBe("busy")
+
+    const abortCalls = client.calls.filter(c => c.method === "session.abort")
+    expect(abortCalls).toHaveLength(1)
+    expect((abortCalls[0]!.args[0] as { sessionID: string }).sessionID).toBe("sess-1")
+  })
+
+  test("recovers legacy default-project members when current project is provided", async () => {
+    insertTeam(db, "legacy", "legacy-team", "legacy-lead")
+    insertMember(db, "legacy", "alice", "sess-legacy", "busy", "running")
+
+    insertTeam(db, "current", "current-team", "current-lead")
+    db.run("INSERT OR IGNORE INTO project (id, name, path, status, time_created, time_updated) VALUES (?, ?, ?, 'active', ?, ?)", ["/tmp/project-a", "project-a", "/tmp/project-a", Date.now(), Date.now()])
+    db.run("UPDATE team SET project_id = ? WHERE id = ?", ["/tmp/project-a", "current"])
+    insertMember(db, "current", "bob", "sess-current", "busy", "running")
+
+    insertTeam(db, "other", "other-team", "other-lead")
+    db.run("INSERT OR IGNORE INTO project (id, name, path, status, time_created, time_updated) VALUES (?, ?, ?, 'active', ?, ?)", ["/tmp/project-b", "project-b", "/tmp/project-b", Date.now(), Date.now()])
+    db.run("UPDATE team SET project_id = ? WHERE id = ?", ["/tmp/project-b", "other"])
+    insertMember(db, "other", "cara", "sess-other", "busy", "running")
+
+    const result = await recoverStaleMembers(db, client, "/tmp/project-a")
+    expect(result.interrupted).toBe(2)
+
+    const alice = db.query("SELECT status FROM team_member WHERE name = ?").get("alice") as { status: string }
+    const bob = db.query("SELECT status FROM team_member WHERE name = ?").get("bob") as { status: string }
+    const cara = db.query("SELECT status FROM team_member WHERE name = ?").get("cara") as { status: string }
+    expect(alice.status).toBe("error")
+    expect(bob.status).toBe("error")
+    expect(cara.status).toBe("busy")
   })
 })
 
@@ -295,6 +358,46 @@ describe("recoverUndeliveredMessages", () => {
 
     const promptCalls = client.calls.filter(c => c.method === "session.promptAsync")
     expect(promptCalls).toHaveLength(1)
+  })
+})
+
+describe("recoverOrphanedBranches", () => {
+  let db: Database
+
+  beforeEach(() => {
+    db = setupDb()
+  })
+
+  test("only deletes preserved branches for archived teams in the current project", async () => {
+    insertTeam(db, "t1", "alpha", "lead-a")
+    db.run("INSERT OR IGNORE INTO project (id, name, path, status, time_created, time_updated) VALUES (?, ?, ?, 'active', ?, ?)", ["/tmp/project-a", "project-a", "/tmp/project-a", Date.now(), Date.now()])
+    db.run("UPDATE team SET status = 'archived', project_id = ? WHERE id = ?", ["/tmp/project-a", "t1"])
+
+    insertTeam(db, "t2", "beta", "lead-b")
+    db.run("INSERT OR IGNORE INTO project (id, name, path, status, time_created, time_updated) VALUES (?, ?, ?, 'active', ?, ?)", ["/tmp/project-b", "project-b", "/tmp/project-b", Date.now(), Date.now()])
+    db.run("UPDATE team SET status = 'archived', project_id = ? WHERE id = ?", ["/tmp/project-b", "t2"])
+
+    const repo = await mkdtemp(path.join(tmpdir(), "ensemble-branches-"))
+    try {
+      db.run("INSERT OR IGNORE INTO project (id, name, path, status, time_created, time_updated) VALUES (?, 'project-a', ?, 'active', ?, ?)", [repo, repo, Date.now(), Date.now()])
+      db.run("UPDATE team SET project_id = ? WHERE id = ?", [repo, "t1"])
+      await git(repo, ["init"])
+      await git(repo, ["config", "user.email", "test@example.com"])
+      await git(repo, ["config", "user.name", "Test User"])
+      await git(repo, ["commit", "--allow-empty", "-m", "init"])
+      await git(repo, ["branch", "ensemble/preserved/project-a/alpha#t1/alice"])
+      await git(repo, ["branch", "ensemble/preserved/alpha/legacy-alice"])
+      await git(repo, ["branch", "ensemble/preserved/project-b/beta#t2/bob"])
+
+      const { recoverOrphanedBranches } = await import("../src/recovery")
+      const result = await recoverOrphanedBranches(db, repo)
+      const remaining = await git(repo, ["branch", "--list", "ensemble/preserved/*", "--format", "%(refname:short)"])
+
+      expect(result.removed).toBe(2)
+      expect(remaining.trim()).toBe("ensemble/preserved/project-b/beta#t2/bob")
+    } finally {
+      await rm(repo, { recursive: true, force: true })
+    }
   })
 })
 

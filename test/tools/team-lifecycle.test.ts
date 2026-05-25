@@ -563,9 +563,15 @@ describe("team_cleanup", () => {
     expect(deps.db.query("SELECT team_id FROM team_message WHERE team_id = 'old-1'").all()).toHaveLength(0)
   })
 
-  test("purge wildcard deletes all archived teams and leaves active teams", async () => {
+  test("purge wildcard deletes archived teams in the current project only", async () => {
     insertTeam(deps.db, "old-1", "old-one", "old-lead-1", "archived")
     insertTeam(deps.db, "old-2", "old-two", "old-lead-2", "archived")
+    deps.db.run(
+      "INSERT OR IGNORE INTO project (id, name, path, status, time_created, time_updated) VALUES (?, ?, ?, 'active', ?, ?)",
+      ["/tmp/other-project", "other-project", "/tmp/other-project", Date.now(), Date.now()]
+    )
+    insertTeam(deps.db, "old-3", "old-three", "old-lead-3", "archived")
+    deps.db.run("UPDATE team SET project_id = ? WHERE id = ?", ["/tmp/other-project", "old-3"])
     const token = await preparePurgeConfirmation(deps, ["*"], "lead-sess")
 
     const result = await executeTeamCleanup(deps, { force: false, purge: ["*"], confirm_purge: true, confirm_token: token }, "lead-sess", undefined, noopMerge, noopDelete, false, undefined, async () => {}, noopListBranches)
@@ -573,6 +579,7 @@ describe("team_cleanup", () => {
     expect(result).toContain("Permanently deleted 2 archived teams")
     expect(deps.db.query("SELECT id FROM team WHERE id = 'old-1'").get()).toBeNull()
     expect(deps.db.query("SELECT id FROM team WHERE id = 'old-2'").get()).toBeNull()
+    expect(deps.db.query("SELECT id FROM team WHERE id = 'old-3'").get()).not.toBeNull()
     expect(deps.db.query("SELECT id FROM team WHERE id = 't1'").get()).not.toBeNull()
   })
 
@@ -616,6 +623,23 @@ describe("team_cleanup", () => {
       .rejects.toThrow("Team not found")
 
     expect(deps.db.query("SELECT id FROM team WHERE id = 'old-1'").get()).not.toBeNull()
+  })
+
+  test("purge explicit names are scoped to the current project", async () => {
+    insertTeam(deps.db, "old-1", "old-team", "old-lead-1", "archived")
+    deps.db.run(
+      "INSERT OR IGNORE INTO project (id, name, path, status, time_created, time_updated) VALUES (?, ?, ?, 'active', ?, ?)",
+      ["/tmp/other-project", "other-project", "/tmp/other-project", Date.now(), Date.now()]
+    )
+    insertTeam(deps.db, "old-2", "other-old-team", "old-lead-2", "archived")
+    deps.db.run("UPDATE team SET name = ?, project_id = ? WHERE id = ?", ["old-team", "/tmp/other-project", "old-2"])
+    const token = await preparePurgeConfirmation(deps, ["old-team"], "main-sess")
+
+    const result = await executeTeamCleanup(deps, { force: false, purge: ["old-team"], confirm_purge: true, confirm_token: token }, "main-sess", undefined, noopMerge, noopDelete, false, undefined, async () => {}, noopListBranches)
+
+    expect(result).toContain("Permanently deleted 1 archived team")
+    expect(deps.db.query("SELECT id FROM team WHERE id = 'old-1'").get()).toBeNull()
+    expect(deps.db.query("SELECT id FROM team WHERE id = 'old-2'").get()).not.toBeNull()
   })
 
   test("purge rejects active team members", async () => {

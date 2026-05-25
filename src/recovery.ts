@@ -2,7 +2,7 @@ import type { Database } from "./db"
 import type { PluginClient } from "./types"
 import type { MemberRegistry } from "./state"
 import { getUndeliveredMessages, markDelivered, hasReportedCompletion } from "./messaging"
-import { preserveBranch, preservedBranchName } from "./tools/merge-helper"
+import { preserveBranch, preservedBranchName, teamResourceSegment } from "./tools/merge-helper"
 import { log } from "./log"
 import { runCommand } from "./process"
 
@@ -16,17 +16,19 @@ import { runCommand } from "./process"
 export async function recoverStaleMembers(db: Database, client?: PluginClient, cwd?: string): Promise<{ interrupted: number }> {
   // Find stale members with branch info so we can preserve before aborting
   const stale = db.query(
-    `SELECT tm.session_id, tm.worktree_branch, tm.name, tm.team_id, t.name as team_name
-     FROM team_member tm
-     JOIN team t ON tm.team_id = t.id
-     WHERE tm.status = 'busy' AND t.status = 'active'`
-  ).all() as Array<{ session_id: string; worktree_branch: string | null; name: string; team_id: string; team_name: string }>
+    `SELECT tm.session_id, tm.worktree_branch, tm.name, tm.team_id, t.name as team_name, p.name as project_name
+      FROM team_member tm
+      JOIN team t ON tm.team_id = t.id
+      JOIN project p ON t.project_id = p.id
+      WHERE tm.status = 'busy' AND t.status = 'active'
+        AND (? IS NULL OR t.project_id = ? OR t.project_id = 'default')`
+  ).all(cwd ?? null, cwd ?? null) as Array<{ session_id: string; worktree_branch: string | null; name: string; team_id: string; team_name: string; project_name: string }>
 
   const result = db.run(
     `UPDATE team_member SET status = 'error', execution_status = 'idle', time_updated = ?
-     WHERE status = 'busy'
-       AND team_id IN (SELECT id FROM team WHERE status = 'active')`,
-    [Date.now()]
+      WHERE status = 'busy'
+        AND team_id IN (SELECT id FROM team WHERE status = 'active' AND (? IS NULL OR project_id = ? OR project_id = 'default'))`,
+    [Date.now(), cwd ?? null, cwd ?? null]
   )
 
   // Preserve branches then abort orphaned sessions
@@ -34,7 +36,7 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
     for (const member of stale) {
       // Preserve branch BEFORE abort — session.abort() may destroy the worktree + branch
       if (cwd && member.worktree_branch && !member.worktree_branch.startsWith("ensemble/preserved/")) {
-        const safeBranch = preservedBranchName(member.team_name, member.name)
+        const safeBranch = preservedBranchName(member.project_name, member.team_name, member.team_id, member.name)
         const ok = await preserveBranch(member.worktree_branch, safeBranch, cwd)
         if (ok) {
           db.run("UPDATE team_member SET worktree_branch = ? WHERE team_id = ? AND name = ?",
@@ -178,19 +180,25 @@ export function rehydrateRegistry(db: Database, registry: MemberRegistry): numbe
 export async function recoverOrphanedBranches(db: Database, cwd: string): Promise<{ removed: number }> {
   let removed = 0
 
-  // Get archived team names that have NO active members
+  // Get archived team namespaces for this project that have NO active members.
+  // The team id namespace is current; team names are kept for legacy preserved branches.
   const archivedTeams = db.query(
-    `SELECT t.name FROM team t
+    `SELECT t.id, t.name, p.name as project_name FROM team t
+     JOIN project p ON t.project_id = p.id
      WHERE t.status = 'archived'
+      AND t.project_id = ?
      AND NOT EXISTS (
-       SELECT 1 FROM team_member tm
-       WHERE tm.team_id = t.id AND tm.status NOT IN ('shutdown', 'error')
-     )`
-  ).all() as Array<{ name: string }>
+        SELECT 1 FROM team_member tm
+        WHERE tm.team_id = t.id AND tm.status NOT IN ('shutdown', 'error')
+      )`
+  ).all(cwd) as Array<{ id: string; name: string; project_name: string }>
 
   if (archivedTeams.length === 0) return { removed: 0 }
 
-  const archivedNames = new Set(archivedTeams.map(t => t.name))
+  const archivedPrefixes = archivedTeams.flatMap(t => [
+    `ensemble/preserved/${t.project_name}/${teamResourceSegment(t.name, t.id)}/`,
+    `ensemble/preserved/${t.name}/`,
+  ])
 
   // List all local branches matching ensemble/preserved/*
   const result = await runCommand(["git", "branch", "--list", "ensemble/preserved/*"], { cwd })
@@ -198,11 +206,7 @@ export async function recoverOrphanedBranches(db: Database, cwd: string): Promis
   const branches = result.stdout.split("\n").map(b => b.trim().replace(/^\* /, "")).filter(Boolean)
 
   for (const branch of branches) {
-    // Parse team name from branch: ensemble/preserved/{teamName}/{memberName}
-    const parts = branch.split("/")
-    if (parts.length < 4) continue
-    const teamName = parts[2]
-    if (!teamName || !archivedNames.has(teamName)) continue
+    if (!archivedPrefixes.some(prefix => branch.startsWith(prefix))) continue
 
     try {
       const deleteResult = await runCommand(["git", "branch", "-D", branch], { cwd })

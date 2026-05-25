@@ -279,7 +279,7 @@ describe("team_spawn", () => {
     // Worktree.create should have been called
     const wtCalls = deps.client.calls.filter(c => c.method === "worktree.create")
     expect(wtCalls).toHaveLength(1)
-    expect((wtCalls[0]!.args[0] as Record<string, unknown>).worktreeCreateInput).toEqual({ name: "ensemble-my-team-alice" })
+    expect((wtCalls[0]!.args[0] as Record<string, unknown>).worktreeCreateInput).toEqual({ name: "ensemble-test-project-my-team#t1-alice" })
 
     // DB should have worktree columns populated
     const row = deps.db.query("SELECT worktree_dir, worktree_branch FROM team_member WHERE name = ?").get("alice") as Record<string, string | null>
@@ -288,6 +288,25 @@ describe("team_spawn", () => {
 
     // Result should mention the branch
     expect(result).toContain("branch:")
+  })
+
+  test("uses team id for worktree names so same-name teams in different projects do not collide", async () => {
+    deps.db.run(
+      "INSERT OR IGNORE INTO project (id, name, path, status, time_created, time_updated) VALUES (?, ?, ?, 'active', ?, ?)",
+      ["/tmp/other-project", "other-project", "/tmp/other-project", Date.now(), Date.now()]
+    )
+    deps.db.run(
+      "INSERT INTO team (id, name, project_id, lead_session_id, status, delegate, time_created, time_updated) VALUES (?, ?, ?, ?, 'active', 0, ?, ?)",
+      ["t2", "my-team", "/tmp/other-project", "other-lead", Date.now(), Date.now()]
+    )
+
+    await executeTeamSpawn(deps, { name: "alice", agent: "build", prompt: "Fix tests" }, "lead-sess")
+    await executeTeamSpawn(deps, { name: "alice", agent: "build", prompt: "Fix tests" }, "other-lead")
+
+    const names = deps.client.calls
+      .filter(c => c.method === "worktree.create")
+      .map(c => ((c.args[0] as { worktreeCreateInput: { name: string } }).worktreeCreateInput).name)
+    expect(names).toEqual(["ensemble-test-project-my-team#t1-alice", "ensemble-other-project-my-team#t2-alice"])
   })
 
   test("skips worktree when worktree: false", async () => {
@@ -647,7 +666,7 @@ describe("team_spawn — agent mode enforcement", () => {
     const createCall = deps.client.calls.find(c => c.method === "session.create")
     const opts = createCall!.args[0] as { permission?: Array<{ permission: string; pattern: string; action: string }> }
     expect(opts.permission).toEqual([
-      { permission: "edit", pattern: "/tmp/worktree-ensemble-my-team-builder/**", action: "allow" },
+      { permission: "edit", pattern: "/tmp/worktree-ensemble-test-project-my-team#t1-builder/**", action: "allow" },
       { permission: "bash", pattern: "*", action: "allow" },
       ...TEAM_TOOL_PERMISSIONS,
     ])

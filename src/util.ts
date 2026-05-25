@@ -23,6 +23,23 @@ export function validateTeamName(name: string): string | undefined {
   return undefined
 }
 
+const PROJECT_ADJECTIVES = ["amber", "brave", "calm", "copper", "crisp", "dark", "ember", "frost", "quiet", "silver", "steady", "swift"]
+const PROJECT_NOUNS = ["atlas", "beacon", "comet", "harbor", "lab", "orbit", "river", "signal", "sparrow", "summit", "vector", "voyage"]
+
+/** Generate a short human-readable project name for implicit project creation. */
+export function generateProjectName(): string {
+  const adjective = PROJECT_ADJECTIVES[Math.floor(Math.random() * PROJECT_ADJECTIVES.length)] ?? "quiet"
+  const noun = PROJECT_NOUNS[Math.floor(Math.random() * PROJECT_NOUNS.length)] ?? "project"
+  return `${adjective}-${noun}`
+}
+
+/** Validate a project display name. Returns an error if invalid. */
+export function validateProjectName(name: string): string | undefined {
+  if (name.length < 1 || name.length > 64) return "Project name must be 1-64 characters"
+  if (!NAME_PATTERN.test(name)) return "Project name must be lowercase alphanumeric with hyphens only"
+  return undefined
+}
+
 /**
  * Detect if the plugin is loading inside a teammate's worktree instance.
  * Worktree instances should skip recovery to avoid deadlocking the server.

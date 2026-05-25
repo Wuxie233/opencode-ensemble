@@ -1,14 +1,31 @@
 /** Dashboard JS — interaction handlers, keyboard, polling. */
-export const DASHBOARD_JS_PART3 = `
+export const DASHBOARD_JS_EVENTS = `
 function toggleMsg(id){if(expMsgs.has(id))expMsgs.delete(id);else expMsgs.add(id);render()}
+
+function applyNavCollapse(){
+  const content=document.getElementById('content'),projects=document.getElementById('projects'),rail=document.getElementById('project-rail'),toggle=document.getElementById('nav-toggle'),expand=document.getElementById('nav-expand');
+  content.classList.toggle('nav-collapsed',navCollapsed);
+  projects.hidden=navCollapsed;
+  projects.setAttribute('aria-hidden',String(navCollapsed));
+  rail.hidden=!navCollapsed;
+  if(toggle)toggle.setAttribute('aria-expanded',String(!navCollapsed));
+  expand.setAttribute('aria-expanded',String(!navCollapsed));
+  if(document.activeElement===toggle&&navCollapsed)expand.focus();
+  if(document.activeElement===expand&&!navCollapsed&&toggle)toggle.focus();
+}
 
 function render(){
   rSel();const t=cur();
   const empty=document.getElementById('empty'),content=document.getElementById('content');
   if(!t){empty.classList.remove('hidden');empty.classList.add('flex');content.classList.add('hidden');document.getElementById('tl').classList.add('hidden');return}
   empty.classList.add('hidden');empty.classList.remove('flex');content.classList.remove('hidden');
+  applyNavCollapse();
+  const p=curProject();document.getElementById('crumb').textContent=p?' / '+projectLabel(p)+' / '+t.name:'';
   rHealth(t);rSum(t);rAttention(t);rAgents(t);rTasks(t);rActivity(t);rTimeline(t);
 }
+
+function selectProject(id){selProjectId=id;const p=S?.projects?.find(p=>p.id===id);const t=(p?.teams||[]).filter(t=>t.status==='active').sort((a,b)=>b.timeUpdated-a.timeUpdated)[0]||(p?.teams||[])[0];if(t)selId=t.id;selCard=-1;render()}
+function selectTeam(id){selId=id;selCard=-1;render()}
 
 function conn(ok){
   document.getElementById('cd').className='w-[7px] h-[7px] rounded-full '+(ok?'bg-emerald-500 pulse':'bg-red-500');
@@ -56,6 +73,13 @@ setInterval(function(){var t=cur();if(t)rClock(t);if(fails<3)conn(true)},1000);
 // Poll every 2.5s
 setInterval(poll,2500);
 
+document.addEventListener('click',function(e){
+  const id=e.target&&e.target.id;
+  if(id!=='nav-toggle'&&id!=='nav-expand')return;
+  navCollapsed=id==='nav-toggle';
+  applyNavCollapse();
+});
+
 // Keyboard shortcuts
 document.addEventListener('keydown',function(e){
   const shortcutsOpen=document.getElementById('sco').classList.contains('show');
@@ -79,9 +103,6 @@ document.addEventListener('keydown',function(e){
     if(idx<all.length){selId=all[idx].id;render()}
   }
 });
-
-// Select handler
-document.getElementById('sel').addEventListener('change',function(){selId=this.value;render()});
 
 // Initial poll
 poll();

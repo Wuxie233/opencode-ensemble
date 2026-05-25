@@ -1,3 +1,4 @@
+import type { Database } from "../db"
 import { log } from "../log"
 import { runCommand } from "../process"
 
@@ -18,6 +19,49 @@ export type PreserveBranchFn = (sourceBranch: string, targetBranch: string, cwd:
 
 /** Injectable function for deleting a branch. */
 export type DeleteBranchFn = (branch: string, cwd: string) => Promise<boolean>
+
+/** Human-readable resource identity for a team. */
+export interface TeamResourceParts {
+  projectName: string
+  teamName: string
+  teamId: string
+}
+
+function shortTeamId(teamId: string): string {
+  return (teamId.split("_").at(-1) || teamId).slice(0, 6)
+}
+
+function resourcePart(value: string): string {
+  const part = value.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "")
+  return part || "unnamed"
+}
+
+/** Load the human-readable pieces used to build team resource names. */
+export function getTeamResourceParts(db: Database, teamId: string): TeamResourceParts {
+  const row = db.query(
+    `SELECT t.id as team_id, t.name as team_name, p.name as project_name
+     FROM team t
+     JOIN project p ON t.project_id = p.id
+     WHERE t.id = ?`
+  ).get(teamId) as { team_id: string; team_name: string; project_name: string } | null
+  if (!row) throw new Error(`Team not found: ${teamId}`)
+  return { projectName: row.project_name, teamName: row.team_name, teamId: row.team_id }
+}
+
+/** Build the readable namespace used for team-owned resources. */
+export function teamResourceSlug(projectName: string, teamName: string, teamId: string): string {
+  return `${resourcePart(projectName)}-${resourcePart(teamName)}#${shortTeamId(teamId)}`
+}
+
+/** Build the team-only resource segment used under project-scoped namespaces. */
+export function teamResourceSegment(teamName: string, teamId: string): string {
+  return `${resourcePart(teamName)}#${shortTeamId(teamId)}`
+}
+
+/** Build an OpenCode worktree name for a team member. */
+export function teamWorktreeName(projectName: string, teamName: string, teamId: string, memberName: string): string {
+  return `ensemble-${teamResourceSlug(projectName, teamName, teamId)}-${memberName}`
+}
 
 /**
  * Copy a git branch to a new ref. Used to preserve worktree branches
@@ -99,6 +143,6 @@ export async function getOverlappingFiles(branch: string, cwd: string): Promise<
 /**
  * Build the preserved branch name for a team member.
  */
-export function preservedBranchName(teamName: string, memberName: string): string {
-  return `ensemble/preserved/${teamName}/${memberName}`
+export function preservedBranchName(projectName: string, teamName: string, teamId: string, memberName: string): string {
+  return `ensemble/preserved/${resourcePart(projectName)}/${teamResourceSegment(teamName, teamId)}/${resourcePart(memberName)}`
 }

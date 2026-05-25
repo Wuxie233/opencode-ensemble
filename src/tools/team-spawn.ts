@@ -4,6 +4,7 @@ import { requireLead } from "./shared"
 import { sendMessage } from "../messaging"
 import { log } from "../log"
 import type { EnsembleConfig } from "../config"
+import { getTeamResourceParts, teamWorktreeName } from "./merge-helper"
 
 /** Tracks consecutive spawn failures per team for circuit breaker. */
 export const spawnFailures = new Map<string, { count: number; lastError: string }>()
@@ -96,7 +97,8 @@ export async function executeTeamSpawn(
   let worktreeBranch: string | null = null
 
   if (useWorktree) {
-    const worktreeName = `ensemble-${teamInfo.teamName}-${args.name}`
+    const resource = getTeamResourceParts(deps.db, teamInfo.teamId)
+    const worktreeName = teamWorktreeName(resource.projectName, resource.teamName, resource.teamId, args.name)
     try {
       log(`spawn:worktree:start name=${args.name}`)
       const result = await withTimeout(
