@@ -24,13 +24,29 @@ bun run typecheck && bun test && bun run build
 
 All three must pass.
 
+## Branch Naming (required)
+
+CI enforces a branch-name prefix on every PR via the `branch-name` check. Your PR's head branch **must** start with one of:
+
+- `feature/` — new functionality (e.g. `feature/verbose-dashboard`)
+- `bugfix/` — fixes (e.g. `bugfix/bun-sqlite-scanner`)
+- `chore/` — tooling, docs, deps, refactors (e.g. `chore/update-deps`)
+
+> **Common gotcha:** opening a PR directly from your fork's `main` branch fails this check, because `main` has no valid prefix. Always create a prefixed branch before pushing:
+>
+> ```bash
+> git checkout -b bugfix/short-description
+> ```
+>
+> If you already committed to `main` on your fork, move the work to a prefixed branch and open the PR from there.
+
 ## Submitting Changes
 
-1. Fork the repo and create a branch off `main` using `bugfix/`, `feature/`, or `chore/` as the prefix
+1. Fork the repo and create a branch off `main` using a `bugfix/`, `feature/`, or `chore/` prefix (see above)
 2. Make your changes following TDD and the code standards below
 3. Run `bun run typecheck && bun test && bun run build` — all must pass
 4. Open a PR against `main`
-5. The `check` CI status must pass on your PR
+5. The `check` CI status must pass on your PR (the `branch-name` check must pass too)
 6. A maintainer (@hueyexe) will review and merge
 
 All PRs require at least one approval from a code owner before merging. Direct pushes to `main` are not allowed.
