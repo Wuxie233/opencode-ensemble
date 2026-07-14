@@ -2,6 +2,31 @@
 export const DASHBOARD_JS_EVENTS = `
 function toggleMsg(id){if(expMsgs.has(id))expMsgs.delete(id);else expMsgs.add(id);render()}
 
+function toggleVerbose(){
+  verbose=!verbose;
+  try{localStorage.setItem('ensemble-verbose',verbose?'1':'0')}catch(e){}
+  var btn=document.getElementById('verbose-toggle');
+  if(btn){
+    btn.textContent='verbose: '+(verbose?'on':'off');
+    btn.setAttribute('aria-pressed',verbose?'true':'false');
+    btn.className='text-[10px] '+(verbose?'text-blue-400 border-blue-500/40 bg-blue-500/10':'text-txt-500 hover:text-txt-200 border-base-800')+' rounded px-1.5 py-[2px] transition-colors';
+  }
+  rDrawerActivityUpdate();
+}
+
+var fetchActivityGen=0;
+async function fetchActivity(sessionId){
+  var gen=++fetchActivityGen;
+  try{
+    var res=await fetch('api/session/'+encodeURIComponent(sessionId)+'/activity');
+    var data=await res.json();
+    if(gen!==fetchActivityGen)return;
+    drawerActivity=data.activity||[];
+    drawerSession=data.session||null;
+    rDrawerActivityUpdate();
+  }catch{if(gen!==fetchActivityGen)return;drawerActivity=[];drawerSession=null;rDrawerActivityUpdate()}
+}
+
 function applyNavCollapse(){
   const content=document.getElementById('content'),projects=document.getElementById('projects'),rail=document.getElementById('project-rail'),toggle=document.getElementById('nav-toggle'),expand=document.getElementById('nav-expand');
   content.classList.toggle('nav-collapsed',navCollapsed);
@@ -96,6 +121,7 @@ document.addEventListener('keydown',function(e){
   if(e.key==='Escape'){closeDrawer();expMsgs.clear();selCard=-1;closeShortcuts();render();return}
   if(e.key==='j'&&mm.length){e.preventDefault();selCard=Math.min(selCard+1,mm.length-1);render();return}
   if(e.key==='k'&&mm.length){e.preventDefault();selCard=Math.max(selCard-1,0);render();return}
+  if(e.key==='v'&&!e.ctrlKey&&!e.metaKey&&!e.altKey){e.preventDefault();toggleVerbose();return}
   if(e.key==='Enter'&&selCard>=0&&selCard<mm.length){e.preventDefault();openDrawer(mm[selCard].name);return}
   if(e.key>='1'&&e.key<='9'){
     var teams=allTeams(),all=[...teams.active,...teams.archived];

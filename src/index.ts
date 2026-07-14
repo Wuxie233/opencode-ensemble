@@ -16,6 +16,7 @@ import { log, initLog } from "./log"
 import { findTeamBySession } from "./types"
 import { loadConfig } from "./config"
 import { ProgressTracker } from "./progress"
+import { ActivityBuffer, recordFromV2Event, recordFromToolBefore, recordFromToolAfter } from "./activity"
 import { startDashboard } from "./dashboard"
 import { executeTeamCreate } from "./tools/team-create"
 import { executeTeamSpawn } from "./tools/team-spawn"
@@ -59,6 +60,7 @@ const plugin: Plugin = async (input) => {
   const purgeApprovals = new PendingPurgeApprovals()
   const nudgedMembers = new Set<string>()
   const progressTracker = new ProgressTracker()
+  const activityBuffer = new ActivityBuffer()
   const wakeLeadTimestamps = new Map<string, number>()
   const WAKE_LEAD_COOLDOWN_MS = 5000
 
@@ -104,7 +106,7 @@ const plugin: Plugin = async (input) => {
 
     // Start dashboard server (main instance only, not worktree instances)
     if (config.dashboardPort !== 0) {
-      startDashboard(db, config.dashboardPort).catch((err) => {
+      startDashboard(db, config.dashboardPort, { activityBuffer, client }).catch((err) => {
         log(`init:dashboard:failed err=${err instanceof Error ? err.message : String(err)}`)
       })
     }
@@ -304,6 +306,15 @@ const plugin: Plugin = async (input) => {
           }
         }
       }
+
+      // Capture activity for dashboard verbose view (best-effort, v2 event types)
+      // Only shell and step events are recorded here — tool calls/results are
+      // recorded via tool.execute.before/after to avoid duplicate entries.
+      recordFromV2Event(
+        event as unknown as { type: string; properties: { sessionID?: string; tool?: string; input?: string; content?: string; title?: string; error?: string; command?: string; exitCode?: number; cost?: number; tokens?: { input?: number; output?: number } } },
+        registry,
+        activityBuffer,
+      )
     },
 
     // Sub-agent isolation + rate limiting hook
@@ -315,12 +326,16 @@ const plugin: Plugin = async (input) => {
           await rateLimiter.waitForToken()
         }
       }
+      // Record tool call activity for team member sessions
+      recordFromToolBefore(input, registry, activityBuffer)
     },
 
     "tool.execute.after": async (input, output) => {
       if (input.tool === "question") {
         purgeApprovals.recordQuestionAnswer(input.sessionID, output.output, input.args)
       }
+      // Record tool result activity for team member sessions
+      recordFromToolAfter(input, output, registry, activityBuffer)
     },
 
     // System prompt injection — keeps lead aware of team state, reminds teammates of role
@@ -508,7 +523,10 @@ const plugin: Plugin = async (input) => {
           const result = await executeTeamShutdown(deps, args, ctx.sessionID)
           // Clean up progress tracking for the shut-down member
           const member = deps.db.query("SELECT session_id FROM team_member WHERE name = ? AND status IN ('shutdown', 'shutdown_requested')").get(args.member) as { session_id: string } | null
-          if (member) progressTracker.remove(member.session_id)
+          if (member) {
+            progressTracker.remove(member.session_id)
+            activityBuffer.remove(member.session_id)
+          }
           const hasWarning = result.includes("uncommitted")
           ctx.metadata({ title: hasWarning ? `${args.member} shut down — uncommitted changes` : `${args.member} shut down` })
           return result
@@ -542,7 +560,16 @@ const plugin: Plugin = async (input) => {
               })
             }
             : undefined
+          // Collect member session IDs before cleanup so we can clean up activity buffers after
+          const teamInfoForCleanup = findTeamBySession(db, registry, ctx.sessionID)
+          const memberSessions = teamInfoForCleanup
+            ? (db.query("SELECT session_id FROM team_member WHERE team_id = ?").all(teamInfoForCleanup.teamId) as Array<{ session_id: string }>).map(m => m.session_id)
+            : []
           const result = await executeTeamCleanup(deps, args, ctx.sessionID, undefined, undefined, undefined, config.mergeOnCleanup, undefined, approvePurge)
+          // Clean up activity buffers for team members after successful cleanup
+          if (!result.includes("uncommitted") && !args.purge) {
+            for (const sid of memberSessions) activityBuffer.remove(sid)
+          }
           const blocked = result.includes("uncommitted")
           const title = args.purge
             ? result.startsWith("No archived teams") ? "No archived teams to purge" : result.startsWith("Purge preview") ? "Purge confirmation required" : "Archived teams purged"

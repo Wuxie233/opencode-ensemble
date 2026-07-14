@@ -151,6 +151,14 @@ function openDrawer(name){
       h+='</div></div>';
     });
   }
+  // Activity timeline
+  h+='<div class="mt-4 pt-4 border-t border-base-800/50">';
+  h+='<div class="flex items-center justify-between mb-3">';
+  h+='<span class="text-txt-400 text-[10px] uppercase tracking-wider">Activity</span>';
+  h+='<button type="button" id="verbose-toggle" onclick="toggleVerbose()" aria-pressed="'+(verbose?'true':'false')+'" class="text-[10px] '+(verbose?'text-blue-400 border-blue-500/40 bg-blue-500/10':'text-txt-500 hover:text-txt-200 border-base-800')+' rounded px-1.5 py-[2px] transition-colors">verbose: '+(verbose?'on':'off')+'</button>';
+  h+='</div>';
+  h+='<div id="drawer-activity-list"><div class="text-txt-500 text-[12px]">Loading activity...</div></div>';
+  h+='</div>';
   var drawer=document.getElementById('drawer');
   drawer.innerHTML=h;
   drawer.classList.add('open');
@@ -159,6 +167,92 @@ function openDrawer(name){
   setBackgroundInert(true);
   drawer.focus();
   document.getElementById('drawer-bg').classList.add('open');
+  // Fetch activity for this agent's session
+  drawerActivity=null;drawerSession=null;
+  if(m.sessionId)fetchActivity(m.sessionId);
+  else rDrawerActivityUpdate();
+}
+
+function rDrawerActivityUpdate(){
+  var el=document.getElementById('drawer-activity-list');
+  if(!el)return;
+  if(!drawerActivity||!drawerActivity.length){
+    el.innerHTML='<div class="text-txt-500 text-[12px]">No activity recorded</div>';
+    return;
+  }
+  var html=drawerActivity.map(function(a){
+    var icon='\\u25CF',color='text-txt-500',label=a.type;
+    if(a.type==='tool_call'){icon='\\u25B8';color='text-blue-400';label=a.tool||'tool'}
+    if(a.type==='tool_result'){icon='\\u25B8';color=a.error?'text-red-400':'text-emerald-400';label=a.tool||'tool'}
+    if(a.type==='shell_command'){icon='$';color='text-amber-400';label='shell'}
+    if(a.type==='step'){icon='\\u2261';color='text-violet-400';label='step'}
+    if(a.type==='reasoning'){icon='\\u2726';color='text-violet-400';label='reasoning'}
+    if(a.type==='file'){icon='\\u25A3';color='text-cyan-400';label=a.filePath?a.filePath.split('/').pop():'file'}
+    if(a.type==='text'){icon='\\u00BB';color=a.role==='user'?'text-emerald-400':'text-blue-400';label=a.role==='user'?'prompt':'response'}
+    var ts=relT(a.timestamp);
+    if(!verbose){
+      return '<div class="flex items-center gap-2 py-1 border-b border-base-800/30">'+
+        '<span class="'+color+' text-[11px] shrink-0 font-mono">'+icon+'</span>'+
+        '<span class="text-[12px] text-txt-400 truncate flex-1">'+E(label)+'</span>'+
+        '<span class="text-[10px] text-txt-500 shrink-0">'+ts+'</span>'+
+        '</div>';
+    }
+    if(a.type==='reasoning'){
+      return '<details open class="py-2 border-b border-base-800/30">'+
+        '<summary class="flex items-center gap-2 cursor-pointer select-none hover:text-txt-100 transition-colors">'+
+        '<span class="'+color+' text-[11px] shrink-0 font-mono">'+icon+'</span>'+
+        '<span class="text-[12px] text-violet-300 font-medium">Reasoning</span>'+
+        '<span class="text-[10px] text-txt-500 ml-auto shrink-0">'+ts+'</span>'+
+        '</summary>'+
+        '<div class="mt-1.5 ml-5 text-[11px] text-violet-200/60 bg-violet-950/20 rounded-md p-2 border border-violet-800/30 overflow-x-auto whitespace-pre-wrap font-mono max-h-[200px] overflow-y-auto">'+E(a.reasoning||'')+'</div>'+
+        '</details>';
+    }
+    if(a.type==='file'){
+      var fname=a.filePath?a.filePath.split('/').pop():'file';
+      var fcontent=a.fileDiff||a.fileContent||'';
+      return '<details open class="py-2 border-b border-base-800/30">'+
+        '<summary class="flex items-center gap-2 cursor-pointer select-none hover:text-txt-100 transition-colors">'+
+        '<span class="'+color+' text-[11px] shrink-0 font-mono">'+icon+'</span>'+
+        '<span class="text-[12px] text-cyan-300 font-medium truncate flex-1">'+E(a.filePath||fname)+'</span>'+
+        '<span class="text-[10px] text-txt-500 shrink-0">'+ts+'</span>'+
+        '</summary>'+
+        (fcontent?'<div class="mt-1.5 ml-5 text-[11px] text-cyan-200/70 bg-cyan-950/20 rounded-md p-2 border border-cyan-800/30 overflow-x-auto whitespace-pre font-mono max-h-[300px] overflow-y-auto">'+E(fcontent)+'</div>':'')+
+        '</details>';
+    }
+    if(a.type==='text'){
+      return '<div class="py-2 border-b border-base-800/30">'+
+        '<div class="flex items-start gap-2">'+
+        '<span class="'+color+' text-[11px] mt-[1px] shrink-0 font-mono">'+icon+'</span>'+
+        '<div class="flex-1 min-w-0">'+
+        '<div class="text-[12px] '+(a.role==='user'?'text-emerald-300':'text-blue-300')+' font-medium">'+E(label)+'</div>'+
+        '<div class="text-[11px] text-txt-300 mt-1 md">'+md(a.text||'')+'</div>'+
+        '</div>'+
+        '<span class="text-[10px] text-txt-500 shrink-0">'+ts+'</span>'+
+        '</div></div>';
+    }
+    var title=a.title||a.tool||a.command||label;
+    var row='<div class="py-2 border-b border-base-800/30">';
+    row+='<div class="flex items-start gap-2">';
+    row+='<span class="'+color+' text-[11px] mt-[1px] shrink-0 font-mono">'+icon+'</span>';
+    row+='<div class="flex-1 min-w-0">';
+    row+='<div class="text-[12px] text-txt-200 font-medium">'+E(title)+'</div>';
+    if(a.input){row+='<div class="text-[11px] text-txt-300 mt-1.5 bg-base-900/60 rounded-md p-2 border border-base-700/40 overflow-x-auto font-mono whitespace-pre max-h-[200px] overflow-y-auto">'+E(a.input)+'</div>'}
+    if(a.output){row+='<div class="text-[11px] text-emerald-300/80 mt-1.5 bg-emerald-950/20 rounded-md p-2 border border-emerald-800/30 overflow-x-auto whitespace-pre max-h-[200px] overflow-y-auto">'+E(a.output)+'</div>'}
+    if(a.error){row+='<div class="text-[11px] text-red-400 mt-1.5 bg-red-950/20 rounded-md p-2 border border-red-800/30 overflow-x-auto">'+E(a.error)+'</div>'}
+    if(a.command){row+='<div class="text-[11px] text-amber-300 mt-1.5 bg-amber-950/20 rounded-md p-2 border border-amber-800/30 overflow-x-auto font-mono whitespace-pre">'+E(a.command)+'</div>'}
+    if(a.exitCode!==undefined||a.cost||a.tokensIn||a.tokensOut){
+      row+='<div class="flex flex-wrap gap-1.5 mt-1.5">';
+      if(a.exitCode!==undefined){row+=chip('exit: '+a.exitCode,'muted')}
+      if(a.cost){row+=chip('$'+a.cost.toFixed(4),'gray')}
+      if(a.tokensIn||a.tokensOut){row+=chip((a.tokensIn||0)+' in / '+(a.tokensOut||0)+' out','muted')}
+      row+='</div>';
+    }
+    row+='</div>';
+    row+='<span class="text-[10px] text-txt-500 shrink-0">'+ts+'</span>';
+    row+='</div></div>';
+    return row;
+  }).join('');
+  el.innerHTML=html;
 }
 
 function closeDrawer(){

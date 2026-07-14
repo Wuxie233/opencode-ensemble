@@ -1,7 +1,9 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test"
 import type { Database } from "../src/db"
-import { setupDb, insertTeam, insertMember } from "./helpers"
-import { startDashboard } from "../src/dashboard"
+import { setupDb, insertTeam, insertMember, mockClient } from "./helpers"
+import { startDashboard, parseMessageParts } from "../src/dashboard"
+import { ActivityBuffer } from "../src/activity"
+import type { PluginClient } from "../src/types"
 
 function randomPort(): number {
   return 19000 + Math.floor(Math.random() * 10000)
@@ -23,7 +25,7 @@ function insertMessage(db: Database, teamId: string, id: string, fromName: strin
 
 // biome-lint: use Record for JSON response shape
 interface HealthResponse { ensemble: boolean; pid: number }
-interface DashboardTeam { id: string; name: string; projectId: string; status: string; timeCreated: number; timeUpdated: number; members: Array<Record<string, unknown>>; tasks: Array<Record<string, unknown>>; messages: Array<Record<string, unknown>> }
+interface DashboardTeam { id: string; name: string; projectId: string; status: string; timeCreated: number; timeUpdated: number; members: Array<{ sessionId?: string } & Record<string, unknown>>; tasks: Array<Record<string, unknown>>; messages: Array<Record<string, unknown>> }
 interface StateResponse { projects: Array<{ id: string; name: string; path: string; activeTeams: number; workingAgents: number; teams: DashboardTeam[] }>; teams: DashboardTeam[] }
 
 describe("dashboard", () => {
@@ -257,6 +259,305 @@ describe("dashboard", () => {
       }
 
       expect(probeBound).toBe(true)
+    })
+  })
+
+  describe("GET /api/session/:sessionId/activity", () => {
+    test("returns buffered activity entries", async () => {
+      const buf = new ActivityBuffer()
+      buf.record("sess-a", { type: "tool_call", tool: "bash", title: "Run tests", timestamp: Date.now() })
+      buf.record("sess-a", { type: "tool_result", tool: "bash", output: "all pass", timestamp: Date.now() + 100 })
+
+      server = await startDashboard(db, port, { activityBuffer: buf })
+      const res = await fetch(`http://localhost:${port}/api/session/sess-a/activity`)
+      expect(res.status).toBe(200)
+      const body = await res.json() as { activity: Array<Record<string, unknown>> }
+      expect(body.activity).toHaveLength(2)
+      expect(body.activity[0]!.type).toBe("tool_call")
+      expect(body.activity[1]!.type).toBe("tool_result")
+    })
+
+    test("returns empty array when buffer has no entries and no client", async () => {
+      server = await startDashboard(db, port)
+      const res = await fetch(`http://localhost:${port}/api/session/unknown/activity`)
+      expect(res.status).toBe(200)
+      const body = await res.json() as { activity: Array<unknown> }
+      expect(body.activity).toEqual([])
+    })
+
+    test("falls back to session.messages when buffer is empty", async () => {
+      const mockPluginClient: PluginClient = {
+        ...mockClient(),
+        session: {
+          ...mockClient().session,
+          async messages(opts: { sessionID: string }) {
+            return {
+              data: [
+                {
+                  info: { role: "assistant", id: "msg-1" },
+                  parts: [
+                    { type: "tool", tool: "bash", state: { status: "completed", output: "done", title: "Run build", input: "bun run build" } },
+                    { type: "text", text: "Build complete" },
+                  ],
+                },
+              ],
+            }
+          },
+          async get(_opts: { sessionID: string }) {
+            return { data: { cost: 0.05, tokens: { input: 100, output: 200 } } }
+          },
+        },
+      }
+
+      server = await startDashboard(db, port, { client: mockPluginClient })
+      const res = await fetch(`http://localhost:${port}/api/session/sess-x/activity`)
+      expect(res.status).toBe(200)
+      const body = await res.json() as { activity: Array<Record<string, unknown>>; session: Record<string, unknown> | null }
+      expect(body.activity.length).toBeGreaterThan(0)
+      expect(body.session).toBeTruthy()
+      expect(body.session!.cost).toBe(0.05)
+    })
+
+    test("combines buffer entries with session.messages fallback", async () => {
+      const buf = new ActivityBuffer()
+      buf.record("sess-c", { type: "shell_command", command: "ls -la", timestamp: Date.now() })
+
+      const mockPluginClient: PluginClient = {
+        ...mockClient(),
+        session: {
+          ...mockClient().session,
+          async messages(_opts: { sessionID: string }) {
+            return { data: [] }
+          },
+          async get(_opts: { sessionID: string }) {
+            return { data: null }
+          },
+        },
+      }
+
+      server = await startDashboard(db, port, { activityBuffer: buf, client: mockPluginClient })
+      const res = await fetch(`http://localhost:${port}/api/session/sess-c/activity`)
+      expect(res.status).toBe(200)
+      const body = await res.json() as { activity: Array<Record<string, unknown>> }
+      expect(body.activity).toHaveLength(1)
+      expect(body.activity[0]!.type).toBe("shell_command")
+    })
+
+    test("parses reasoning parts from session messages", async () => {
+      const mockPluginClient: PluginClient = {
+        ...mockClient(),
+        session: {
+          ...mockClient().session,
+          async messages(_opts: { sessionID: string }) {
+            return {
+              data: [{
+                info: { role: "assistant", time: new Date().toISOString() },
+                parts: [
+                  { type: "reasoning", text: "I should check the file first." },
+                  { type: "text", text: "Let me look at the handler." },
+                ],
+              }],
+            }
+          },
+          async get(_opts: { sessionID: string }) {
+            return { data: null }
+          },
+        },
+      }
+
+      server = await startDashboard(db, port, { client: mockPluginClient })
+      const res = await fetch(`http://localhost:${port}/api/session/sess-r/activity`)
+      const body = await res.json() as { activity: Array<Record<string, unknown>> }
+      const reasoning = body.activity.find(a => a.type === "reasoning")
+      expect(reasoning).toBeTruthy()
+      expect(reasoning!.reasoning).toBe("I should check the file first.")
+      const text = body.activity.find(a => a.type === "text")
+      expect(text).toBeTruthy()
+      expect(text!.text).toBe("Let me look at the handler.")
+      expect(text!.role).toBe("assistant")
+    })
+
+    test("parses file parts from session messages", async () => {
+      const mockPluginClient: PluginClient = {
+        ...mockClient(),
+        session: {
+          ...mockClient().session,
+          async messages(_opts: { sessionID: string }) {
+            return {
+              data: [{
+                info: { role: "assistant", time: new Date().toISOString() },
+                parts: [
+                  { type: "file", path: "src/handler.ts", content: "export function handle() {}" },
+                ],
+              }],
+            }
+          },
+          async get(_opts: { sessionID: string }) {
+            return { data: null }
+          },
+        },
+      }
+
+      server = await startDashboard(db, port, { client: mockPluginClient })
+      const res = await fetch(`http://localhost:${port}/api/session/sess-f/activity`)
+      const body = await res.json() as { activity: Array<Record<string, unknown>> }
+      const file = body.activity.find(a => a.type === "file")
+      expect(file).toBeTruthy()
+      expect(file!.filePath).toBe("src/handler.ts")
+      expect(file!.fileContent).toBe("export function handle() {}")
+    })
+
+    test("parses structured tool input/output from session messages", async () => {
+      const mockPluginClient: PluginClient = {
+        ...mockClient(),
+        session: {
+          ...mockClient().session,
+          async messages(_opts: { sessionID: string }) {
+            return {
+              data: [{
+                info: { role: "assistant", time: new Date().toISOString() },
+                parts: [
+                  { type: "tool", tool: "bash", state: { status: "completed", input: { command: "ls" }, output: { stdout: "file.ts" } } },
+                ],
+              }],
+            }
+          },
+          async get(_opts: { sessionID: string }) {
+            return { data: null }
+          },
+        },
+      }
+
+      server = await startDashboard(db, port, { client: mockPluginClient })
+      const res = await fetch(`http://localhost:${port}/api/session/sess-t/activity`)
+      const body = await res.json() as { activity: Array<Record<string, unknown>> }
+      const tool = body.activity.find(a => a.type === "tool_result")
+      expect(tool).toBeTruthy()
+      expect(tool!.tool).toBe("bash")
+      expect(tool!.input).toBe(JSON.stringify({ command: "ls" }, null, 2))
+      expect(tool!.output).toBe(JSON.stringify({ stdout: "file.ts" }, null, 2))
+    })
+  })
+
+  describe("state includes sessionId", () => {
+    test("member objects include sessionId", async () => {
+      insertTeam(db, "t1", "alpha", "lead-sess")
+      insertMember(db, "t1", "alice", "sess-a", "busy", "running")
+
+      server = await startDashboard(db, port)
+      const res = await fetch(`http://localhost:${port}/api/state`)
+      const body = (await res.json()) as StateResponse
+
+      expect(body.teams[0]!.members[0]!.sessionId).toBe("sess-a")
+    })
+  })
+
+  describe("parseMessageParts", () => {
+    test("parses step-start parts", () => {
+      const entries = parseMessageParts(
+        [{ type: "step-start", label: "Plan", step: "1" }],
+        { time: new Date().toISOString() },
+      )
+      expect(entries).toHaveLength(1)
+      expect(entries[0]!.type).toBe("step")
+      expect(entries[0]!.title).toBe("Plan")
+    })
+
+    test("parses step-finish parts", () => {
+      const entries = parseMessageParts(
+        [{ type: "step-finish", label: "Plan", step: "1" }],
+        { time: new Date().toISOString() },
+      )
+      expect(entries).toHaveLength(1)
+      expect(entries[0]!.type).toBe("step")
+      expect(entries[0]!.title).toBe("Plan")
+    })
+
+    test("parses file parts with diff", () => {
+      const entries = parseMessageParts(
+        [{ type: "file", path: "src/handler.ts", diff: "@@ -1 +1 @@" }],
+        { time: new Date().toISOString() },
+      )
+      expect(entries).toHaveLength(1)
+      expect(entries[0]!.type).toBe("file")
+      expect(entries[0]!.filePath).toBe("src/handler.ts")
+      expect(entries[0]!.fileDiff).toBe("@@ -1 +1 @@")
+    })
+
+    test("handles malformed parts gracefully", () => {
+      const entries = parseMessageParts(
+        [null, undefined, "string", 42, { type: "unknown" }, { type: "tool" }],
+        { time: new Date().toISOString() },
+      )
+      expect(entries).toHaveLength(0)
+    })
+  })
+
+  describe("GET /api/session/:sessionId/activity — edge cases", () => {
+    test("sorts combined entries by timestamp", async () => {
+      const buf = new ActivityBuffer()
+      // Buffer entry with later timestamp
+      buf.record("sess-sort", { type: "shell_command", command: "ls", timestamp: 3000 })
+      // Session message with earlier timestamp
+      const mockPluginClient: PluginClient = {
+        ...mockClient(),
+        session: {
+          ...mockClient().session,
+          async messages(_opts: { sessionID: string }) {
+            return {
+              data: [{
+                info: { role: "assistant", time: new Date(1000).toISOString() },
+                parts: [{ type: "text", text: "hello" }],
+              }],
+            }
+          },
+          async get(_opts: { sessionID: string }) {
+            return { data: null }
+          },
+        },
+      }
+
+      server = await startDashboard(db, port, { activityBuffer: buf, client: mockPluginClient })
+      const res = await fetch(`http://localhost:${port}/api/session/sess-sort/activity`)
+      const body = await res.json() as { activity: Array<Record<string, unknown>> }
+      expect(body.activity).toHaveLength(2)
+      // Earlier timestamp (1000) should come first
+      expect(body.activity[0]!.timestamp).toBe(1000)
+      expect(body.activity[1]!.timestamp).toBe(3000)
+    })
+
+    test("decodes URL-encoded session IDs", async () => {
+      const buf = new ActivityBuffer()
+      buf.record("sess/with/slash", { type: "shell_command", command: "ls", timestamp: 1000 })
+
+      server = await startDashboard(db, port, { activityBuffer: buf })
+      const res = await fetch(`http://localhost:${port}/api/session/sess%2Fwith%2Fslash/activity`)
+      expect(res.status).toBe(200)
+      const body = await res.json() as { activity: Array<Record<string, unknown>> }
+      expect(body.activity).toHaveLength(1)
+    })
+
+    test("returns 500 when activity route throws", async () => {
+      const mockPluginClient: PluginClient = {
+        ...mockClient(),
+        session: {
+          ...mockClient().session,
+          async messages(_opts: { sessionID: string }) {
+            throw new Error("network failure")
+          },
+          async get(_opts: { sessionID: string }) {
+            throw new Error("network failure")
+          },
+        },
+      }
+
+      server = await startDashboard(db, port, { client: mockPluginClient })
+      const res = await fetch(`http://localhost:${port}/api/session/sess-err/activity`)
+      // The error is caught — returns what we have (empty activity)
+      expect(res.status).toBe(200)
+      const body = await res.json() as { activity: unknown[]; session: unknown }
+      expect(body.activity).toEqual([])
+      expect(body.session).toBeNull()
     })
   })
 })

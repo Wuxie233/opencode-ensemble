@@ -144,4 +144,54 @@ describe("dashboard UI contract", () => {
   test("agent cards do not dim operational text with whole-card opacity", () => {
     expect(DASHBOARD_JS_RENDER).not.toContain("opacity-50")
   })
+
+  test("drawer includes activity timeline section", () => {
+    expect(DASHBOARD_JS_RENDER).toContain("drawer-activity-list")
+    expect(DASHBOARD_JS_RENDER).toContain("rDrawerActivityUpdate")
+    expect(DASHBOARD_JS_RENDER).toContain("fetchActivity")
+  })
+
+  test("drawer has verbose toggle control", () => {
+    expect(DASHBOARD_JS_EVENTS).toContain("function toggleVerbose")
+    expect(DASHBOARD_JS_RENDER).toContain("toggleVerbose()")
+    expect(DASHBOARD_JS_RENDER).toContain("id=\"verbose-toggle\"")
+    expect(DASHBOARD_JS_RENDER).toContain("aria-pressed")
+    expect(DASHBOARD_JS_RENDER).toContain("verbose:")
+  })
+
+  test("activity fetch uses relative path", () => {
+    expect(DASHBOARD_JS_EVENTS).toContain("fetch('api/session/'")
+    expect(DASHBOARD_JS_EVENTS).not.toContain("fetch('/api/session/'")
+  })
+
+  test("verbose preference persists to localStorage", () => {
+    expect(DASHBOARD_JS_CORE).toContain("localStorage.getItem('ensemble-verbose')")
+    expect(DASHBOARD_JS_EVENTS).toContain("localStorage.setItem('ensemble-verbose'")
+  })
+
+  test("v keyboard shortcut toggles verbose", () => {
+    expect(DASHBOARD_JS_EVENTS).toContain("e.key==='v'")
+    expect(DASHBOARD_JS_EVENTS).toContain("toggleVerbose()")
+  })
+
+  test("v shortcut appears in shortcuts overlay", () => {
+    expect(DASHBOARD_HEAD).toContain(">v</kbd>")
+    expect(DASHBOARD_HEAD).toContain("Toggle verbose")
+  })
+
+  test("activity timeline renders reasoning blocks", () => {
+    expect(DASHBOARD_JS_RENDER).toContain("reasoning")
+    expect(DASHBOARD_JS_RENDER).toContain("Reasoning")
+  })
+
+  test("activity timeline renders file parts", () => {
+    expect(DASHBOARD_JS_RENDER).toContain("file")
+    expect(DASHBOARD_JS_RENDER).toContain("filePath")
+  })
+
+  test("activity timeline renders text prompts and responses", () => {
+    expect(DASHBOARD_JS_RENDER).toContain("text")
+    expect(DASHBOARD_JS_RENDER).toContain("prompt")
+    expect(DASHBOARD_JS_RENDER).toContain("response")
+  })
 })
