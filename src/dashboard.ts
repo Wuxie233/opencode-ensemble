@@ -229,9 +229,9 @@ export function parseMessageParts(parts: unknown[], msgInfo: unknown): ActivityE
     } else if (p.type === "text" && p.text) {
       entries.push({ type: "text", text: p.text, role: info.role, timestamp })
     } else if (p.type === "step-start") {
-      entries.push({ type: "step", title: p.label ?? p.step ?? "step", timestamp })
+      entries.push({ type: "step", title: p.label ?? p.step ?? "步骤", timestamp })
     } else if (p.type === "step-finish") {
-      entries.push({ type: "step", title: p.label ?? p.step ?? "step complete", timestamp })
+      entries.push({ type: "step", title: p.label ?? p.step ?? "步骤完成", timestamp })
     }
   }
   return entries
@@ -296,7 +296,7 @@ function handleDashboardRequest(
     handleActivityRoute(sessionId, options, res).catch(() => {
       if (!res.headersSent) {
         res.writeHead(500, { "Content-Type": "application/json" })
-        res.end(JSON.stringify({ error: "Failed to fetch activity" }))
+        res.end(JSON.stringify({ error: "获取活动记录失败" }))
       }
     })
     return
@@ -309,7 +309,7 @@ function handleDashboardRequest(
   }
 
   res.writeHead(404, { "Content-Type": "text/plain" })
-  res.end("Not Found")
+  res.end("未找到页面")
 }
 
 function toDashboardServer(server: Server): DashboardServer {

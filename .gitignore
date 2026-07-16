@@ -34,6 +34,7 @@ logs
 
 # OpenCode local state
 .opencode/
+.codegraph/
 .superpowers/
 .worktrees/
 dogfood-output/

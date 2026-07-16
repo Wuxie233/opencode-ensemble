@@ -1,6 +1,6 @@
 /** Dashboard HTML head and body structure. JS is appended separately. */
 export const DASHBOARD_HEAD = `<!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
@@ -55,7 +55,7 @@ select{-webkit-appearance:none;appearance:none;background-image:url("data:image/
 <span id="crumb" class="text-[11px] text-txt-500 font-mono truncate"></span>
 </div>
 <div class="flex items-center gap-2 sm:gap-4 shrink-0">
-<div id="hring" class="w-6 h-6 rounded-full" title="Team health"></div>
+<div id="hring" class="w-6 h-6 rounded-full" title="团队健康状态"></div>
 <div class="flex items-center gap-2">
 <span id="clk" class="text-[11px] text-txt-400 font-mono"></span>
 <span class="text-base-700">·</span>
@@ -68,38 +68,38 @@ select{-webkit-appearance:none;appearance:none;background-image:url("data:image/
 <main class="pt-[76px] px-4 pb-16">
 <div id="empty" class="hidden flex-col items-center justify-center h-[70vh] gap-3">
 <div class="w-12 h-12 rounded-full border-2 border-base-700 flex items-center justify-center mb-2"><svg class="w-5 h-5 text-txt-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 4.5v15m7.5-7.5h-15"/></svg></div>
-<div class="text-txt-400 text-sm">Waiting for a team</div>
-<div class="text-txt-500 text-[11px]">Run <code class="px-1.5 py-0.5 bg-base-900 rounded text-txt-300 font-mono text-[11px]">team_create</code> in OpenCode to get started</div>
+<div class="text-txt-400 text-sm">等待团队创建</div>
+<div class="text-txt-500 text-[11px]">在 OpenCode 中运行 <code class="px-1.5 py-0.5 bg-base-900 rounded text-txt-300 font-mono text-[11px]">team_create</code> 即可开始</div>
 </div>
 <div id="content" class="hidden max-w-[1720px] mx-auto grid grid-cols-1 lg:grid-cols-[260px_minmax(0,1fr)] gap-4 items-start">
-<div id="project-rail" hidden class="lg:sticky lg:top-[88px]"><button id="nav-expand" type="button" aria-label="Show project navigation" aria-controls="projects" aria-expanded="false" class="h-8 w-8 rounded border border-base-800 text-txt-500 hover:text-txt-200 hover:border-base-700 transition-colors">&gt;</button></div>
-<aside id="projects" aria-label="Project navigation" class="bg-base-950/60 border-r border-base-800/70 pr-3 lg:sticky lg:top-[88px]"></aside>
+<div id="project-rail" hidden class="lg:sticky lg:top-[88px]"><button id="nav-expand" type="button" aria-label="显示项目导航" aria-controls="projects" aria-expanded="false" class="h-8 w-8 rounded border border-base-800 text-txt-500 hover:text-txt-200 hover:border-base-700 transition-colors">&gt;</button></div>
+<aside id="projects" aria-label="项目导航" class="bg-base-950/60 border-r border-base-800/70 pr-3 lg:sticky lg:top-[88px]"></aside>
 <div class="min-w-0">
-<section id="attention" aria-label="Team attention" class="mb-3"></section>
+<section id="attention" aria-label="团队关注事项" class="mb-3"></section>
 <div class="grid grid-cols-1 xl:grid-cols-[minmax(360px,1.35fr)_minmax(320px,.8fr)] gap-4 items-start">
-<section aria-label="Agent roster"><div id="agents" class="grid gap-2" style="grid-template-columns:repeat(auto-fill,minmax(300px,1fr))"></div></section>
+<section aria-label="智能体列表"><div id="agents" class="grid gap-2" style="grid-template-columns:repeat(auto-fill,minmax(min(300px,100%),1fr))"></div></section>
 <div class="grid grid-cols-1 gap-4">
-<section aria-label="Task board"><div id="tasks" class="bg-base-900 rounded-lg p-3 border border-base-800/50"></div></section>
-<section aria-label="Activity feed"><div id="activity" class="bg-base-900 rounded-lg p-3 border border-base-800/50"></div></section>
+<section aria-label="任务看板"><div id="tasks" class="bg-base-900 rounded-lg p-3 border border-base-800/50"></div></section>
+<section aria-label="活动动态"><div id="activity" class="bg-base-900 rounded-lg p-3 border border-base-800/50"></div></section>
 </div>
 </div>
 </div>
 </div>
 </main>
-<div id="tl" aria-label="Event timeline" class="fixed bottom-0 inset-x-0 h-10 bg-base-900/90 backdrop-blur border-t border-base-800 px-4 flex items-center z-40 overflow-x-auto scroll hidden"></div>
+<div id="tl" aria-label="事件时间线" class="fixed bottom-0 inset-x-0 h-10 bg-base-900/90 backdrop-blur border-t border-base-800 px-4 flex items-center z-40 overflow-x-auto scroll hidden"></div>
 <div id="sco" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="shortcuts-title" tabindex="-1" onclick="closeShortcuts()">
 <div class="bg-base-900 border border-base-800 rounded-lg p-6 max-w-sm" onclick="event.stopPropagation()">
-<div id="shortcuts-title" class="text-txt-200 font-semibold text-sm mb-4">Keyboard Shortcuts</div>
+<div id="shortcuts-title" class="text-txt-200 font-semibold text-sm mb-4">键盘快捷键</div>
 <div class="grid grid-cols-2 gap-y-2 gap-x-6 text-[12px]">
-<div><kbd class="px-1.5 py-0.5 bg-base-800 rounded font-mono text-txt-300 text-[11px]">j</kbd> <span class="text-txt-400">Next agent</span></div>
-<div><kbd class="px-1.5 py-0.5 bg-base-800 rounded font-mono text-txt-300 text-[11px]">k</kbd> <span class="text-txt-400">Prev agent</span></div>
-<div><kbd class="px-1.5 py-0.5 bg-base-800 rounded font-mono text-txt-300 text-[11px]">Enter</kbd> <span class="text-txt-400">Expand agent</span></div>
-<div><kbd class="px-1.5 py-0.5 bg-base-800 rounded font-mono text-txt-300 text-[11px]">Esc</kbd> <span class="text-txt-400">Collapse all</span></div>
-<div><kbd class="px-1.5 py-0.5 bg-base-800 rounded font-mono text-txt-300 text-[11px]">v</kbd> <span class="text-txt-400">Toggle verbose</span></div>
-<div><kbd class="px-1.5 py-0.5 bg-base-800 rounded font-mono text-txt-300 text-[11px]">1-9</kbd> <span class="text-txt-400">Switch team</span></div>
-<div><kbd class="px-1.5 py-0.5 bg-base-800 rounded font-mono text-txt-300 text-[11px]">?</kbd> <span class="text-txt-400">This help</span></div>
+<div><kbd class="px-1.5 py-0.5 bg-base-800 rounded font-mono text-txt-300 text-[11px]">j</kbd> <span class="text-txt-400">下一个智能体</span></div>
+<div><kbd class="px-1.5 py-0.5 bg-base-800 rounded font-mono text-txt-300 text-[11px]">k</kbd> <span class="text-txt-400">上一个智能体</span></div>
+<div><kbd class="px-1.5 py-0.5 bg-base-800 rounded font-mono text-txt-300 text-[11px]">Enter</kbd> <span class="text-txt-400">展开智能体</span></div>
+<div><kbd class="px-1.5 py-0.5 bg-base-800 rounded font-mono text-txt-300 text-[11px]">Esc</kbd> <span class="text-txt-400">全部收起</span></div>
+<div><kbd class="px-1.5 py-0.5 bg-base-800 rounded font-mono text-txt-300 text-[11px]">v</kbd> <span class="text-txt-400">切换详细模式</span></div>
+<div><kbd class="px-1.5 py-0.5 bg-base-800 rounded font-mono text-txt-300 text-[11px]">1-9</kbd> <span class="text-txt-400">切换团队</span></div>
+<div><kbd class="px-1.5 py-0.5 bg-base-800 rounded font-mono text-txt-300 text-[11px]">?</kbd> <span class="text-txt-400">查看帮助</span></div>
 </div>
 </div>
 </div>
 <div id="drawer-bg" onclick="closeDrawer()"></div>
-<div id="drawer" class="scroll p-4" tabindex="-1" inert role="dialog" aria-modal="true" aria-labelledby="drawer-title" aria-hidden="true"><h2 id="drawer-title" class="sr-only">Agent detail</h2></div>`;
+<div id="drawer" class="scroll p-4" tabindex="-1" inert role="dialog" aria-modal="true" aria-labelledby="drawer-title" aria-hidden="true"><h2 id="drawer-title" class="sr-only">智能体详情</h2></div>`;

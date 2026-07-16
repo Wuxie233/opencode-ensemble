@@ -7,7 +7,7 @@ function toggleVerbose(){
   try{localStorage.setItem('ensemble-verbose',verbose?'1':'0')}catch(e){}
   var btn=document.getElementById('verbose-toggle');
   if(btn){
-    btn.textContent='verbose: '+(verbose?'on':'off');
+    btn.textContent='详细模式：'+(verbose?'开':'关');
     btn.setAttribute('aria-pressed',verbose?'true':'false');
     btn.className='text-[10px] '+(verbose?'text-blue-400 border-blue-500/40 bg-blue-500/10':'text-txt-500 hover:text-txt-200 border-base-800')+' rounded px-1.5 py-[2px] transition-colors';
   }
@@ -21,10 +21,12 @@ async function fetchActivity(sessionId){
     var res=await fetch('api/session/'+encodeURIComponent(sessionId)+'/activity');
     var data=await res.json();
     if(gen!==fetchActivityGen)return;
+    if(!res.ok)throw new Error(data.error||String(res.status));
     drawerActivity=data.activity||[];
     drawerSession=data.session||null;
+    drawerActivityError=false;
     rDrawerActivityUpdate();
-  }catch{if(gen!==fetchActivityGen)return;drawerActivity=[];drawerSession=null;rDrawerActivityUpdate()}
+  }catch{if(gen!==fetchActivityGen)return;drawerActivity=[];drawerSession=null;drawerActivityError=true;rDrawerActivityUpdate()}
 }
 
 function applyNavCollapse(){
@@ -54,7 +56,7 @@ function selectTeam(id){selId=id;selCard=-1;render()}
 
 function conn(ok){
   document.getElementById('cd').className='w-[7px] h-[7px] rounded-full '+(ok?'bg-emerald-500 pulse':'bg-red-500');
-  document.getElementById('ct').textContent=ok?D(Date.now()-pollT)+' ago':'reconnecting to dashboard state';
+  document.getElementById('ct').textContent=ok?(Date.now()-pollT<10000?'刚刚更新':D(Date.now()-pollT)+'前更新'):'正在重新连接仪表盘';
 }
 
 async function poll(){try{S=await(await fetch('api/state')).json();fails=0;pollT=Date.now();conn(true);render()}catch{if(++fails>=3)conn(false)}}

@@ -21,13 +21,14 @@ function contrastRatio(foreground: string, background: string): number {
 
 describe("dashboard UI contract", () => {
   test("HTML shell exposes triage cockpit regions", () => {
+    expect(DASHBOARD_HEAD).toContain('<html lang="zh-CN">')
     expect(DASHBOARD_HEAD).toContain('id="attention"')
-    expect(DASHBOARD_HEAD).toContain('aria-label="Team attention"')
-    expect(DASHBOARD_HEAD).toContain('aria-label="Project navigation"')
-    expect(DASHBOARD_HEAD).toContain('aria-label="Agent roster"')
-    expect(DASHBOARD_HEAD).toContain('aria-label="Task board"')
-    expect(DASHBOARD_HEAD).toContain('aria-label="Activity feed"')
-    expect(DASHBOARD_HEAD).toContain('aria-label="Event timeline"')
+    expect(DASHBOARD_HEAD).toContain('aria-label="团队关注事项"')
+    expect(DASHBOARD_HEAD).toContain('aria-label="项目导航"')
+    expect(DASHBOARD_HEAD).toContain('aria-label="智能体列表"')
+    expect(DASHBOARD_HEAD).toContain('aria-label="任务看板"')
+    expect(DASHBOARD_HEAD).toContain('aria-label="活动动态"')
+    expect(DASHBOARD_HEAD).toContain('aria-label="事件时间线"')
     expect(DASHBOARD_HEAD).toContain('id="drawer-title"')
     expect(DASHBOARD_HEAD).toContain('id="drawer" class="scroll p-4" tabindex="-1" inert')
   })
@@ -36,6 +37,7 @@ describe("dashboard UI contract", () => {
     expect(DASHBOARD_HEAD).toContain("px-3 sm:px-4")
     expect(DASHBOARD_HEAD).toContain("gap-2 sm:gap-3 min-w-0 flex-1")
     expect(DASHBOARD_HEAD).toContain("overflow-x-auto scroll whitespace-nowrap")
+    expect(DASHBOARD_HEAD).toContain("minmax(min(300px,100%),1fr)")
   })
 
   test("project navigation uses docs-style outline semantics", () => {
@@ -60,7 +62,7 @@ describe("dashboard UI contract", () => {
     expect(DASHBOARD_HEAD).toContain('id="project-rail"')
     expect(DASHBOARD_HEAD).toContain('id="nav-expand"')
     expect(DASHBOARD_JS_RENDER).toContain('id="nav-toggle"')
-    expect(DASHBOARD_JS_RENDER).toContain('aria-label="Hide project navigation"')
+    expect(DASHBOARD_JS_RENDER).toContain('aria-label="隐藏项目导航"')
     expect(DASHBOARD_HEAD).toContain("#content.nav-collapsed")
     expect(DASHBOARD_HEAD).toContain("#projects[hidden]")
     expect(DASHBOARD_HEAD).toContain("#project-rail[hidden]")
@@ -86,7 +88,7 @@ describe("dashboard UI contract", () => {
 
   test("attention renderer exposes urgent triage copy", () => {
     expect(DASHBOARD_JS_RENDER).toContain("function rAttention")
-    expect(DASHBOARD_JS_RENDER).toContain("Needs attention")
+    expect(DASHBOARD_JS_RENDER).toContain("需要关注")
   })
 
   test("keyboard and accessibility hooks are present", () => {
@@ -120,7 +122,7 @@ describe("dashboard UI contract", () => {
 
   test("agent drawer exposes named close control and modal focus handling", () => {
     expect(DASHBOARD_JS_RENDER).toContain('id="drawer-close"')
-    expect(DASHBOARD_JS_RENDER).toContain('aria-label="Close agent detail"')
+    expect(DASHBOARD_JS_RENDER).toContain('aria-label="关闭智能体详情"')
     expect(DASHBOARD_JS_RENDER).toContain("setBackgroundInert(true)")
     expect(DASHBOARD_JS_RENDER).toContain("drawer.inert=false")
     expect(DASHBOARD_JS_RENDER).toContain("drawer.inert=true")
@@ -156,7 +158,7 @@ describe("dashboard UI contract", () => {
     expect(DASHBOARD_JS_RENDER).toContain("toggleVerbose()")
     expect(DASHBOARD_JS_RENDER).toContain("id=\"verbose-toggle\"")
     expect(DASHBOARD_JS_RENDER).toContain("aria-pressed")
-    expect(DASHBOARD_JS_RENDER).toContain("verbose:")
+    expect(DASHBOARD_JS_RENDER).toContain("详细模式：")
   })
 
   test("activity fetch uses relative path", () => {
@@ -176,12 +178,12 @@ describe("dashboard UI contract", () => {
 
   test("v shortcut appears in shortcuts overlay", () => {
     expect(DASHBOARD_HEAD).toContain(">v</kbd>")
-    expect(DASHBOARD_HEAD).toContain("Toggle verbose")
+    expect(DASHBOARD_HEAD).toContain("切换详细模式")
   })
 
   test("activity timeline renders reasoning blocks", () => {
     expect(DASHBOARD_JS_RENDER).toContain("reasoning")
-    expect(DASHBOARD_JS_RENDER).toContain("Reasoning")
+    expect(DASHBOARD_JS_RENDER).toContain("推理过程")
   })
 
   test("activity timeline renders file parts", () => {
@@ -191,7 +193,50 @@ describe("dashboard UI contract", () => {
 
   test("activity timeline renders text prompts and responses", () => {
     expect(DASHBOARD_JS_RENDER).toContain("text")
-    expect(DASHBOARD_JS_RENDER).toContain("prompt")
-    expect(DASHBOARD_JS_RENDER).toContain("response")
+    expect(DASHBOARD_JS_RENDER).toContain("提示词")
+    expect(DASHBOARD_JS_RENDER).toContain("响应")
+  })
+
+  test("fixed dashboard copy and known enum labels are Simplified Chinese", () => {
+    expect(DASHBOARD_HEAD).toContain("等待团队创建")
+    expect(DASHBOARD_HEAD).toContain("键盘快捷键")
+    expect(DASHBOARD_JS_CORE).toContain("function enumLabel")
+    expect(DASHBOARD_JS_CORE).toContain("工作中")
+    expect(DASHBOARD_JS_CORE).toContain("正在停止")
+    expect(DASHBOARD_JS_CORE).toContain("已超时")
+    expect(DASHBOARD_JS_CORE).toContain("高")
+    expect(DASHBOARD_JS_RENDER).toContain("暂无任务")
+    expect(DASHBOARD_JS_RENDER).toContain("等待智能体消息")
+  })
+
+  test("relative and duration time use Chinese units", () => {
+    expect(DASHBOARD_JS_CORE).toContain("return'刚刚'")
+    expect(DASHBOARD_JS_EVENTS).toContain("'刚刚更新'")
+    expect(DASHBOARD_JS_CORE).toContain("秒前")
+    expect(DASHBOARD_JS_CORE).toContain("分钟前")
+    expect(DASHBOARD_JS_CORE).toContain("小时前")
+    expect(DASHBOARD_JS_CORE).toContain("天前")
+    expect(DASHBOARD_JS_CORE).toContain("秒")
+    expect(DASHBOARD_JS_CORE).toContain("分钟")
+    expect(DASHBOARD_JS_CORE).toContain("小时")
+  })
+
+  test("runtime-provided content remains escaped but otherwise verbatim", () => {
+    expect(DASHBOARD_JS_RENDER).toContain("E(p.name||p.path||p.id)")
+    expect(DASHBOARD_JS_RENDER).toContain("E(t.name)")
+    expect(DASHBOARD_JS_RENDER).toContain("E(m.name)")
+    expect(DASHBOARD_JS_RENDER).toContain("E(m.agent)")
+    expect(DASHBOARD_JS_RENDER).toContain("E(m.model)")
+    expect(DASHBOARD_JS_RENDER).toContain("md(m.prompt)")
+    expect(DASHBOARD_JS_RENDER).toContain("md(am.content)")
+    expect(DASHBOARD_JS_RENDER).toContain("E(a.error)")
+    expect(DASHBOARD_JS_RENDER).toContain("E(a.command)")
+    expect(DASHBOARD_JS_RENDER).toContain("E(fcontent)")
+  })
+
+  test("activity drawer exposes localized loading and error states", () => {
+    expect(DASHBOARD_JS_RENDER).toContain("正在加载活动记录")
+    expect(DASHBOARD_JS_RENDER).toContain("活动记录加载失败")
+    expect(DASHBOARD_JS_EVENTS).toContain("drawerActivityError")
   })
 })

@@ -1,11 +1,13 @@
 /** Dashboard JS — utilities, data helpers, and state management. */
 export const DASHBOARD_JS_CORE = `
-let S=null,selId=null,selProjectId=null,fails=0,pollT=Date.now(),prevMC=0,selCard=-1,navCollapsed=false,verbose=(function(){try{return localStorage.getItem('ensemble-verbose')==='1'}catch(e){return false}})(),drawerActivity=null,drawerSession=null;
+let S=null,selId=null,selProjectId=null,fails=0,pollT=Date.now(),prevMC=0,selCard=-1,navCollapsed=false,verbose=(function(){try{return localStorage.getItem('ensemble-verbose')==='1'}catch(e){return false}})(),drawerActivity=null,drawerSession=null,drawerActivityError=false;
 const expCards=new Set(),expMsgs=new Set();
 const E=s=>s?String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'):'';
-const D=ms=>{const s=Math.floor(Math.abs(ms)/1000);return s<60?s+'s':s<3600?Math.floor(s/60)+'m':Math.floor(s/3600)+'h'};
-const T=e=>new Date(e).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
-function relT(ep){const ms=Date.now()-ep;if(ms<60000)return Math.floor(ms/1000)+'s ago';if(ms<3600000)return Math.floor(ms/60000)+'m ago';if(ms<86400000)return Math.floor(ms/3600000)+'h ago';return T(ep)}
+const D=ms=>{const s=Math.floor(Math.abs(ms)/1000);return s<60?s+'秒':s<3600?Math.floor(s/60)+'分钟':s<86400?Math.floor(s/3600)+'小时':Math.floor(s/86400)+'天'};
+function relT(ep){const ms=Math.max(0,Date.now()-ep);if(ms<10000)return'刚刚';if(ms<60000)return Math.floor(ms/1000)+'秒前';if(ms<3600000)return Math.floor(ms/60000)+'分钟前';if(ms<86400000)return Math.floor(ms/3600000)+'小时前';return Math.floor(ms/86400000)+'天前'}
+
+const ENUM_LABELS={busy:'工作中',ready:'空闲',shutdown_requested:'正在停止',shutdown:'已结束',error:'错误',idle:'空闲',starting:'正在启动',running:'运行中',cancel_requested:'已请求取消',cancelling:'正在取消',cancelled:'已取消',completing:'即将完成',completed:'已完成',failed:'失败',timed_out:'已超时',active:'进行中',archived:'已归档',pending:'待处理',in_progress:'进行中',blocked:'受阻',working:'工作中',done:'已完成',empty:'暂无成员',high:'高',medium:'中',low:'低',approved:'已批准',rejected:'已拒绝',none:'无需审批'};
+function enumLabel(value){return ENUM_LABELS[value]||value}
 
 // Chip: small readable badge with background tint
 function chip(text,color){
@@ -46,11 +48,11 @@ function restSc(el,p){const s=el.querySelector('.scroll');if(s)s.scrollTop=p}
 function patch(el,h){if(el.innerHTML!==h)el.innerHTML=h}
 
 const ST={
-  busy:{c:'border-blue-500 bg-blue-500/[0.04]',d:'bg-blue-500',t:'text-blue-400',l:'working',dim:false},
-  ready:{c:'border-base-700 bg-base-950/50',d:'bg-txt-400',t:'text-txt-400',l:'idle',dim:true},
-  shutdown_requested:{c:'border-amber-500/50 bg-amber-500/[0.04]',d:'bg-amber-500',t:'text-amber-400',l:'stopping',dim:false},
-  shutdown:{c:'border-base-800 bg-base-950/30',d:'bg-base-700',t:'text-txt-500',l:'done',dim:true},
-  error:{c:'border-red-500/50 bg-red-500/[0.04]',d:'bg-red-500',t:'text-red-400',l:'error',dim:false},
+  busy:{c:'border-blue-500 bg-blue-500/[0.04]',d:'bg-blue-500',t:'text-blue-400',l:'工作中',dim:false},
+  ready:{c:'border-base-700 bg-base-950/50',d:'bg-txt-400',t:'text-txt-400',l:'空闲',dim:true},
+  shutdown_requested:{c:'border-amber-500/50 bg-amber-500/[0.04]',d:'bg-amber-500',t:'text-amber-400',l:'正在停止',dim:false},
+  shutdown:{c:'border-base-800 bg-base-950/30',d:'bg-base-700',t:'text-txt-500',l:'已结束',dim:true},
+  error:{c:'border-red-500/50 bg-red-500/[0.04]',d:'bg-red-500',t:'text-red-400',l:'错误',dim:false},
 };
 const si=s=>ST[s]||ST.ready;
 const PR={high:'text-red-400 bg-red-500/10 border border-red-500/20',medium:'text-amber-400 bg-amber-500/10 border border-amber-500/20',low:'text-txt-400 bg-base-800 border border-base-700'};
@@ -75,8 +77,8 @@ function deriveHealth(t){
 
 function coarseTeamStatus(t){const h=deriveHealth(t),blocked=(t.tasks||[]).filter(x=>x.status==='blocked').length;if(h.e)return{label:'error',color:'red',dot:'bg-red-500'};if(blocked)return{label:'blocked',color:'amber',dot:'bg-amber-500'};if(h.w)return{label:'working',color:'blue',dot:'bg-blue-500'};if(h.i)return{label:'idle',color:'muted',dot:'bg-txt-500'};return{label:t.status==='active'?'empty':t.status,color:'muted',dot:'bg-base-600'}}
 function projectStatus(p){const teams=p.teams||[],counts={working:0,blocked:0,error:0,idle:0,done:0};teams.forEach(t=>{const s=coarseTeamStatus(t).label;if(s==='working')counts.working++;else if(s==='blocked')counts.blocked++;else if(s==='error')counts.error++;else if(s==='idle'||s==='empty')counts.idle++;else counts.done++});if(counts.error)return{label:'error',color:'red',dot:'bg-red-500',counts};if(counts.blocked)return{label:'blocked',color:'amber',dot:'bg-amber-500',counts};if(counts.working)return{label:'working',color:'blue',dot:'bg-blue-500',counts};return{label:'idle',color:'muted',dot:'bg-txt-500',counts}}
-function statusTitleProject(p){const s=projectStatus(p),teams=p.teams||[];return projectLabel(p)+'\\nStatus: '+s.label+'\\nTeams: '+teams.length+'\\nWorking: '+s.counts.working+' · Blocked: '+s.counts.blocked+' · Error: '+s.counts.error+' · Idle: '+s.counts.idle}
-function statusTitleTeam(t){const h=deriveHealth(t),tasks=t.tasks||[],blocked=tasks.filter(x=>x.status==='blocked').length,active=tasks.filter(x=>x.status==='in_progress').length,pending=tasks.filter(x=>x.status==='pending').length,done=tasks.filter(x=>x.status==='completed').length;return t.name+'\\nStatus: '+coarseTeamStatus(t).label+'\\nAgents: '+h.total+' total, '+h.w+' working, '+h.i+' idle, '+h.e+' error\\nTasks: '+active+' active, '+blocked+' blocked, '+pending+' pending, '+done+' done'}
+function statusTitleProject(p){const s=projectStatus(p),teams=p.teams||[];return projectLabel(p)+'\\n状态：'+enumLabel(s.label)+'\\n团队：'+teams.length+'\\n工作中：'+s.counts.working+' · 受阻：'+s.counts.blocked+' · 错误：'+s.counts.error+' · 空闲：'+s.counts.idle}
+function statusTitleTeam(t){const h=deriveHealth(t),tasks=t.tasks||[],blocked=tasks.filter(x=>x.status==='blocked').length,active=tasks.filter(x=>x.status==='in_progress').length,pending=tasks.filter(x=>x.status==='pending').length,done=tasks.filter(x=>x.status==='completed').length;return t.name+'\\n状态：'+enumLabel(coarseTeamStatus(t).label)+'\\n智能体：共 '+h.total+' 个，工作中 '+h.w+'，空闲 '+h.i+'，错误 '+h.e+'\\n任务：进行中 '+active+'，受阻 '+blocked+'，待处理 '+pending+'，已完成 '+done}
 
 function lastMessageFor(name,msgs){return msgs.filter(m=>m.fromName===name||m.toName===name).sort((a,b)=>b.timeCreated-a.timeCreated)[0]||null}
 function activeTaskFor(name,tasks){return tasks.find(x=>x.assignee===name&&x.status==='in_progress')||tasks.find(x=>x.assignee===name&&x.status==='blocked')||null}
@@ -106,9 +108,9 @@ function deriveAttention(t){
   const stopping=(t.members||[]).filter(m=>m.status==='shutdown_requested');
   const latest=msgs[0]||null;
   const items=[];
-  errored.forEach(m=>items.push({kind:'Agent error',label:m.name,detail:m.executionStatus||m.status,color:'red'}));
-  blocked.forEach(x=>items.push({kind:'Blocked task',label:x.assignee||'unassigned',detail:x.content,color:'amber'}));
-  stopping.forEach(m=>items.push({kind:'Stopping',label:m.name,detail:'shutdown requested',color:'amber'}));
+  errored.forEach(m=>items.push({kind:'智能体错误',label:m.name,detail:enumLabel(m.executionStatus||m.status),color:'red'}));
+  blocked.forEach(x=>items.push({kind:'受阻任务',label:x.assignee||'未分配',detail:x.content,color:'amber'}));
+  stopping.forEach(m=>items.push({kind:'正在停止',label:m.name,detail:'已请求停止',color:'amber'}));
   return{items,running,latest,blocked,errored};
 }
 
@@ -125,9 +127,9 @@ function deriveSparkline(name,msgs){
 
 function deriveTimeline(t){
   const ev=[];
-  (t.members||[]).forEach(m=>{ev.push({t:m.timeCreated,type:'spawn',label:E(m.name)+' spawned',c:'bg-blue-400'});if(m.status==='shutdown')ev.push({t:m.timeUpdated,type:'off',label:E(m.name)+' shut down',c:'bg-txt-500'});if(m.status==='error')ev.push({t:m.timeUpdated,type:'err',label:E(m.name)+' error',c:'bg-red-500'})});
-  (t.messages||[]).forEach(m=>{const p=parseR(m.content);ev.push({t:m.timeCreated,type:'msg',label:E(m.fromName)+' \\u2192 '+(E(m.toName)||'all'),c:p?'bg-emerald-500':'bg-blue-400'})});
-  (t.tasks||[]).filter(x=>x.status==='completed').forEach(x=>{ev.push({t:x.timeUpdated,type:'done',label:'Task done',c:'bg-emerald-500'})});
+  (t.members||[]).forEach(m=>{ev.push({t:m.timeCreated,type:'spawn',label:E(m.name)+' 已启动',c:'bg-blue-400'});if(m.status==='shutdown')ev.push({t:m.timeUpdated,type:'off',label:E(m.name)+' 已停止',c:'bg-txt-500'});if(m.status==='error')ev.push({t:m.timeUpdated,type:'err',label:E(m.name)+' 出错',c:'bg-red-500'})});
+  (t.messages||[]).forEach(m=>{const p=parseR(m.content);ev.push({t:m.timeCreated,type:'msg',label:E(m.fromName)+' \\u2192 '+(E(m.toName)||'全体'),c:p?'bg-emerald-500':'bg-blue-400'})});
+  (t.tasks||[]).filter(x=>x.status==='completed').forEach(x=>{ev.push({t:x.timeUpdated,type:'done',label:'任务已完成',c:'bg-emerald-500'})});
   return ev.sort((a,b)=>a.t-b.t).slice(-50);
 }
 

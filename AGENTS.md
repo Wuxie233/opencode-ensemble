@@ -1,5 +1,22 @@
 # opencode-ensemble — Agent Guidelines
 
+## Private Customization
+
+This checkout is the user's private customization source. `origin` points to
+`Wuxie233/opencode-ensemble`; `upstream` points to the official
+`hueyexe/opencode-ensemble` repository. Keep private behavior in small tested
+commits above upstream and never patch the installed npm cache.
+
+The active OpenCode configuration loads `/root/CODE/opencode-ensemble/dist/index.js`.
+Build it locally after verified source changes, but do not commit `dist/`.
+OpenCode must be restarted manually by the user before plugin code or config
+changes take effect.
+
+The private dashboard uses Simplified Chinese for fixed UI copy. Preserve
+project, team, member, task, prompt, message, model, branch, path, command,
+output, and raw runtime-error content verbatim. The canonical terminology is in
+`CONTEXT.md`.
+
 ## What This Is
 
 opencode-ensemble is an OpenCode plugin that enables agent teams: multiple
