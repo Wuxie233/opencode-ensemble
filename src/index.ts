@@ -3,7 +3,7 @@ import { tool } from "@opencode-ai/plugin"
 import { OpencodeClient } from "@opencode-ai/sdk/v2"
 import path from "node:path"
 import { mkdirSync } from "node:fs"
-import { createDb, getDbPath } from "./db"
+import { getDbPath } from "./db"
 import { wrapThrowingClient } from "./client"
 import { recoverStaleMembers, recoverUndeliveredMessages, recoverOrphanedWorktrees, recoverOrphanedBranches, rehydrateRegistry } from "./recovery"
 import { MemberRegistry, DescendantTracker, PendingPurgeApprovals } from "./state"
@@ -16,8 +16,8 @@ import { log, initLog } from "./log"
 import { findTeamBySession } from "./types"
 import { loadConfig } from "./config"
 import { ProgressTracker } from "./progress"
-import { ActivityBuffer, recordFromV2Event, recordFromToolBefore, recordFromToolAfter } from "./activity"
-import { startDashboard } from "./dashboard"
+import { recordFromV2Event, recordFromToolBefore, recordFromToolAfter } from "./activity"
+import { createLocalDisposer, processRuntime } from "./runtime"
 import { executeTeamCreate } from "./tools/team-create"
 import { executeTeamSpawn } from "./tools/team-spawn"
 import { executeTeamMessage } from "./tools/team-message"
@@ -49,8 +49,6 @@ const plugin: Plugin = async (input) => {
   // Initialize SQLite database in the global OpenCode config directory.
   const dbPath = getDbPath()
   mkdirSync(path.dirname(dbPath), { recursive: true })
-  const db = createDb(dbPath)
-
   // Load plugin configuration (global → project → env vars)
   const config = loadConfig(input.directory)
 
@@ -60,7 +58,6 @@ const plugin: Plugin = async (input) => {
   const purgeApprovals = new PendingPurgeApprovals()
   const nudgedMembers = new Set<string>()
   const progressTracker = new ProgressTracker()
-  const activityBuffer = new ActivityBuffer()
   const wakeLeadTimestamps = new Map<string, number>()
   const WAKE_LEAD_COOLDOWN_MS = 5000
 
@@ -72,18 +69,20 @@ const plugin: Plugin = async (input) => {
   const rawClient = new OpencodeClient({ client: pluginTransport })
   initLog(rawClient)
   const client = wrapThrowingClient(rawClient)
+  const mainInstance = !isWorktreeInstance(input.directory)
+  const runtime = await processRuntime.acquire({
+    dbPath,
+    dashboardPort: mainInstance ? config.dashboardPort : undefined,
+    dashboardClient: mainInstance ? client : undefined,
+  })
+  const db = runtime.db
+  const activityBuffer = runtime.activityBuffer
   const deps: ToolDeps = { db, registry, tracker, purgeApprovals, client, directory: input.directory, config }
 
   // Recovery only runs for the main project instance — NOT for teammate worktree instances.
   // Worktree instances are created during session.create. Running recovery there makes HTTP
   // calls back to the server, which deadlocks because the server is still handling session.create.
-  if (!isWorktreeInstance(input.directory)) {
-    log("init:recovery:start (main instance)")
-    const recovery = await recoverStaleMembers(db, client, input.directory)
-    if (recovery.interrupted > 0) {
-      log(`init:recovery:interrupted=${recovery.interrupted}`)
-    }
-
+  if (mainInstance) {
     // Always rehydrate the in-memory registry from SQLite. The registry is
     // in-memory only and is wiped on every plugin restart. Without this,
     // teammates from a previous lifetime become invisible — every team_*
@@ -92,24 +91,21 @@ const plugin: Plugin = async (input) => {
     // far more often than the CLI.
     const rehydrated = rehydrateRegistry(db, registry)
     if (rehydrated > 0) log(`init:registry:rehydrated members=${rehydrated}`)
-
-    recoverUndeliveredMessages(db, client, registry).catch((err) => {
-      log(`init:recover-messages:failed err=${err instanceof Error ? err.message : String(err)}`)
-    })
-    recoverOrphanedWorktrees(db, client).catch((err) => {
-      log(`init:recover-worktrees:failed err=${err instanceof Error ? err.message : String(err)}`)
-    })
-    recoverOrphanedBranches(db, input.directory).catch((err) => {
-      log(`init:recover-branches:failed err=${err instanceof Error ? err.message : String(err)}`)
-    })
-    log("init:recovery:done")
-
-    // Start dashboard server (main instance only, not worktree instances)
-    if (config.dashboardPort !== 0) {
-      startDashboard(db, config.dashboardPort, { activityBuffer, client }).catch((err) => {
-        log(`init:dashboard:failed err=${err instanceof Error ? err.message : String(err)}`)
+    void runtime
+      .recover(path.resolve(input.worktree || input.directory), async (sharedDb) => {
+        log("init:recovery:start (main instance)")
+        const recovery = await recoverStaleMembers(sharedDb, client, input.directory)
+        if (recovery.interrupted > 0) log(`init:recovery:interrupted=${recovery.interrupted}`)
+        await Promise.all([
+          recoverUndeliveredMessages(sharedDb, client, registry),
+          recoverOrphanedWorktrees(sharedDb, client),
+          recoverOrphanedBranches(sharedDb, input.directory),
+        ])
+        log("init:recovery:done")
       })
-    }
+      .catch((error) => {
+        log(`init:recovery:failed err=${error instanceof Error ? error.message : String(error)}`)
+      })
   } else {
     log(`init:skip-recovery (worktree instance: ${input.directory})`)
   }
@@ -135,8 +131,12 @@ const plugin: Plugin = async (input) => {
     peerMessageWindowMs: config.peerMessageWindowMs,
   })
   watchdog.start()
+  const dispose = createLocalDisposer(watchdog, runtime)
 
   return {
+    async dispose() {
+      dispose()
+    },
     // Event hook — drives state machine transitions + descendant tracking + toasts
     async event({ event }) {
       if (event.type === "session.status") {

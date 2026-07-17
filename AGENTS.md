@@ -90,6 +90,10 @@ when running on Bun, `node:sqlite` when running on Node/Electron. Four tables:
 - team_task — shared task board (content, status, priority, assignee, deps)
 - team_message — message log (from, to, content, delivered flag)
 
+The SQLite connection, dashboard listener, and `ActivityBuffer` are process-shared across directory plugin instances. Directory-local watchdogs, registries, trackers, and rate limiters remain isolated. Release shared resources only after the final directory and any in-flight recovery task finish.
+
+Main-directory recovery is deduplicated per resolved project and starts after registry rehydration. Keep recovery asynchronous so SDK calls back into OpenCode cannot block directory bootstrap; worktree instances continue to skip recovery entirely.
+
 WAL mode. Migrations via PRAGMA user_version.
 
 ### Message Delivery
