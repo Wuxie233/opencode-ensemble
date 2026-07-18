@@ -1,6 +1,101 @@
+type DashboardConnectionMode = "loading" | "live" | "error" | "stale" | "recovered"
+
+interface DashboardAttentionMember {
+  name: string
+  status: string
+  executionStatus?: string
+}
+
+interface DashboardAttentionTask {
+  id: string
+  status: string
+  assignee?: string | null
+  content: string
+}
+
+interface DashboardAttentionSource {
+  members?: DashboardAttentionMember[]
+  tasks?: DashboardAttentionTask[]
+}
+
+interface DashboardAttentionItem {
+  kind: string
+  label: string
+  detail: string
+  color: string
+  target: { type: "agent" | "task"; id: string }
+}
+
+/** Derive ordered, actionable dashboard attention items. */
+export function deriveDashboardAttention(_source: DashboardAttentionSource): DashboardAttentionItem[] {
+  const source = _source
+  const members = source.members ?? []
+  const tasks = source.tasks ?? []
+  const items: DashboardAttentionItem[] = []
+
+  members.filter(member => member.status === "error").forEach(member => {
+    items.push({
+      kind: "智能体错误",
+      label: member.name,
+      detail: member.executionStatus ?? member.status,
+      color: "red",
+      target: { type: "agent", id: member.name },
+    })
+  })
+  tasks.filter(task => task.status === "blocked").forEach(task => {
+    items.push({
+      kind: "受阻任务",
+      label: task.assignee ?? "未分配",
+      detail: task.content,
+      color: "amber",
+      target: task.assignee
+        ? { type: "agent", id: task.assignee }
+        : { type: "task", id: task.id },
+    })
+  })
+  members.filter(member => member.status === "shutdown_requested").forEach(member => {
+    items.push({
+      kind: "正在停止",
+      label: member.name,
+      detail: "已请求停止",
+      color: "amber",
+      target: { type: "agent", id: member.name },
+    })
+  })
+  return items
+}
+
+/** Return the next index for roving agent-card focus. */
+export function nextDashboardAgentIndex(_current: number, _count: number, _direction: -1 | 1): number {
+  if (_count <= 0) return -1
+  if (_current < 0) return _direction > 0 ? 0 : _count - 1
+  return (_current + _direction + _count) % _count
+}
+
+/** Resolve a selected agent name against the current risk-sorted member list. */
+export function findDashboardAgentIndex(names: string[], selectedName: string | null, fallback: number): number {
+  const selectedIndex = selectedName ? names.indexOf(selectedName) : -1
+  if (selectedIndex >= 0) return selectedIndex
+  return fallback >= 0 && fallback < names.length ? fallback : -1
+}
+
+/** Decide whether a global dashboard shortcut should ignore its event target. */
+export function shouldIgnoreDashboardShortcut(_tagName: string, _editable: boolean, _interactive: boolean): boolean {
+  if (_editable || _interactive) return true
+  return ["INPUT", "SELECT", "TEXTAREA"].includes(_tagName.toUpperCase())
+}
+
+/** Advance the dashboard connection state after a poll result. */
+export function nextDashboardConnection(mode: DashboardConnectionMode, _result: "success" | "failure", _hasData: boolean): DashboardConnectionMode {
+  if (_result === "failure") return _hasData ? "stale" : "error"
+  if (mode === "stale" || mode === "error") return "recovered"
+  if (mode === "recovered") return "live"
+  return "live"
+}
+
 /** Dashboard JS — utilities, data helpers, and state management. */
 export const DASHBOARD_JS_CORE = `
-let S=null,selId=null,selProjectId=null,fails=0,pollT=Date.now(),prevMC=0,selCard=-1,navCollapsed=false,verbose=(function(){try{return localStorage.getItem('ensemble-verbose')==='1'}catch(e){return false}})(),drawerActivity=null,drawerSession=null,drawerActivityError=false;
+let S=null,selId=null,selProjectId=null,fails=0,pollT=Date.now(),prevMC=0,selCard=-1,selectedAgent=null,navCollapsed=false,connectionMode='loading',lastConnectionAnnouncement='',modalOpener=null,timelinePinned=null,pollInFlight=false,verbose=(function(){try{return localStorage.getItem('ensemble-verbose')==='1'}catch(e){return false}})(),drawerActivity=null,drawerSession=null,drawerActivityError=false;
 const expCards=new Set(),expMsgs=new Set();
 const E=s=>s?String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'):'';
 const D=ms=>{const s=Math.floor(Math.abs(ms)/1000);return s<60?s+'秒':s<3600?Math.floor(s/60)+'分钟':s<86400?Math.floor(s/3600)+'小时':Math.floor(s/86400)+'天'};
@@ -8,6 +103,10 @@ function relT(ep){const ms=Math.max(0,Date.now()-ep);if(ms<10000)return'刚刚';
 
 const ENUM_LABELS={busy:'工作中',ready:'空闲',shutdown_requested:'正在停止',shutdown:'已结束',error:'错误',idle:'空闲',starting:'正在启动',running:'运行中',cancel_requested:'已请求取消',cancelling:'正在取消',cancelled:'已取消',completing:'即将完成',completed:'已完成',failed:'失败',timed_out:'已超时',active:'进行中',archived:'已归档',pending:'待处理',in_progress:'进行中',blocked:'受阻',working:'工作中',done:'已完成',empty:'暂无成员',high:'高',medium:'中',low:'低',approved:'已批准',rejected:'已拒绝',none:'无需审批'};
 function enumLabel(value){return ENUM_LABELS[value]||value}
+function nextAgentIndex(current,count,direction){if(count<=0)return-1;if(current<0)return direction>0?0:count-1;return(current+direction+count)%count}
+function findAgentIndex(names,selectedName,fallback){const index=selectedName?names.indexOf(selectedName):-1;return index>=0?index:fallback>=0&&fallback<names.length?fallback:-1}
+function nextConnection(mode,result,hasData){if(result==='failure')return hasData?'stale':'error';if(mode==='stale'||mode==='error')return'recovered';if(mode==='recovered')return'live';return'live'}
+function shortcutTarget(target){if(!target)return false;const tag=target.tagName||'',editable=target.isContentEditable===true,interactive=!!target.closest?.('button,a,input,select,textarea,summary,[role="button"],[contenteditable="true"]');return editable||interactive||tag==='INPUT'||tag==='SELECT'||tag==='TEXTAREA'}
 
 // Chip: small readable badge with background tint
 function chip(text,color){
@@ -20,7 +119,7 @@ function chip(text,color){
     muted:'bg-base-800/60 text-txt-400 border-base-700/20',
   };
   var c=colors[color]||colors.muted;
-  return '<span class="inline-flex items-center px-1.5 py-[1px] rounded text-[10px] font-medium border '+c+'">'+text+'</span>';
+  return '<span class="inline-flex max-w-full min-w-0 items-center break-all whitespace-normal px-1.5 py-[1px] rounded text-[10px] font-medium border '+c+'">'+text+'</span>';
 }
 
 function md(s){
@@ -108,9 +207,9 @@ function deriveAttention(t){
   const stopping=(t.members||[]).filter(m=>m.status==='shutdown_requested');
   const latest=msgs[0]||null;
   const items=[];
-  errored.forEach(m=>items.push({kind:'智能体错误',label:m.name,detail:enumLabel(m.executionStatus||m.status),color:'red'}));
-  blocked.forEach(x=>items.push({kind:'受阻任务',label:x.assignee||'未分配',detail:x.content,color:'amber'}));
-  stopping.forEach(m=>items.push({kind:'正在停止',label:m.name,detail:'已请求停止',color:'amber'}));
+  errored.forEach(m=>items.push({kind:'智能体错误',label:m.name,detail:enumLabel(m.executionStatus||m.status),color:'red',target:{type:'agent',id:m.name}}));
+  blocked.forEach(x=>items.push({kind:'受阻任务',label:x.assignee||'未分配',detail:x.content,color:'amber',target:x.assignee?{type:'agent',id:x.assignee}:{type:'task',id:x.id}}));
+  stopping.forEach(m=>items.push({kind:'正在停止',label:m.name,detail:'已请求停止',color:'amber',target:{type:'agent',id:m.name}}));
   return{items,running,latest,blocked,errored};
 }
 
@@ -127,9 +226,9 @@ function deriveSparkline(name,msgs){
 
 function deriveTimeline(t){
   const ev=[];
-  (t.members||[]).forEach(m=>{ev.push({t:m.timeCreated,type:'spawn',label:E(m.name)+' 已启动',c:'bg-blue-400'});if(m.status==='shutdown')ev.push({t:m.timeUpdated,type:'off',label:E(m.name)+' 已停止',c:'bg-txt-500'});if(m.status==='error')ev.push({t:m.timeUpdated,type:'err',label:E(m.name)+' 出错',c:'bg-red-500'})});
-  (t.messages||[]).forEach(m=>{const p=parseR(m.content);ev.push({t:m.timeCreated,type:'msg',label:E(m.fromName)+' \\u2192 '+(E(m.toName)||'全体'),c:p?'bg-emerald-500':'bg-blue-400'})});
-  (t.tasks||[]).filter(x=>x.status==='completed').forEach(x=>{ev.push({t:x.timeUpdated,type:'done',label:'任务已完成',c:'bg-emerald-500'})});
+  (t.members||[]).forEach(m=>{ev.push({key:'member|'+m.name+'|spawn',t:m.timeCreated,type:'spawn',label:E(m.name)+' 已启动',c:'bg-blue-400'});if(m.status==='shutdown')ev.push({key:'member|'+m.name+'|off',t:m.timeUpdated,type:'off',label:E(m.name)+' 已停止',c:'bg-txt-500'});if(m.status==='error')ev.push({key:'member|'+m.name+'|error',t:m.timeUpdated,type:'err',label:E(m.name)+' 出错',c:'bg-red-500'})});
+  (t.messages||[]).forEach(m=>{const p=parseR(m.content);ev.push({key:'message|'+m.id,t:m.timeCreated,type:'msg',label:E(m.fromName)+' \\u2192 '+(E(m.toName)||'全体'),c:p?'bg-emerald-500':'bg-blue-400'})});
+  (t.tasks||[]).filter(x=>x.status==='completed').forEach(x=>{ev.push({key:'task|'+x.id+'|done',t:x.timeUpdated,type:'done',label:'任务已完成',c:'bg-emerald-500'})});
   return ev.sort((a,b)=>a.t-b.t).slice(-50);
 }
 

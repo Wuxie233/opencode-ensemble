@@ -29,6 +29,9 @@ details summary::-webkit-details-marker{display:none}details summary{list-style:
 select{-webkit-appearance:none;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%235e6a82' stroke-width='2.5'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 8px center;padding-right:22px}
 .project-link[aria-current="true"]{color:#e2e8f0}
 .team-link[aria-current="true"]{color:#e2e8f0;border-left-color:#22c55e;background:rgba(34,197,94,.06)}
+.runtime-text,.md,.task-copy,.attention-copy{overflow-wrap:anywhere;word-break:break-word}
+.timeline-track{touch-action:pan-x pan-y;overscroll-behavior-inline:contain;scroll-snap-type:x proximity}
+.timeline-event{scroll-snap-align:center;min-width:44px;min-height:44px}
 #content.nav-collapsed{grid-template-columns:2rem minmax(0,1fr)}
 #projects[hidden]{display:none!important}
 #project-rail[hidden]{display:none!important}
@@ -46,6 +49,8 @@ select{-webkit-appearance:none;appearance:none;background-image:url("data:image/
 #drawer.open{transform:translateX(0)}
 #drawer-bg{position:fixed;inset:0;background:rgba(12,14,20,.5);z-index:89;display:none}
 #drawer-bg.open{display:block}
+@media(min-width:1280px) and (max-height:820px){#activity .scroll{max-height:38vh}}
+@media(max-width:700px){#drawer{width:min(100%,480px)}}
 </style>
 </head>
 <body class="bg-base-950 text-txt-100 min-h-screen antialiased font-sans">
@@ -55,30 +60,31 @@ select{-webkit-appearance:none;appearance:none;background-image:url("data:image/
 <span id="crumb" class="text-[11px] text-txt-500 font-mono truncate"></span>
 </div>
 <div class="flex items-center gap-2 sm:gap-4 shrink-0">
-<div id="hring" class="w-6 h-6 rounded-full" title="团队健康状态"></div>
+<div class="flex items-center gap-2"><div id="hring" class="w-6 h-6 rounded-full" title="团队健康状态" aria-hidden="true"></div><span id="health-text" class="hidden sm:inline text-[11px] text-txt-300"></span></div>
 <div class="flex items-center gap-2">
-<span id="clk" class="text-[11px] text-txt-400 font-mono"></span>
-<span class="text-base-700">·</span>
+<span id="clk" class="hidden sm:inline text-[11px] text-txt-400 font-mono"></span>
+<span class="hidden sm:inline text-base-700">·</span>
 <span id="cd" class="w-[7px] h-[7px] rounded-full bg-emerald-500 pulse"></span>
-<span id="ct" class="text-[11px] text-txt-400 font-mono">...</span>
+<span id="ct" class="hidden sm:inline text-[11px] text-txt-400 font-mono">正在加载仪表盘</span>
 </div>
 </div>
 </header>
-<div id="sum" class="fixed top-11 inset-x-0 h-8 bg-base-900/80 backdrop-blur border-b border-base-800/50 flex items-center px-3 sm:px-4 gap-3 sm:gap-4 text-[11px] text-txt-300 z-40 overflow-x-auto scroll whitespace-nowrap"></div>
-<main class="pt-[76px] px-4 pb-16">
+<div id="connection-state" role="status" aria-live="polite" aria-atomic="true" class="sr-only">正在加载仪表盘</div>
+<div id="sum" class="sticky top-11 mt-11 min-h-8 bg-base-900/95 backdrop-blur border-b border-base-800/50 flex flex-wrap items-center px-3 sm:px-4 py-1.5 gap-x-3 gap-y-1 text-[11px] text-txt-300 z-40"></div>
+<main class="pt-4 px-4 pb-16">
 <div id="empty" class="hidden flex-col items-center justify-center h-[70vh] gap-3">
 <div class="w-12 h-12 rounded-full border-2 border-base-700 flex items-center justify-center mb-2"><svg class="w-5 h-5 text-txt-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 4.5v15m7.5-7.5h-15"/></svg></div>
 <div class="text-txt-400 text-sm">等待团队创建</div>
 <div class="text-txt-500 text-[11px]">在 OpenCode 中运行 <code class="px-1.5 py-0.5 bg-base-900 rounded text-txt-300 font-mono text-[11px]">team_create</code> 即可开始</div>
 </div>
 <div id="content" class="hidden max-w-[1720px] mx-auto grid grid-cols-1 lg:grid-cols-[260px_minmax(0,1fr)] gap-4 items-start">
-<div id="project-rail" hidden class="lg:sticky lg:top-[88px]"><button id="nav-expand" type="button" aria-label="显示项目导航" aria-controls="projects" aria-expanded="false" class="h-8 w-8 rounded border border-base-800 text-txt-500 hover:text-txt-200 hover:border-base-700 transition-colors">&gt;</button></div>
-<aside id="projects" aria-label="项目导航" class="bg-base-950/60 border-r border-base-800/70 pr-3 lg:sticky lg:top-[88px]"></aside>
+<div id="project-rail" hidden class="lg:sticky lg:top-[88px]"><button id="nav-expand" type="button" aria-label="显示项目导航" aria-controls="projects" aria-expanded="false" class="min-h-11 min-w-11 rounded border border-base-800 text-txt-400 hover:text-txt-100 hover:border-base-700 transition-colors">&gt;</button></div>
+<aside id="projects" aria-label="项目导航" class="max-h-[45vh] bg-base-950/60 border-r border-base-800/70 pr-3 lg:sticky lg:top-[88px] lg:max-h-[calc(100vh-112px)] overflow-y-auto scroll"></aside>
 <div class="min-w-0">
 <section id="attention" aria-label="团队关注事项" class="mb-3"></section>
-<div class="grid grid-cols-1 xl:grid-cols-[minmax(360px,1.35fr)_minmax(320px,.8fr)] gap-4 items-start">
+<div class="workspace grid grid-cols-1 gap-4 items-start">
 <section aria-label="智能体列表"><div id="agents" class="grid gap-2" style="grid-template-columns:repeat(auto-fill,minmax(min(300px,100%),1fr))"></div></section>
-<div class="grid grid-cols-1 gap-4">
+<div class="triage-panels grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
 <section aria-label="任务看板"><div id="tasks" class="bg-base-900 rounded-lg p-3 border border-base-800/50"></div></section>
 <section aria-label="活动动态"><div id="activity" class="bg-base-900 rounded-lg p-3 border border-base-800/50"></div></section>
 </div>
@@ -86,7 +92,7 @@ select{-webkit-appearance:none;appearance:none;background-image:url("data:image/
 </div>
 </div>
 </main>
-<div id="tl" aria-label="事件时间线" class="fixed bottom-0 inset-x-0 h-10 bg-base-900/90 backdrop-blur border-t border-base-800 px-4 flex items-center z-40 overflow-x-auto scroll hidden"></div>
+<div id="tl" aria-label="事件时间线" tabindex="0" class="timeline-track fixed bottom-0 inset-x-0 min-h-10 bg-base-900/90 backdrop-blur border-t border-base-800 px-3 flex items-center z-40 overflow-x-auto scroll hidden"></div>
 <div id="sco" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="shortcuts-title" tabindex="-1" onclick="closeShortcuts()">
 <div class="bg-base-900 border border-base-800 rounded-lg p-6 max-w-sm" onclick="event.stopPropagation()">
 <div id="shortcuts-title" class="text-txt-200 font-semibold text-sm mb-4">键盘快捷键</div>

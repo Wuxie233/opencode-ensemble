@@ -10,13 +10,14 @@ function rSel(){
   patch(el,h);
 }
 
-function renderProjectNavHeader(){return '<div class="flex items-center justify-between gap-2 mb-3"><div class="text-[10px] uppercase tracking-[.18em] text-txt-500">项目</div><button id="nav-toggle" type="button" aria-label="隐藏项目导航" aria-controls="projects" aria-expanded="true" class="text-[10px] text-txt-500 border border-base-800 rounded px-1.5 py-[2px] hover:text-txt-200 hover:border-base-700 transition-colors">隐藏</button></div>'}
+function renderProjectNavHeader(){return '<div class="flex items-center justify-between gap-2 mb-3"><div class="text-[11px] font-semibold text-txt-300">项目</div><button id="nav-toggle" type="button" aria-label="隐藏项目导航" aria-controls="projects" aria-expanded="true" class="min-h-11 min-w-11 text-[11px] text-txt-400 border border-base-800 rounded hover:text-txt-100 hover:border-base-700 transition-colors">隐藏</button></div>'}
 function renderProjectSection(p,cp,c){const teams=p.teams||[];return '<section>'+renderProjectButton(p,cp)+'<div class="mt-2 ml-[7px] border-l border-base-800/80">'+[...teams].sort((a,b)=>b.timeUpdated-a.timeUpdated).map(t=>renderTeamLink(t,c)).join('')+'</div></section>'}
-function renderProjectButton(p,cp){const teams=p.teams||[],active=teams.filter(t=>t.status==='active').length,sel=cp&&cp.id===p.id,pss=projectStatus(p);return '<button type="button" aria-current="'+(sel?'true':'false')+'" title="'+E(statusTitleProject(p))+'" class="project-link group w-full text-left text-txt-300 hover:text-txt-100 transition-colors" data-project="'+E(p.id)+'" onclick="selectProject(this.dataset.project)"><div class="flex items-center gap-2 min-w-0"><span class="w-[5px] h-[5px] rounded-full '+pss.dot+(pss.label==='working'?' pulse':'')+' shrink-0"></span><span class="font-mono font-semibold truncate">'+E(p.name||p.path||p.id)+'</span>'+chip(enumLabel(pss.label),pss.color)+'</div><div class="mt-1 ml-3 text-[10px] text-txt-500">'+active+' 个活跃团队</div></button>'}
-function renderTeamLink(t,c){const ss=coarseTeamStatus(t),tsel=c&&c.id===t.id;return '<button type="button" title="'+E(statusTitleTeam(t))+'" class="team-link block w-full text-left border-l-2 border-transparent -ml-px py-1.5 pl-3 pr-2 text-[11px] text-txt-500 hover:text-txt-200 hover:bg-base-900/70 transition-colors" aria-current="'+(tsel?'true':'false')+'" data-team="'+E(t.id)+'" onclick="selectTeam(this.dataset.team)"><div class="flex items-center gap-2 min-w-0"><span class="w-[5px] h-[5px] rounded-full '+ss.dot+(ss.label==='working'?' pulse':'')+' shrink-0"></span><span class="truncate font-mono">'+E(t.name)+'</span><span class="ml-auto text-[9px] uppercase tracking-wide text-txt-500">'+E(enumLabel(ss.label))+'</span></div></button>'}
+function renderProjectButton(p,cp){const teams=p.teams||[],active=teams.filter(t=>t.status==='active').length,sel=cp&&cp.id===p.id,pss=projectStatus(p);return '<button type="button" aria-current="'+(sel?'true':'false')+'" title="'+E(statusTitleProject(p))+'" class="project-link group w-full min-h-11 py-1 text-left text-txt-300 hover:text-txt-100 transition-colors" data-project="'+E(p.id)+'" onclick="selectProject(this.dataset.project)"><div class="flex items-start gap-2 min-w-0"><span class="w-[6px] h-[6px] rounded-full mt-1.5 '+pss.dot+(pss.label==='working'?' pulse':'')+' shrink-0"></span><span class="font-mono font-semibold break-words min-w-0">'+E(p.name||p.path||p.id)+'</span>'+chip(enumLabel(pss.label),pss.color)+'</div><div class="mt-1 ml-3 text-[11px] text-txt-400">'+active+' 个活跃团队</div></button>'}
+function renderTeamLink(t,c){const ss=coarseTeamStatus(t),tsel=c&&c.id===t.id;return '<button type="button" title="'+E(statusTitleTeam(t))+'" class="team-link block w-full min-h-11 text-left border-l-2 border-transparent -ml-px py-2 pl-3 pr-2 text-[12px] text-txt-400 hover:text-txt-100 hover:bg-base-900/70 transition-colors" aria-current="'+(tsel?'true':'false')+'" data-team="'+E(t.id)+'" onclick="selectTeam(this.dataset.team)"><div class="flex items-start gap-2 min-w-0"><span class="w-[6px] h-[6px] rounded-full mt-1.5 '+ss.dot+(ss.label==='working'?' pulse':'')+' shrink-0"></span><span class="break-words min-w-0 font-mono">'+E(t.name)+'</span><span class="ml-auto text-[10px] text-txt-400">'+E(enumLabel(ss.label))+'</span></div></button>'}
 
 function rHealth(t){
-  const el=document.getElementById('hring'),h=deriveHealth(t);
+  const el=document.getElementById('hring'),text=document.getElementById('health-text'),h=deriveHealth(t),blocked=(t.tasks||[]).filter(x=>x.status==='blocked').length;
+  text.textContent=h.e?h.e+' 个错误':blocked?blocked+' 项受阻':h.w?h.w+' 个工作中':'无运行风险';
   if(!h.total){el.style.background='conic-gradient(#2a3144 0deg,#2a3144 360deg)';return}
   const total=h.total,segs=[];let deg=0;
   if(h.w){const d=h.w/total*360;segs.push('#3b82f6 '+deg+'deg '+(deg+d)+'deg');deg+=d}
@@ -42,11 +43,12 @@ function rSum(t){
   patch(el,
     '<span class="w-[6px] h-[6px] rounded-full '+(t.status==='active'?'bg-emerald-500':'bg-txt-500')+'"></span>'+
     '<span class="font-mono font-semibold text-txt-200">'+E(t.name)+'</span>'+
-    (mm.length?chip(mm.length+' 个智能体','gray'):'')+
+    (h.e?chip(h.e+' 个错误','red'):'')+
+    (tk.filter(x=>x.status==='blocked').length?chip(tk.filter(x=>x.status==='blocked').length+' 项受阻','amber'):'')+
     (h.w?chip(h.w+' 个工作中','blue'):'')+
     (h.i?chip(h.i+' 个空闲','muted'):'')+
     (h.d?chip(h.d+' 个已结束','muted'):'')+
-    (h.e?chip(h.e+' 个错误','red'):'')+
+    (mm.length?chip(mm.length+' 个智能体','gray'):'')+
     (tk.length?chip(tc+'/'+tk.length+' 项任务','green'):'')+
     (msgs.length?chip(msgs.length+' 条消息','muted'):'')
   );
@@ -57,10 +59,10 @@ function rAttention(t){
   const tone=a.items.length?'border-amber-500/30 bg-amber-500/[0.05]':'border-emerald-500/20 bg-emerald-500/[0.035]';
   const lead=a.items.length?'需要关注':'未发现阻塞';
   const chips=[chip(h.w+' 个工作中','blue'),chip(a.running.length+' 项进行中','green'),chip(a.blocked.length+' 项受阻',a.blocked.length?'amber':'muted'),chip(tk.filter(x=>x.status==='pending').length+' 项待处理','muted')];
-  let html='<div class="rounded-lg border '+tone+' px-3 py-2 flex flex-col md:flex-row md:items-center gap-2 md:gap-4">';
-  html+='<div class="min-w-[180px]"><div class="text-[10px] uppercase tracking-[.16em] text-txt-500">团队关注事项</div><div class="text-[14px] font-semibold text-txt-100">'+lead+'</div></div>';
-  html+='<div class="flex flex-wrap gap-1.5">'+chips.join('')+'</div>';
-  if(a.items.length){html+='<div class="flex-1 grid gap-1 md:grid-cols-2">'+a.items.slice(0,4).map(x=>'<div class="text-[12px] text-txt-200 truncate">'+chip(E(x.kind),x.color)+' <span class="font-mono">'+E(x.label)+'</span> <span class="text-txt-400">'+E(x.detail)+'</span></div>').join('')+'</div>'}
+  let html='<div class="rounded-lg border '+tone+' px-3 py-2 flex flex-col gap-2">';
+  html+='<div class="flex flex-wrap items-center gap-x-4 gap-y-2"><div class="min-w-[160px]"><div class="text-[10px] uppercase tracking-[.16em] text-txt-500">团队关注事项</div><div class="text-[14px] font-semibold text-txt-100">'+lead+'</div></div>';
+  html+='<div class="flex flex-wrap gap-1.5">'+chips.join('')+'</div></div>';
+  if(a.items.length){html+='<div class="grid gap-1 md:grid-cols-2 xl:grid-cols-4">'+a.items.map(x=>'<button type="button" title="'+E(x.kind+' · '+x.label+' · '+x.detail)+'" class="min-h-11 w-full text-left rounded border border-base-700/60 px-2 py-1.5 text-[12px] text-txt-200 hover:bg-base-800/60 focus-visible:border-blue-400 attention-copy line-clamp-3" data-attention-type="'+E(x.target.type)+'" data-attention-id="'+E(x.target.id)+'">'+chip(E(x.kind),x.color)+' <span class="font-mono font-semibold">'+E(x.label)+'</span> <span class="text-txt-300">'+E(x.detail)+'</span></button>').join('')+'</div>'}
   else if(a.latest){html+='<div class="text-[12px] text-txt-400 truncate md:ml-auto">最新消息：<span class="text-txt-200">'+E(a.latest.fromName)+'</span> '+relT(a.latest.timeCreated)+'</div>'}
   html+='</div>';
   patch(el,html);
@@ -69,42 +71,46 @@ function rAttention(t){
 function rAgents(t){
   const el=document.getElementById('agents'),mm=t.members||[];
   if(!mm.length){patch(el,'<div class="col-span-full text-center py-12"><div class="text-txt-400 text-sm mb-1">暂无智能体</div><div class="text-txt-500 text-[11px]">使用 <code class="px-1 py-0.5 bg-base-900 rounded font-mono text-[10px]">team_spawn</code> 创建队友</div></div>');return}
-  const n=Date.now(),msgs=t.messages||[],sorted=[...mm].sort((a,b)=>rankAgent(a,b,t));
+  const n=Date.now(),msgs=t.messages||[],sorted=[...mm].sort((a,b)=>rankAgent(a,b,t)),focusedAgent=document.activeElement?.closest?.('[data-card]')?.dataset.card||null;
+  selCard=findAgentIndex(sorted.map(m=>m.name),selectedAgent,selCard);
+  if(selCard>=0)selectedAgent=sorted[selCard].name;
   const html=sorted.map((m,idx)=>{
     const s=si(m.status),task=activeTaskFor(m.name,t.tasks||[]),msg=lastMessageFor(m.name,msgs),blocked=blockedTaskFor(m.name,t.tasks||[]);
     const d=D(n-m.timeUpdated),mi=msg?relT(msg.timeCreated):'\\u2014';
-    const tt=task?.content,tr=tt&&tt.length>90?tt.slice(0,90)+'\\u2026':tt;
-    const mp=msg?(msg.content.length>90?msg.content.slice(0,90)+'\\u2026':msg.content):'';
+    const tt=task?.content,tr=tt;
+    const mp=msg?msg.content:'';
     const spark=deriveSparkline(m.name,msgs);
-    const isSel=selCard===idx;
-    return '<button type="button" class="text-left rounded-lg border '+s.c+' p-3 transition-all duration-300 cursor-pointer hover:border-base-600 focus-visible:border-blue-400'+(isSel?' card-sel':'')+'" data-card="'+E(m.name)+'" onclick="openDrawer(this.dataset.card)" onkeydown="if(event.key===\\'Enter\\'||event.key===\\' \\'){event.preventDefault();openDrawer(this.dataset.card)}">'+
+    const isSel=selectedAgent===m.name;
+    return '<button type="button" tabindex="'+(isSel||selCard<0&&idx===0?'0':'-1')+'" class="text-left rounded-lg border '+s.c+' p-3 min-h-11 transition-all duration-300 cursor-pointer hover:border-base-600 focus-visible:border-blue-400'+(isSel?' card-sel':'')+'" data-card="'+E(m.name)+'" onclick="openDrawer(this.dataset.card,this)" onfocus="selCard='+idx+';selectedAgent=this.dataset.card">'+
       '<div class="flex items-center gap-2">'+
         '<span class="w-[8px] h-[8px] rounded-full '+s.d+(m.status==='busy'?' pulse':'')+' shrink-0"></span>'+
-        '<span class="font-mono font-semibold text-[14px] truncate">'+E(m.name)+'</span>'+
+        '<span class="font-mono font-semibold text-[14px] break-words min-w-0">'+E(m.name)+'</span>'+
         '<span class="text-[10px] px-1.5 py-[1px] rounded '+s.t+' bg-base-800/80 shrink-0">'+s.l+'</span>'+
         spark+
-        '<span class="text-[10px] text-txt-500 ml-auto shrink-0">'+E(m.agent)+'</span>'+
-        (m.model?chip(E(m.model),'muted'):'')+
+        '<span class="max-w-[7rem] truncate text-[10px] text-txt-500 ml-auto shrink">'+E(m.agent)+'</span>'+
       '</div>'+
-      (tr?'<div class="mt-2 text-[13px] text-txt-200 leading-snug truncate">'+(blocked?'<span class="text-amber-400">受阻任务：</span>':'当前任务：')+E(tr)+'</div>':'<div class="mt-2 text-[13px] text-txt-500 leading-snug">无进行中任务</div>')+
-      (mp?'<div class="mt-1 text-[12px] text-txt-400 truncate">最新消息：'+E(mp)+'</div>':'')+
+      (tr?'<div class="mt-2 text-[13px] text-txt-200 leading-snug break-words">'+(blocked?'<span class="text-amber-400">受阻任务：</span>':'当前任务：')+E(tr)+'</div>':'<div class="mt-2 text-[13px] text-txt-500 leading-snug">无进行中任务</div>')+
+      (mp?'<div class="mt-1 text-[12px] text-txt-400 line-clamp-2 break-words">最新消息：'+E(mp)+'</div><div class="mt-1 text-[10px] text-txt-500">打开智能体详情查看完整消息</div>':'')+
       '<div class="mt-2 flex items-center gap-1.5 flex-wrap">'+
         chip('状态持续 '+d,'muted')+chip('消息 '+mi,'muted')+chip(E(enumLabel(m.executionStatus||m.status)),m.status==='busy'?'blue':m.status==='error'?'red':'muted')+
+        (m.model?chip(E(m.model),'muted'):'')+
         (m.worktreeBranch?chip(E(m.worktreeBranch),'muted'):'')+
       '</div></button>';
   }).join('');
   patch(el,html);
+  if(focusedAgent===selectedAgent&&!modalOpen())requestAnimationFrame(function(){document.querySelector('[data-card="'+CSS.escape(focusedAgent)+'"]')?.focus()});
 }
 
-function openDrawer(name){
+function openDrawer(name,opener){
   var t=cur();if(!t)return;
+  modalOpener=captureModalOpener(opener||document.activeElement);
   var m=(t.members||[]).find(x=>x.name===name);if(!m)return;
   var s=si(m.status),msgs=(t.messages||[]).filter(x=>x.fromName===name);
   var h='';
   // Header
   h+='<div class="flex items-center justify-between mb-4">';
-  h+='<div class="flex items-center gap-2"><span class="w-[10px] h-[10px] rounded-full '+s.d+(m.status==='busy'?' pulse':'')+'"></span><h2 id="drawer-title" class="font-mono font-semibold text-[16px]">'+E(m.name)+'</h2><span class="text-[11px] px-2 py-[2px] rounded '+s.t+' bg-base-800/80">'+s.l+'</span></div>';
-  h+='<button id="drawer-close" aria-label="关闭智能体详情" onclick="closeDrawer()" class="text-txt-500 hover:text-txt-200 transition-colors p-1"><svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg></button>';
+  h+='<div class="flex min-w-0 items-center gap-2"><span class="w-[10px] h-[10px] rounded-full '+s.d+(m.status==='busy'?' pulse':'')+' shrink-0"></span><h2 id="drawer-title" class="runtime-text min-w-0 font-mono font-semibold text-[16px]">'+E(m.name)+'</h2><span class="text-[11px] px-2 py-[2px] rounded '+s.t+' bg-base-800/80 shrink-0">'+s.l+'</span></div>';
+  h+='<button id="drawer-close" aria-label="关闭智能体详情" onclick="closeDrawer()" class="text-txt-400 hover:text-txt-100 transition-colors min-w-11 min-h-11 flex items-center justify-center"><svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg></button>';
   h+='</div>';
   // Meta chips
   var meta=[];
@@ -115,6 +121,8 @@ function openDrawer(name){
   meta.push(chip('启动于 '+relT(m.timeCreated),'muted'));
   if(m.worktreeBranch)meta.push(chip(E(m.worktreeBranch),'muted'));
   h+='<div class="flex flex-wrap gap-1.5 mb-4 pb-4 border-b border-base-800/50">'+meta.join('')+'</div>';
+  var blockedTask=blockedTaskFor(name,t.tasks||[]);
+  if(blockedTask){h+='<div class="mb-4 rounded border border-amber-500/30 bg-amber-500/[0.05] p-3"><div class="text-[10px] uppercase tracking-wider text-amber-400 mb-1">当前受阻任务</div><div class="task-copy text-[13px] text-txt-200">'+E(blockedTask.content)+'</div></div>'}
   // Prompt
   if(m.prompt){
     h+='<div class="mb-4"><div class="text-txt-400 text-[10px] uppercase tracking-wider mb-2">原始提示词</div>';
@@ -137,7 +145,7 @@ function openDrawer(name){
       h+='<div class="mb-2 '+align+'">';
       h+='<div class="rounded-xl border '+bubbleBg+' p-3">';
       h+='<div class="flex items-center gap-2 mb-1.5">';
-      h+='<span class="text-[10px] font-medium '+(isAgent?'text-blue-400':'text-txt-300')+'">'+sender+'</span>';
+      h+='<span title="'+sender+'" class="min-w-0 max-w-full truncate text-[10px] font-medium '+(isAgent?'text-blue-400':'text-txt-300')+'">'+sender+'</span>';
       h+=chip(relT(am.timeCreated),'muted');
       if(am.toName)h+=chip('\\u2192 '+E(am.toName),'muted');
       if(deliv)h+='<span class="text-txt-500 text-[10px] ml-auto">'+deliv+'</span>';
@@ -155,7 +163,7 @@ function openDrawer(name){
   h+='<div class="mt-4 pt-4 border-t border-base-800/50">';
   h+='<div class="flex items-center justify-between mb-3">';
   h+='<span class="text-txt-400 text-[10px] uppercase tracking-wider">活动记录</span>';
-  h+='<button type="button" id="verbose-toggle" onclick="toggleVerbose()" aria-pressed="'+(verbose?'true':'false')+'" class="text-[10px] '+(verbose?'text-blue-400 border-blue-500/40 bg-blue-500/10':'text-txt-500 hover:text-txt-200 border-base-800')+' rounded px-1.5 py-[2px] transition-colors">详细模式：'+(verbose?'开':'关')+'</button>';
+  h+='<button type="button" id="verbose-toggle" onclick="toggleVerbose()" aria-pressed="'+(verbose?'true':'false')+'" class="min-h-11 px-2 text-[11px] '+(verbose?'text-blue-400 border-blue-500/40 bg-blue-500/10':'text-txt-400 hover:text-txt-100 border-base-800')+' rounded transition-colors">详细模式：'+(verbose?'开':'关')+'</button>';
   h+='</div>';
   h+='<div id="drawer-activity-list"><div class="text-txt-500 text-[12px]">正在加载活动记录...</div></div>';
   h+='</div>';
@@ -266,6 +274,7 @@ function closeDrawer(){
   drawer.inert=true;
   if(!modalOpen())setBackgroundInert(false);
   document.getElementById('drawer-bg').classList.remove('open');
+  restoreModalFocus();
 }
 
 function rTasks(t){
@@ -281,17 +290,17 @@ function rTasks(t){
     const rows=items.map(x=>{
       const ic=x.status==='completed'?'\\u2713':x.status==='in_progress'?'\\u25CF':'\\u25CB';
       const icl=x.status==='completed'?'text-emerald-500':x.status==='in_progress'?'text-blue-400':'text-txt-500';
-      const p=PR[x.priority]||PR.low,cn=x.content.length>55?x.content.slice(0,55)+'\\u2026':x.content;
+      const p=PR[x.priority]||PR.low,cn=x.content;
       let dep='';
       const depIds=Array.isArray(x.dependsOn)?x.dependsOn:(x.dependsOn?[String(x.dependsOn)]:[]);
-      if(depIds.length){const labels=depIds.map(id=>{const parent=taskMap[id];return parent?parent.content.slice(0,42):id}).join(', ');dep='<div class="text-[10px] text-txt-500 mt-0.5">依赖：'+E(labels)+'</div>'}
-      return '<div class="flex items-start gap-2 py-1.5 px-1 rounded hover:bg-base-800/40 transition-colors">'+
+      if(depIds.length){const labels=depIds.map(id=>{const parent=taskMap[id];return parent?parent.content:id}).join(', ');dep='<div class="runtime-text text-[11px] text-txt-400 mt-0.5">依赖：'+E(labels)+'</div>'}
+      return '<div tabindex="-1" data-task="'+E(x.id)+'" class="flex items-start gap-2 min-h-11 py-2 px-1 rounded hover:bg-base-800/40 transition-colors">'+
         '<span class="'+icl+' text-[11px] mt-[2px] shrink-0">'+ic+'</span>'+
-        '<div class="flex-1 min-w-0"><div class="text-[13px] text-txt-200 truncate">'+E(cn)+'</div>'+
+        '<div class="flex-1 min-w-0"><div class="task-copy text-[13px] text-txt-200">'+E(cn)+'</div>'+
         '<div class="flex gap-2 mt-1 text-[10px]"><span class="rounded px-1.5 py-[0px] '+p+'">'+E(enumLabel(x.priority))+'</span>'+
-        '<span class="text-txt-500">'+(E(x.assignee)||'未分配')+'</span></div>'+dep+'</div></div>';
+        '<span title="'+(E(x.assignee)||'未分配')+'" class="min-w-0 max-w-full truncate text-txt-500">'+(E(x.assignee)||'未分配')+'</span></div>'+dep+'</div></div>';
     }).join('');
-    return '<details '+(defOpen?'open':'')+'><summary class="flex items-center gap-2 text-[11px] text-txt-300 cursor-pointer py-1.5 hover:text-txt-200 transition-colors select-none">'+
+    return '<details '+(defOpen?'open':'')+'><summary class="flex items-center gap-2 min-h-11 text-[12px] text-txt-300 cursor-pointer py-2 hover:text-txt-100 transition-colors select-none">'+
       '<svg class="w-3 h-3 transition-transform [details[open]>summary>&]:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>'+
       '<span class="w-[6px] h-[6px] rounded-full '+dc+'"></span>'+label+' <span class="text-txt-500">('+items.length+')</span></summary>'+
       '<div class="ml-5 mt-1">'+rows+'</div></details>';
@@ -329,7 +338,7 @@ function rActivity(t){
     html+='<span class="w-5 h-5 rounded-full '+avatarColor+' flex items-center justify-center text-[9px] font-semibold shrink-0 mt-0.5">'+E(initial)+'</span>';
     html+='<div class="flex-1 min-w-0 rounded-xl border '+bubbleBg+' px-3 py-2">';
     html+='<div class="flex items-center gap-1.5 mb-1">';
-    html+='<span class="text-[11px] font-medium '+(isPeer?'text-violet-400':isFromAgent?'text-blue-400':'text-txt-300')+'">'+E(m.fromName)+'</span>';
+    html+='<span title="'+E(m.fromName)+'" class="min-w-0 max-w-[45%] truncate text-[11px] font-medium '+(isPeer?'text-violet-400':isFromAgent?'text-blue-400':'text-txt-300')+'">'+E(m.fromName)+'</span>';
     if(m.toName)html+=chip('\\u2192 '+E(m.toName),'muted');
     html+=chip(relT(m.timeCreated),'muted');
     if(deliv)html+='<span class="text-txt-500 text-[10px] ml-auto">'+deliv+'</span>';
@@ -340,7 +349,7 @@ function rActivity(t){
       if(!isExp&&p.details)html+='<div class="mt-1 text-[10px] text-txt-500">点击展开详情</div>';
     }else{
       if(isExp){html+='<div class="text-[12px] text-txt-300 md">'+md(m.content)+'</div>'}
-      else{const preview=m.content.length>120?m.content.slice(0,120)+'\\u2026':m.content;html+='<div class="text-[13px] text-txt-300 truncate">'+E(preview)+'</div>'}
+      else{html+='<div class="text-[13px] text-txt-300 line-clamp-2 break-words">'+E(m.content)+'</div>'}
     }
     html+='</div></div></div>';
   });
@@ -352,12 +361,14 @@ function rActivity(t){
 }
 
 function rTimeline(t){
-  const el=document.getElementById('tl'),evs=deriveTimeline(t);
+  const el=document.getElementById('tl'),evs=deriveTimeline(t),focusedTimeline=document.activeElement?.closest?.('[data-timeline-id]')?.dataset.timelineId||null;
   if(!evs.length){el.classList.add('hidden');return}
   el.classList.remove('hidden');
   const html=evs.map(ev=>{
-    return '<div class="flex flex-col items-center mx-1 shrink-0 group" title="'+E(ev.label)+' \\u00B7 '+relT(ev.t)+'"><div class="w-[6px] h-[6px] rounded-full '+ev.c+' group-hover:scale-150 transition-transform"></div><div class="text-[8px] text-txt-500 mt-0.5 hidden group-hover:block whitespace-nowrap">'+E(ev.label)+'</div></div>';
+    const key=ev.key;
+    return '<button type="button" class="timeline-event flex flex-col items-center justify-center mx-1 shrink-0 group" tabindex="0" data-timeline-id="'+E(key)+'" aria-pressed="'+(timelinePinned===key?'true':'false')+'" aria-label="'+E(ev.label)+'，'+relT(ev.t)+'" title="'+E(ev.label)+' \\u00B7 '+relT(ev.t)+'" onclick="toggleTimelineEvent(this)"><div class="w-[7px] h-[7px] rounded-full '+ev.c+' group-hover:scale-150 group-focus-visible:scale-150 group-aria-[pressed=true]:scale-150 transition-transform"></div><div class="text-[10px] text-txt-400 mt-0.5 hidden group-hover:block group-focus-visible:block group-aria-[pressed=true]:block whitespace-nowrap">'+E(ev.label)+'</div></button>';
   }).join('<div class="w-3 h-px bg-base-700 shrink-0 self-center"></div>');
   patch(el,'<span class="text-[9px] text-txt-500 uppercase tracking-wider mr-3 shrink-0">时间线</span>'+html);
+  if(focusedTimeline)requestAnimationFrame(function(){document.querySelector('[data-timeline-id="'+CSS.escape(focusedTimeline)+'"]')?.focus()});
 }
 `;

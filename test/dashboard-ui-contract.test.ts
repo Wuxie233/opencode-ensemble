@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test"
 import { DASHBOARD_HEAD } from "../src/dashboard-html"
-import { DASHBOARD_JS_CORE } from "../src/dashboard-js-core"
+import {
+  DASHBOARD_JS_CORE,
+  deriveDashboardAttention,
+  findDashboardAgentIndex,
+  nextDashboardAgentIndex,
+  nextDashboardConnection,
+  shouldIgnoreDashboardShortcut,
+} from "../src/dashboard-js-core"
 import { DASHBOARD_JS_EVENTS } from "../src/dashboard-js-events"
 import { DASHBOARD_JS_RENDER } from "../src/dashboard-js-render"
 
@@ -20,6 +27,47 @@ function contrastRatio(foreground: string, background: string): number {
 }
 
 describe("dashboard UI contract", () => {
+  test("attention items are risk-first and carry actionable targets", () => {
+    const result = deriveDashboardAttention({
+      members: [
+        { name: "builder", status: "busy", executionStatus: "running" },
+        { name: "reviewer", status: "error", executionStatus: "failed" },
+      ],
+      tasks: [
+        { id: "assigned", status: "blocked", assignee: "builder", content: "Waiting for API" },
+        { id: "unassigned", status: "blocked", assignee: null, content: "Needs owner" },
+      ],
+    })
+
+    expect(result.map(item => item.kind)).toEqual(["智能体错误", "受阻任务", "受阻任务"])
+    expect(result[0]?.target).toEqual({ type: "agent", id: "reviewer" })
+    expect(result[1]?.target).toEqual({ type: "agent", id: "builder" })
+    expect(result[2]?.target).toEqual({ type: "task", id: "unassigned" })
+  })
+
+  test("global shortcuts ignore editable and interactive controls", () => {
+    expect(shouldIgnoreDashboardShortcut("INPUT", false, false)).toBe(true)
+    expect(shouldIgnoreDashboardShortcut("DIV", true, false)).toBe(true)
+    expect(shouldIgnoreDashboardShortcut("BUTTON", false, true)).toBe(true)
+    expect(shouldIgnoreDashboardShortcut("BODY", false, false)).toBe(false)
+  })
+
+  test("agent roving focus wraps in both directions", () => {
+    expect(nextDashboardAgentIndex(-1, 3, 1)).toBe(0)
+    expect(nextDashboardAgentIndex(2, 3, 1)).toBe(0)
+    expect(nextDashboardAgentIndex(0, 3, -1)).toBe(2)
+    expect(nextDashboardAgentIndex(0, 0, 1)).toBe(-1)
+    expect(findDashboardAgentIndex(["reviewer", "builder"], "builder", 0)).toBe(1)
+    expect(findDashboardAgentIndex(["reviewer", "builder"], "missing", 1)).toBe(1)
+  })
+
+  test("connection transitions distinguish initial failure, stale data, and recovery", () => {
+    expect(nextDashboardConnection("loading", "failure", false)).toBe("error")
+    expect(nextDashboardConnection("live", "failure", true)).toBe("stale")
+    expect(nextDashboardConnection("stale", "success", true)).toBe("recovered")
+    expect(nextDashboardConnection("recovered", "success", true)).toBe("live")
+  })
+
   test("HTML shell exposes triage cockpit regions", () => {
     expect(DASHBOARD_HEAD).toContain('<html lang="zh-CN">')
     expect(DASHBOARD_HEAD).toContain('id="attention"')
@@ -36,7 +84,10 @@ describe("dashboard UI contract", () => {
   test("fixed dashboard chrome is constrained on narrow viewports", () => {
     expect(DASHBOARD_HEAD).toContain("px-3 sm:px-4")
     expect(DASHBOARD_HEAD).toContain("gap-2 sm:gap-3 min-w-0 flex-1")
-    expect(DASHBOARD_HEAD).toContain("overflow-x-auto scroll whitespace-nowrap")
+    expect(DASHBOARD_HEAD).toContain('id="sum"')
+    expect(DASHBOARD_HEAD).toContain("flex-wrap")
+    expect(DASHBOARD_HEAD).not.toContain('id="sum" class="fixed')
+    expect(DASHBOARD_HEAD).not.toContain("min-resolution:1.75dppx")
     expect(DASHBOARD_HEAD).toContain("minmax(min(300px,100%),1fr)")
   })
 
@@ -89,6 +140,68 @@ describe("dashboard UI contract", () => {
   test("attention renderer exposes urgent triage copy", () => {
     expect(DASHBOARD_JS_RENDER).toContain("function rAttention")
     expect(DASHBOARD_JS_RENDER).toContain("需要关注")
+    expect(DASHBOARD_JS_EVENTS).toContain("activateAttention")
+    expect(DASHBOARD_JS_RENDER).toContain("data-attention-type")
+    expect(DASHBOARD_JS_RENDER).toContain("break-words")
+    expect(DASHBOARD_JS_RENDER).toContain("line-clamp-3")
+  })
+
+  test("connection UI preserves last-good data and announces state changes", () => {
+    expect(DASHBOARD_HEAD).toContain('id="connection-state"')
+    expect(DASHBOARD_HEAD).toContain('role="status"')
+    expect(DASHBOARD_HEAD).toContain('aria-live="polite"')
+    expect(DASHBOARD_JS_EVENTS).toContain("if(!res.ok)throw new Error")
+    expect(DASHBOARD_JS_EVENTS).toContain("nextConnection(connectionMode,'failure',!!S)")
+    expect(DASHBOARD_JS_CORE).toContain("pollInFlight=false")
+    expect(DASHBOARD_JS_EVENTS).toContain("if(pollInFlight)return")
+    expect(DASHBOARD_JS_EVENTS).toContain("finally{pollInFlight=false}")
+    expect(DASHBOARD_JS_EVENTS).not.toContain("catch{if(++fails>=3)conn(false)}")
+  })
+
+  test("timeline and project navigation support touch, keyboard, and scale", () => {
+    expect(DASHBOARD_HEAD).toContain("touch-action:pan-x")
+    expect(DASHBOARD_HEAD).toContain("overflow-wrap:anywhere")
+    expect(DASHBOARD_HEAD).toContain("max-h-[45vh]")
+    expect(DASHBOARD_HEAD).toContain("lg:max-h-[calc(100vh-112px)]")
+    expect(DASHBOARD_JS_RENDER).toContain('class="timeline-event')
+    expect(DASHBOARD_JS_RENDER).toContain('tabindex="0"')
+    expect(DASHBOARD_JS_RENDER).toContain("toggleTimelineEvent(this)")
+    expect(DASHBOARD_JS_EVENTS).toContain("function toggleTimelineEvent")
+    expect(DASHBOARD_JS_CORE).toContain("timelinePinned=null")
+    expect(DASHBOARD_JS_EVENTS).toContain("timelinePinned=timelinePinned===id?null:id")
+    expect(DASHBOARD_JS_RENDER).toContain("timelinePinned===key?'true':'false'")
+    expect(DASHBOARD_HEAD).toContain("min-h-10")
+  })
+
+  test("adaptive workspace uses the full width without nested agent-card controls", () => {
+    expect(DASHBOARD_HEAD).toContain('class="workspace grid grid-cols-1')
+    expect(DASHBOARD_HEAD).toContain('class="triage-panels grid grid-cols-1 xl:grid-cols-2')
+    expect(DASHBOARD_JS_RENDER).not.toContain('<details class="mt-1"><summary')
+    expect(DASHBOARD_JS_RENDER).toContain("打开智能体详情查看完整消息")
+    expect(DASHBOARD_JS_RENDER).not.toContain("openDrawer(this.dataset.card)}\"")
+    expect(DASHBOARD_JS_RENDER).not.toContain("toggleTimelineEvent(this)}\"")
+    expect(DASHBOARD_JS_CORE).toContain("selectedAgent=null")
+    expect(DASHBOARD_JS_EVENTS).toContain("function restoreModalFocus")
+    expect(DASHBOARD_JS_RENDER).toContain("focusedAgent")
+    expect(DASHBOARD_JS_RENDER).toContain("focusedAgent===selectedAgent")
+    expect(DASHBOARD_JS_RENDER).toContain("当前受阻任务")
+  })
+
+  test("runtime chips can shrink and wrap long identifiers", () => {
+    expect(DASHBOARD_JS_CORE).toContain("max-w-full min-w-0")
+    expect(DASHBOARD_JS_CORE).toContain("break-all whitespace-normal")
+    expect(DASHBOARD_HEAD).toContain('id="ct" class="hidden sm:inline')
+    expect(DASHBOARD_JS_RENDER).toContain("max-w-[7rem] truncate")
+    expect(DASHBOARD_JS_RENDER).toContain('id="drawer-title" class="runtime-text')
+    expect(DASHBOARD_JS_RENDER).toContain("max-w-full truncate text-txt-500")
+    expect(DASHBOARD_JS_RENDER).toContain("max-w-[45%] truncate text-[11px]")
+  })
+
+  test("timeline events preserve source identity for stable interaction", () => {
+    expect(DASHBOARD_JS_CORE).toContain("key:'member|'+m.name+'|spawn'")
+    expect(DASHBOARD_JS_CORE).toContain("key:'message|'+m.id")
+    expect(DASHBOARD_JS_CORE).toContain("key:'task|'+x.id+'|done'")
+    expect(DASHBOARD_JS_RENDER).toContain("const key=ev.key")
   })
 
   test("keyboard and accessibility hooks are present", () => {

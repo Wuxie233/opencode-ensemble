@@ -96,6 +96,22 @@ Main-directory recovery is deduplicated per resolved project and starts after re
 
 WAL mode. Migrations via PRAGMA user_version.
 
+### Dashboard Triage
+
+The dashboard is a live triage surface. Keep attention items risk-first and
+actionable: agent alerts open the matching agent context, while unassigned task
+alerts focus the exact task. Polling is single-flight and retains the last good
+snapshot on failure. Interactive state must be keyed by stable member, task,
+message, or timeline source IDs rather than render indexes so polling and risk
+sorting cannot move focus or activate a different object.
+
+At 320px and browser text zoom, summary status must wrap without horizontal
+scrolling, project navigation must remain independently scrollable, and runtime
+identifiers must wrap or truncate with the full value still available. Browser
+acceptance for dashboard changes should cover slow and failed polls, focus
+restoration, attention navigation, timeline state, long identifiers, and body
+overflow in addition to `test/dashboard-ui-contract.test.ts`.
+
 ### Message Delivery
 
 All messages delivered via client.session.promptAsync(). Single atomic
