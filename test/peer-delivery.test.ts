@@ -72,6 +72,14 @@ describe("idle peer message delivery", () => {
     expect(row.delivered).toBe(0)
   })
 
+  test("reclaims an expired delivery lease without restarting", () => {
+    const id = sendMessage(deps.db, { teamId: "t1", from: "alice", to: "bob", content: "retry expired" })
+    deps.db.run("UPDATE team_message SET delivery_claimed_at = 1 WHERE id = ?", [id])
+
+    expect(flushPendingPeerMessage(deps.db, deps.client, "sess-bob", Date.now() + 1)).toBeTrue()
+    expect(deps.client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(1)
+  })
+
   test("does not release a failed claim after the team is archived", async () => {
     let rejectDelivery: (error: Error) => void = () => {}
     deps.client.session.promptAsync = () => new Promise((_, reject) => {
@@ -84,8 +92,12 @@ describe("idle peer message delivery", () => {
     rejectDelivery(new Error("delivery failed"))
     await new Promise(resolve => setTimeout(resolve, 0))
 
-    const row = deps.db.query("SELECT delivered FROM team_message WHERE content = ?").get("archive me") as { delivered: number }
-    expect(row.delivered).toBe(1)
+    const row = deps.db.query("SELECT delivered, delivery_claimed_at FROM team_message WHERE content = ?").get("archive me") as {
+      delivered: number
+      delivery_claimed_at: number | null
+    }
+    expect(row.delivered).toBe(0)
+    expect(row.delivery_claimed_at).not.toBeNull()
   })
 })
 

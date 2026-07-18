@@ -108,6 +108,11 @@ recipient until that Session starts a new turn. Delivery failure may restore
 the claim only while the Team and recipient remain eligible; cleanup archives
 the Team and consumes residual messages in the same transaction.
 
+Asynchronous peer delivery uses `team_message.delivery_claimed_at` as a
+recoverable lease. Keep `delivered=0` until `promptAsync` resolves, exclude
+leased rows from system-prompt injection, and allow startup recovery to reclaim
+expired leases. Never use `delivered=1` as an in-flight claim.
+
 ### State Machines
 
 Two-level per member:
@@ -180,6 +185,9 @@ Three hooks wired in index.ts:
 12. Branch preservation before session.abort() is MANDATORY — see
     "Branch Preservation" section below. Every code path that calls
     session.abort() MUST preserve the worktree branch first.
+13. `team_spawn(claim_task)` owns task coordination atomically. It must claim
+    only a same-Team pending task before resource creation and conditionally
+    roll the claim back on every spawn failure path.
 
 ## Branch Preservation (Critical — Do Not Skip)
 
@@ -207,6 +215,8 @@ that is not tied to any worktree. OpenCode cannot delete it.
    timed-out members
 6. `index.ts` → `busy_while_shutdown` event — verifies/re-preserves
    before re-aborting a session that went busy after shutdown request
+7. `team-spawn.ts` → prompt or post-create registration failure — preserves
+   any created worktree branch before aborting the child session
 
 ### What goes wrong if you skip it
 

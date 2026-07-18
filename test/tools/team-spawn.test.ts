@@ -3,6 +3,19 @@ import { setupDeps, insertTeam, insertMember } from "../helpers"
 import { executeTeamSpawn } from "../../src/tools/team-spawn"
 import type { ToolDeps } from "../../src/types"
 
+function insertTask(
+  deps: ReturnType<typeof setupDeps>,
+  teamId: string,
+  id: string,
+  status = "pending",
+  assignee: string | null = null,
+) {
+  deps.db.run(
+    "INSERT INTO team_task (id, team_id, content, status, priority, assignee, time_created, time_updated) VALUES (?, ?, ?, ?, 'medium', ?, ?, ?)",
+    [id, teamId, `Task ${id}`, status, assignee, Date.now(), Date.now()],
+  )
+}
+
 describe("team_spawn", () => {
   let deps: ReturnType<typeof setupDeps>
 
@@ -89,6 +102,8 @@ describe("team_spawn", () => {
   })
 
   test("context message includes assigned task when claim_task is provided", async () => {
+    insertTask(deps, "t1", "task-123")
+
     await executeTeamSpawn(deps, {
       name: "alice",
       agent: "build",
@@ -102,6 +117,145 @@ describe("team_spawn", () => {
 
     expect(text).toContain("task-123")
     expect(text).toContain("Mark it complete when done")
+  })
+
+  test("atomically claims a same-team pending task for the spawned teammate", async () => {
+    insertTask(deps, "t1", "task-123")
+
+    await executeTeamSpawn(deps, {
+      name: "alice",
+      agent: "build",
+      prompt: "Fix the tests",
+      claim_task: "task-123",
+    }, "lead-sess")
+
+    const task = deps.db.query("SELECT status, assignee FROM team_task WHERE id = ?").get("task-123") as {
+      status: string
+      assignee: string | null
+    }
+    expect(task).toEqual({ status: "in_progress", assignee: "alice" })
+  })
+
+  test("rejects claim_task from another team without spawning", async () => {
+    insertTeam(deps.db, "t2", "other-team", "other-lead")
+    insertTask(deps, "t2", "task-123")
+
+    await expect(executeTeamSpawn(deps, {
+      name: "alice",
+      agent: "build",
+      prompt: "Fix the tests",
+      claim_task: "task-123",
+    }, "lead-sess")).rejects.toThrow('Task "task-123" not found')
+
+    expect(deps.client.calls.filter(call => call.method === "session.create")).toHaveLength(0)
+  })
+
+  test("rejects claim_task that is not pending without spawning", async () => {
+    insertTask(deps, "t1", "task-123", "completed", "bob")
+
+    await expect(executeTeamSpawn(deps, {
+      name: "alice",
+      agent: "build",
+      prompt: "Fix the tests",
+      claim_task: "task-123",
+    }, "lead-sess")).rejects.toThrow('Task "task-123" is not pending (status: completed)')
+
+    expect(deps.client.calls.filter(call => call.method === "session.create")).toHaveLength(0)
+  })
+
+  test("rejects a concurrent same-name spawn before claiming its task", async () => {
+    insertTask(deps, "t1", "task-1")
+    insertTask(deps, "t1", "task-2")
+    let releaseCreate: (() => void) | undefined
+    deps.client.session.create = async () => {
+      await new Promise<void>(resolve => { releaseCreate = resolve })
+      return { data: { id: "sess-alice" } }
+    }
+
+    const first = executeTeamSpawn(deps, {
+      name: "alice",
+      agent: "explore",
+      prompt: "First task",
+      claim_task: "task-1",
+    }, "lead-sess")
+    await Bun.sleep(0)
+
+    await expect(executeTeamSpawn(deps, {
+      name: "alice",
+      agent: "explore",
+      prompt: "Second task",
+      claim_task: "task-2",
+    }, "lead-sess")).rejects.toThrow("already being spawned")
+
+    const secondTask = deps.db.query("SELECT status, assignee FROM team_task WHERE id = ?").get("task-2") as {
+      status: string
+      assignee: string | null
+    }
+    expect(secondTask).toEqual({ status: "pending", assignee: null })
+
+    releaseCreate?.()
+    await first
+    expect(deps.db.query("SELECT name FROM team_member WHERE team_id = ? AND name = ?").all("t1", "alice")).toHaveLength(1)
+  })
+
+  test("rolls back claim_task when session creation fails", async () => {
+    insertTask(deps, "t1", "task-123")
+    deps.client.session.create = async () => { throw new Error("session failed") }
+
+    await expect(executeTeamSpawn(deps, {
+      name: "alice",
+      agent: "build",
+      prompt: "Fix the tests",
+      claim_task: "task-123",
+    }, "lead-sess")).rejects.toThrow("session failed")
+
+    const task = deps.db.query("SELECT status, assignee FROM team_task WHERE id = ?").get("task-123") as {
+      status: string
+      assignee: string | null
+    }
+    expect(task).toEqual({ status: "pending", assignee: null })
+  })
+
+  test("rolls back claim_task and session when member registration fails", async () => {
+    insertTask(deps, "t1", "task-123")
+    const originalRun = deps.db.run.bind(deps.db)
+    deps.db.run = (sql, ...params) => {
+      if (sql.startsWith("INSERT INTO team_member")) throw new Error("registration failed")
+      return originalRun(sql, ...params)
+    }
+
+    await expect(executeTeamSpawn(deps, {
+      name: "alice",
+      agent: "explore",
+      prompt: "Fix the tests",
+      claim_task: "task-123",
+    }, "lead-sess")).rejects.toThrow("registration failed")
+
+    const task = deps.db.query("SELECT status, assignee FROM team_task WHERE id = ?").get("task-123") as {
+      status: string
+      assignee: string | null
+    }
+    expect(task).toEqual({ status: "pending", assignee: null })
+    expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(1)
+  })
+
+  test("rolls back claim_task when prompt dispatch fails asynchronously", async () => {
+    insertTask(deps, "t1", "task-123")
+    deps.client.session.promptAsync = async () => { throw new Error("delivery failed") }
+
+    await executeTeamSpawn(deps, {
+      name: "alice",
+      agent: "build",
+      prompt: "Fix the tests",
+      claim_task: "task-123",
+    }, "lead-sess")
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    const task = deps.db.query("SELECT status, assignee FROM team_task WHERE id = ?").get("task-123") as {
+      status: string
+      assignee: string | null
+    }
+    expect(task).toEqual({ status: "pending", assignee: null })
   })
 
   test("context message does NOT include assigned task line when claim_task is absent", async () => {

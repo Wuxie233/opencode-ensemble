@@ -186,6 +186,8 @@ export const MIGRATIONS: string[] = [
    CREATE INDEX IF NOT EXISTS team_message_undelivered_idx ON team_message(team_id, delivered) WHERE delivered = 0;
    CREATE INDEX IF NOT EXISTS team_message_unread_idx ON team_message(team_id, read) WHERE read = 0;
    PRAGMA foreign_keys=ON;`,
+  // Migration 9: Add a recoverable lease for asynchronous message redelivery.
+  `ALTER TABLE team_message ADD COLUMN delivery_claimed_at INTEGER;`,
 ]
 
 /**

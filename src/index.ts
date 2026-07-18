@@ -123,6 +123,7 @@ const plugin: Plugin = async (input) => {
     ttlMs: config.timeoutMs,
     checkIntervalMs: DEFAULT_WATCHDOG_CHECK_MS,
     progressTracker,
+    activityBuffer,
     stallThresholdMs: config.stallThresholdMs,
     stallMinSteps: config.stallMinSteps,
     stallTokenThreshold: config.stallTokenThreshold,

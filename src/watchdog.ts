@@ -2,6 +2,7 @@ import type { Database } from "./db"
 import type { PluginClient } from "./types"
 import type { MemberRegistry } from "./state"
 import type { ProgressTracker } from "./progress"
+import type { ActivityBuffer } from "./activity"
 import { preserveBranch, preservedBranchName } from "./tools/merge-helper"
 import { sendMessage } from "./messaging"
 import { log } from "./log"
@@ -16,6 +17,8 @@ interface WatchdogOpts {
   checkIntervalMs?: number
   /** Progress tracker for stall detection. */
   progressTracker?: ProgressTracker
+  /** Recent session activity used to recognize tool progress. */
+  activityBuffer?: ActivityBuffer
   /** Stall detection threshold in ms. 0 disables. */
   stallThresholdMs?: number
   /** Min steps before token-based stall check. */
@@ -41,6 +44,7 @@ export class Watchdog {
   private readonly ttlMs: number
   private readonly checkIntervalMs: number
   private readonly progressTracker?: ProgressTracker
+  private readonly activityBuffer?: ActivityBuffer
   private readonly stallThresholdMs: number
   private readonly stallMinSteps: number
   private readonly stallTokenThreshold: number
@@ -56,6 +60,7 @@ export class Watchdog {
     this.ttlMs = opts.ttlMs
     this.checkIntervalMs = opts.checkIntervalMs ?? 60_000
     this.progressTracker = opts.progressTracker
+    this.activityBuffer = opts.activityBuffer
     this.stallThresholdMs = opts.stallThresholdMs ?? 0
     this.stallMinSteps = opts.stallMinSteps ?? 3
     this.stallTokenThreshold = opts.stallTokenThreshold ?? 500
@@ -105,6 +110,12 @@ export class Watchdog {
     ).all() as Array<{ team_id: string; name: string; session_id: string }>
 
     for (const member of busy) {
+      const toolResult = this.activityBuffer
+        ?.getActivity(member.session_id)
+        .findLast(entry => entry.type === "tool_result")
+      if (toolResult) {
+        this.progressTracker.recordActivity(member.session_id, toolResult.timestamp)
+      }
       if (this.progressTracker.isReported(member.session_id)) continue
 
       const tokenStalled = this.progressTracker.isTokenStalled(member.session_id, this.stallMinSteps, this.stallTokenThreshold)

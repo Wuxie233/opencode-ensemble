@@ -290,21 +290,57 @@ describe("recoverUndeliveredMessages", () => {
     expect(promptCalls).toHaveLength(2)
   })
 
-  test("continues on partial failure", async () => {
+  test("restores an asynchronously failed delivery for retry", async () => {
     sendMessage(db, { teamId: "t1", from: "alice", to: "bob", content: "msg1" })
-    sendMessage(db, { teamId: "t1", from: "alice", to: "bob", content: "msg2" })
-
-    // Make first promptAsync fail
-    let callCount = 0
-    client.session.promptAsync = async (options) => {
-      callCount++
-      if (callCount === 1) throw new Error("network error")
-      return {}
-    }
+    client.session.promptAsync = () => Promise.reject(new Error("network error"))
 
     const result = await recoverUndeliveredMessages(db, client, registry)
-    // One succeeded, one failed
     expect(result.redelivered).toBe(1)
+
+    await Promise.resolve()
+    const message = db.query("SELECT delivered FROM team_message WHERE team_id = ?").get("t1") as { delivered: number }
+    expect(message.delivered).toBe(0)
+  })
+
+  test("restores a failed delivery to a busy recovered member", async () => {
+    db.run("UPDATE team_member SET status = 'busy', execution_status = 'running' WHERE team_id = ? AND name = ?", ["t1", "bob"])
+    sendMessage(db, { teamId: "t1", from: "alice", to: "bob", content: "msg1" })
+    client.session.promptAsync = () => Promise.reject(new Error("network error"))
+
+    const result = await recoverUndeliveredMessages(db, client, registry)
+    expect(result.redelivered).toBe(1)
+
+    await Promise.resolve()
+    const message = db.query("SELECT delivered FROM team_message WHERE team_id = ?").get("t1") as { delivered: number }
+    expect(message.delivered).toBe(0)
+  })
+
+  test("does not wait for promptAsync to settle", async () => {
+    sendMessage(db, { teamId: "t1", from: "alice", to: "bob", content: "msg1" })
+    client.session.promptAsync = () => new Promise(() => {})
+
+    const result = await Promise.race([
+      recoverUndeliveredMessages(db, client, registry),
+      Bun.sleep(50).then(() => "timed-out" as const),
+    ])
+
+    expect(result).toEqual({ redelivered: 1 })
+    const message = db.query("SELECT delivered, delivery_claimed_at FROM team_message WHERE team_id = ?").get("t1") as {
+      delivered: number
+      delivery_claimed_at: number | null
+    }
+    expect(message.delivered).toBe(0)
+    expect(message.delivery_claimed_at).not.toBeNull()
+  })
+
+  test("reclaims an expired recovery delivery lease", async () => {
+    const id = sendMessage(db, { teamId: "t1", from: "alice", to: "bob", content: "msg1" })
+    db.run("UPDATE team_message SET delivery_claimed_at = ? WHERE id = ?", [0, id])
+
+    const result = await recoverUndeliveredMessages(db, client, registry)
+
+    expect(result.redelivered).toBe(1)
+    expect(client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(1)
   })
 
   test("skips broadcast messages (to_name is NULL)", async () => {

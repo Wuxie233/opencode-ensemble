@@ -66,19 +66,65 @@ describe("ProgressTracker", () => {
     expect(pt.isTimeStalled("s1", 0)).toBe(true)
   })
 
+  test("isTimeStalled resumes after an activity reset empties the token window", () => {
+    const pt = new ProgressTracker()
+    pt.recordStep("s1", 10)
+    pt.recordActivity("s1")
+
+    expect(pt.isTokenStalled("s1", 1, 500)).toBe(false)
+    expect(pt.isTimeStalled("s1", 0)).toBe(true)
+  })
+
   test("recordMessage clears stall report", () => {
     const pt = new ProgressTracker()
+    pt.recordStep("s1", 10)
+    pt.recordStep("s1", 10)
+    pt.recordStep("s1", 10)
     pt.markReported("s1")
     expect(pt.isReported("s1")).toBe(true)
     pt.recordMessage("s1")
     expect(pt.isReported("s1")).toBe(false)
+    expect(pt.isTokenStalled("s1", 3, 500)).toBe(false)
+
+    pt.recordStep("s1", 10)
+    pt.recordStep("s1", 10)
+    expect(pt.isTokenStalled("s1", 3, 500)).toBe(false)
+    pt.recordStep("s1", 10)
+    expect(pt.isTokenStalled("s1", 3, 500)).toBe(true)
   })
 
   test("recordTaskComplete clears stall report", () => {
     const pt = new ProgressTracker()
+    pt.recordStep("s1", 10)
+    pt.recordStep("s1", 10)
+    pt.recordStep("s1", 10)
     pt.markReported("s1")
     pt.recordTaskComplete("s1")
     expect(pt.isReported("s1")).toBe(false)
+    expect(pt.isTokenStalled("s1", 3, 500)).toBe(false)
+  })
+
+  test("recordActivity ignores the old low-token window and clears the report", () => {
+    const pt = new ProgressTracker()
+    pt.recordStep("s1", 10)
+    pt.recordStep("s1", 10)
+    pt.recordStep("s1", 10)
+    pt.markReported("s1")
+
+    pt.recordActivity("s1")
+
+    expect(pt.isReported("s1")).toBe(false)
+    expect(pt.isTokenStalled("s1", 3, 500)).toBe(false)
+  })
+
+  test("replaying an old activity does not clear a newer stall report", () => {
+    const pt = new ProgressTracker()
+    pt.recordActivity("s1", 100)
+    pt.markReported("s1")
+
+    pt.recordActivity("s1", 100)
+
+    expect(pt.isReported("s1")).toBe(true)
   })
 
   test("markReported / isReported / clearReport lifecycle", () => {

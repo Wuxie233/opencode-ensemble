@@ -58,6 +58,13 @@ export function handleSessionStatusEvent(
     }
     return { memberName: entry.memberName, teamId: entry.teamId, from: member.status, to: newStatus }
   } else if (status === "busy") {
+    if (member.status === "busy" && member.execution_status === "starting") {
+      db.run(
+        "UPDATE team_member SET execution_status = 'running', time_updated = ? WHERE team_id = ? AND name = ?",
+        [Date.now(), entry.teamId, entry.memberName]
+      )
+      return undefined
+    }
     if (member.status === "ready" || member.status === "error") {
       // Reset reported_to_lead so re-activated teammates can receive messages again (issue #3).
       // INVARIANT: every promptAsync delivery path must check hasReportedCompletion() to prevent loops.

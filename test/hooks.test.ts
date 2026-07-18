@@ -167,6 +167,19 @@ describe("handleSessionStatusEvent", () => {
     expect(result).toBeUndefined()
   })
 
+  test("advances a newly spawned busy member from starting to running on its first busy event", () => {
+    insertTeam(db, "t1", "my-team", "lead-sess")
+    insertMember(db, "t1", "alice", "sess-1", "busy", "starting")
+    registry.register("t1", "alice", "sess-1")
+
+    const result = handleSessionStatusEvent(db, registry, "sess-1", "busy")
+
+    expect(result).toBeUndefined()
+    const row = db.query("SELECT status, execution_status FROM team_member WHERE session_id = ?").get("sess-1") as Record<string, string>
+    expect(row.status).toBe("busy")
+    expect(row.execution_status).toBe("running")
+  })
+
   test("returns undefined for retry status (no transition)", () => {
     insertTeam(db, "t1", "my-team", "lead-sess")
     insertMember(db, "t1", "alice", "sess-1", "busy", "running")

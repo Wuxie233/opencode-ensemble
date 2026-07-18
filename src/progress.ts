@@ -10,6 +10,8 @@ export interface StepRecord {
  */
 export class ProgressTracker {
   private steps = new Map<string, StepRecord[]>()
+  private lastStepAt = new Map<string, number>()
+  private lastActivityAt = new Map<string, number>()
   private lastMessageAt = new Map<string, number>()
   private lastTaskAt = new Map<string, number>()
   private peerMessages = new Map<string, number[]>()
@@ -23,10 +25,12 @@ export class ProgressTracker {
 
   /** Record a model step completion with output token count. Keeps last `maxSteps` entries. */
   recordStep(sessionId: string, outputTokens: number): void {
+    const timestamp = Date.now()
     const records = this.steps.get(sessionId) ?? []
-    records.push({ outputTokens, timestamp: Date.now() })
+    records.push({ outputTokens, timestamp })
     if (records.length > this.maxSteps) records.shift()
     this.steps.set(sessionId, records)
+    this.lastStepAt.set(sessionId, timestamp)
   }
 
   /** Record a peer message (not to lead). Used for chatty detection. */
@@ -65,14 +69,28 @@ export class ProgressTracker {
 
   /** Record that this member sent a team_message. Clears stall report. */
   recordMessage(sessionId: string): void {
-    this.lastMessageAt.set(sessionId, Date.now())
-    this.clearReport(sessionId)
+    const timestamp = Date.now()
+    this.lastMessageAt.set(sessionId, timestamp)
+    this.recordActivity(sessionId, timestamp)
   }
 
   /** Record that this member completed a task. Clears stall report. */
   recordTaskComplete(sessionId: string): void {
-    this.lastTaskAt.set(sessionId, Date.now())
+    const timestamp = Date.now()
+    this.lastTaskAt.set(sessionId, timestamp)
+    this.recordActivity(sessionId, timestamp)
+  }
+
+  /** Record meaningful progress and start a fresh low-token detection window. */
+  recordActivity(sessionId: string, timestamp = Date.now()): void {
+    const previous = this.lastActivityAt.get(sessionId) ?? 0
+    if (timestamp <= previous) return
+
     this.clearReport(sessionId)
+    this.lastActivityAt.set(sessionId, timestamp)
+    const records = this.steps.get(sessionId)
+    if (!records) return
+    this.steps.set(sessionId, records.filter(record => record.timestamp > timestamp))
   }
 
   /** Token-based stall: last `minSteps` steps all produced < `threshold` output tokens. */
@@ -85,13 +103,13 @@ export class ProgressTracker {
 
   /** Time-based stall: no message or task completion within `thresholdMs` of now. */
   isTimeStalled(sessionId: string, thresholdMs: number): boolean {
-    const records = this.steps.get(sessionId)
-    if (!records || records.length === 0) return false
+    const lastStep = this.lastStepAt.get(sessionId)
+    if (lastStep === undefined) return false
 
     const msgAt = this.lastMessageAt.get(sessionId) ?? 0
     const taskAt = this.lastTaskAt.get(sessionId) ?? 0
-    const lastStep = records[records.length - 1]?.timestamp ?? 0
-    const baseline = Math.max(msgAt, taskAt, lastStep)
+    const activityAt = this.lastActivityAt.get(sessionId) ?? 0
+    const baseline = Math.max(msgAt, taskAt, activityAt, lastStep)
 
     return Date.now() - baseline >= thresholdMs
   }
@@ -114,6 +132,8 @@ export class ProgressTracker {
   /** Remove all tracking for a session (on shutdown). */
   remove(sessionId: string): void {
     this.steps.delete(sessionId)
+    this.lastStepAt.delete(sessionId)
+    this.lastActivityAt.delete(sessionId)
     this.lastMessageAt.delete(sessionId)
     this.lastTaskAt.delete(sessionId)
     this.peerMessages.delete(sessionId)

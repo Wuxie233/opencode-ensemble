@@ -240,6 +240,15 @@ describe("buildTeammateSystemPrompt peer messages", () => {
     expect(result).not.toContain("Already delivered")
   })
 
+  test("does not duplicate a message with an active delivery lease", () => {
+    db.run("INSERT INTO team_message (id, team_id, from_name, to_name, content, delivered, delivery_claimed_at, time_created) VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
+      ["msg-1", "t1", "bob", "alice", "Delivery in progress", Date.now(), Date.now()])
+
+    const result = buildTeammateSystemPrompt(db, "t1", "alice")
+
+    expect(result).not.toContain("Delivery in progress")
+  })
+
   test("marks messages as delivered after injection", () => {
     db.run("INSERT INTO team_message (id, team_id, from_name, to_name, content, delivered, time_created) VALUES (?, ?, ?, ?, ?, 0, ?)",
       ["msg-1", "t1", "bob", "alice", "Peer message", Date.now()])

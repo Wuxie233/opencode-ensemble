@@ -49,7 +49,7 @@ export function buildLeadSystemPrompt(db: Database, teamId: string, config?: Req
     : "Teammates: none"
 
   const pendingMessages = db.query(
-    "SELECT id, from_name, content FROM team_message WHERE team_id = ? AND to_name = 'lead' AND delivered = 0 ORDER BY time_created ASC"
+    "SELECT id, from_name, content FROM team_message WHERE team_id = ? AND to_name = 'lead' AND delivered = 0 AND delivery_claimed_at IS NULL ORDER BY time_created ASC"
   ).all(teamId) as Array<{ id: string; from_name: string; content: string }>
 
   const lines = [
@@ -176,7 +176,7 @@ export function buildTeammateSystemPrompt(db: Database, teamId: string, memberNa
 
   // Deliver pending peer messages addressed to this teammate
   const pendingMessages = db.query(
-    "SELECT id, from_name, content FROM team_message WHERE team_id = ? AND to_name = ? AND delivered = 0 ORDER BY time_created ASC"
+    "SELECT id, from_name, content FROM team_message WHERE team_id = ? AND to_name = ? AND delivered = 0 AND delivery_claimed_at IS NULL ORDER BY time_created ASC"
   ).all(teamId, memberName) as Array<{ id: string; from_name: string; content: string }>
 
   if (pendingMessages.length > 0) {

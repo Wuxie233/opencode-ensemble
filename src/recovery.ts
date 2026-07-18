@@ -1,7 +1,14 @@
 import type { Database } from "./db"
 import type { PluginClient } from "./types"
 import type { MemberRegistry } from "./state"
-import { getUndeliveredMessages, markDelivered, hasReportedCompletion } from "./messaging"
+import {
+  claimPeerMessageDelivery,
+  getUndeliveredMessages,
+  markDelivered,
+  hasReportedCompletion,
+  MESSAGE_DELIVERY_LEASE_MS,
+  restoreFailedPeerMessageDelivery,
+} from "./messaging"
 import { preserveBranch, preservedBranchName, teamResourceSegment } from "./tools/merge-helper"
 import { log } from "./log"
 import { runCommand } from "./process"
@@ -93,7 +100,7 @@ export async function recoverOrphanedWorktrees(db: Database, client: PluginClien
 /**
  * Redeliver undelivered messages (delivered=0) via promptAsync.
  * Resolves recipient session IDs from the member registry or team lead.
- * Continues on partial failure — logs but doesn't abort.
+ * Dispatches without awaiting transport completion and restores failed claims for retry.
  */
 export async function recoverUndeliveredMessages(
   db: Database,
@@ -132,16 +139,18 @@ export async function recoverUndeliveredMessages(
         continue
       }
 
-      try {
-        await client.session.promptAsync({
-          sessionID: recipientSessionId,
-          parts: [{ type: "text", text: `[Recovered team message from ${msg.from_name}]: ${msg.content}` }],
-        })
+      if (!claimPeerMessageDelivery(db, msg.id, Date.now() - MESSAGE_DELIVERY_LEASE_MS)) continue
+
+      client.session.promptAsync({
+        sessionID: recipientSessionId,
+        parts: [{ type: "text", text: `[Recovered team message from ${msg.from_name}]: ${msg.content}` }],
+      }).then(() => {
         markDelivered(db, msg.id)
-        redelivered++
-      } catch {
-        // Continue on failure — message stays undelivered for next recovery
-      }
+      }).catch((err) => {
+        restoreFailedPeerMessageDelivery(db, msg.id, recipientSessionId, false)
+        log(`recovery:message:failed message=${msg.id} err=${err instanceof Error ? err.message : String(err)}`)
+      })
+      redelivered++
     }
   }
 

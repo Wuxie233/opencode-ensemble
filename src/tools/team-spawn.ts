@@ -4,10 +4,11 @@ import { requireLead } from "./shared"
 import { sendMessage } from "../messaging"
 import { log } from "../log"
 import type { EnsembleConfig } from "../config"
-import { getTeamResourceParts, teamWorktreeName } from "./merge-helper"
+import { getTeamResourceParts, preserveBranch, preservedBranchName, teamWorktreeName } from "./merge-helper"
 
 /** Tracks consecutive spawn failures per team for circuit breaker. */
 export const spawnFailures = new Map<string, { count: number; lastError: string }>()
+const spawnsInFlight = new Set<string>()
 
 /** Parse "provider/model" string into { providerID, modelID } for the SDK. */
 function parseModelId(model: string): { providerID: string; modelID: string } | undefined {
@@ -59,6 +60,33 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   ])
 }
 
+function claimSpawnTask(deps: ToolDeps, teamId: string, taskId: string, assignee: string): void {
+  deps.db.transaction(() => {
+    const task = deps.db.query("SELECT status, assignee FROM team_task WHERE id = ? AND team_id = ?")
+      .get(taskId, teamId) as { status: string; assignee: string | null } | null
+    if (!task) throw new Error(`Task "${taskId}" not found`)
+    if (task.status === "blocked") throw new Error(`Task "${taskId}" is blocked by unresolved dependencies`)
+    if (task.status !== "pending") throw new Error(`Task "${taskId}" is not pending (status: ${task.status})`)
+    if (task.assignee) throw new Error(`Task "${taskId}" is already claimed by ${task.assignee}`)
+
+    const result = deps.db.run(
+      "UPDATE team_task SET status = 'in_progress', assignee = ?, time_updated = ? WHERE id = ? AND team_id = ? AND status = 'pending' AND assignee IS NULL",
+      [assignee, Date.now(), taskId, teamId],
+    )
+    if (result.changes === 0) {
+      throw new Error(`Task "${taskId}" is already claimed (race condition)`)
+    }
+  })()
+}
+
+function rollbackSpawnTask(deps: ToolDeps, teamId: string, taskId: string | undefined, assignee: string): void {
+  if (!taskId) return
+  deps.db.run(
+    "UPDATE team_task SET status = 'pending', assignee = NULL, time_updated = ? WHERE id = ? AND team_id = ? AND status = 'in_progress' AND assignee = ?",
+    [Date.now(), taskId, teamId, assignee],
+  )
+}
+
 /**
  * Execute the team_spawn tool. Creates a child session and starts a teammate.
  * By default, each teammate gets their own git worktree for file isolation.
@@ -74,7 +102,25 @@ export async function executeTeamSpawn(
   if (nameError) throw new Error(nameError)
 
   const teamInfo = requireLead(deps, sessionId)
+  const spawnKey = `${teamInfo.teamId}:${args.name}`
+  if (spawnsInFlight.has(spawnKey)) {
+    throw new Error(`Teammate "${args.name}" is already being spawned in team "${teamInfo.teamName}"`)
+  }
+  spawnsInFlight.add(spawnKey)
 
+  try {
+    return await executeTeamSpawnLocked(deps, args, sessionId, teamInfo)
+  } finally {
+    spawnsInFlight.delete(spawnKey)
+  }
+}
+
+async function executeTeamSpawnLocked(
+  deps: ToolDeps,
+  args: { name: string; agent: string; prompt: string; model?: string; claim_task?: string; worktree?: boolean; plan_approval?: boolean },
+  sessionId: string,
+  teamInfo: ReturnType<typeof requireLead>,
+): Promise<string> {
   // Circuit breaker — stop retrying after 3 consecutive failures
   const failures = spawnFailures.get(teamInfo.teamId)
   if (failures && failures.count >= 3) {
@@ -85,6 +131,10 @@ export async function executeTeamSpawn(
   const existing = deps.db.query("SELECT name FROM team_member WHERE team_id = ? AND name = ?")
     .get(teamInfo.teamId, args.name)
   if (existing) throw new Error(`Teammate "${args.name}" already exists in team "${teamInfo.teamName}"`)
+
+  if (args.claim_task) {
+    claimSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name)
+  }
 
   const isReadOnly = args.agent === "plan" || args.agent === "explore"
   const useWorktree = args.worktree !== false && !isReadOnly && !isWorktreeDirectory(deps.directory)
@@ -198,6 +248,7 @@ export async function executeTeamSpawn(
     if (worktreeDir) {
       try { await deps.client.worktree.remove({ worktreeRemoveInput: { directory: worktreeDir } }) } catch { /* best effort */ }
     }
+    rollbackSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name)
     throw new Error(`Failed to create session for teammate "${args.name}": ${err instanceof Error ? err.message : String(err)}`)
   }
 
@@ -208,6 +259,7 @@ export async function executeTeamSpawn(
     if (worktreeDir) {
       try { await deps.client.worktree.remove({ worktreeRemoveInput: { directory: worktreeDir } }) } catch { /* best effort */ }
     }
+    rollbackSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name)
     throw new Error("Failed to create teammate session")
   }
 
@@ -219,11 +271,28 @@ export async function executeTeamSpawn(
   const resolvedModel = resolveModel(args.model, args.agent, memberCount, deps.config)
   if (resolvedModel) log(`spawn:model name=${args.name} model=${resolvedModel}`)
 
-  deps.db.run(
-    `INSERT INTO team_member (team_id, name, session_id, agent, status, execution_status, model, prompt, worktree_dir, worktree_branch, workspace_id, plan_approval, time_created, time_updated)
-     VALUES (?, ?, ?, ?, 'busy', 'starting', ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [teamInfo.teamId, args.name, childSessionId, args.agent, resolvedModel ?? null, args.prompt, worktreeDir, worktreeBranch, workspaceId, planApproval, now, now]
-  )
+  try {
+    deps.db.run(
+      `INSERT INTO team_member (team_id, name, session_id, agent, status, execution_status, model, prompt, worktree_dir, worktree_branch, workspace_id, plan_approval, time_created, time_updated)
+       VALUES (?, ?, ?, ?, 'busy', 'starting', ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [teamInfo.teamId, args.name, childSessionId, args.agent, resolvedModel ?? null, args.prompt, worktreeDir, worktreeBranch, workspaceId, planApproval, now, now]
+    )
+  } catch (err) {
+    rollbackSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name)
+    if (worktreeBranch) {
+      const resource = getTeamResourceParts(deps.db, teamInfo.teamId)
+      const safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, args.name)
+      await preserveBranch(worktreeBranch, safeBranch, deps.directory)
+    }
+    await deps.client.session.abort({ sessionID: childSessionId }).catch(() => { /* best effort */ })
+    if (workspaceId) {
+      try { await deps.client.workspace.remove({ id: workspaceId }) } catch { /* best effort */ }
+    }
+    if (worktreeDir) {
+      try { await deps.client.worktree.remove({ worktreeRemoveInput: { directory: worktreeDir } }) } catch { /* best effort */ }
+    }
+    throw err
+  }
 
   // Register in memory
   deps.registry.register(teamInfo.teamId, args.name, childSessionId)
@@ -371,14 +440,19 @@ export async function executeTeamSpawn(
     log(`spawn:promptAsync:failed name=${args.name} err=${errMsg} — rolling back`)
     try {
       deps.db.run("DELETE FROM team_member WHERE team_id = ? AND session_id = ?", [teamInfo.teamId, childSessionId])
+      rollbackSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name)
       deps.registry.unregister(childSessionId)
-      deps.client.session.abort({ sessionID: childSessionId }).catch(() => { /* best effort */ })
-      if (workspaceId) {
-        deps.client.workspace.remove({ id: workspaceId }).catch(() => { /* best effort */ })
+      const preserveThenAbort = async () => {
+        if (worktreeBranch) {
+          const resource = getTeamResourceParts(deps.db, teamInfo.teamId)
+          const safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, args.name)
+          await preserveBranch(worktreeBranch, safeBranch, deps.directory)
+        }
+        await deps.client.session.abort({ sessionID: childSessionId })
+        if (workspaceId) await deps.client.workspace.remove({ id: workspaceId })
+        if (worktreeDir) await deps.client.worktree.remove({ worktreeRemoveInput: { directory: worktreeDir } })
       }
-      if (worktreeDir) {
-        deps.client.worktree.remove({ worktreeRemoveInput: { directory: worktreeDir } }).catch(() => { /* best effort */ })
-      }
+      preserveThenAbort().catch(() => { /* best effort */ })
       const modelInfo = resolvedModel ? ` (model: ${resolvedModel})` : ""
       deps.client.tui.showToast({
         title: "Team",

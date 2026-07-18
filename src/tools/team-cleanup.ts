@@ -550,7 +550,7 @@ export async function executeTeamCleanup(
   // fire-and-forget delivery cannot reopen messages after this boundary.
   deps.db.transaction(() => {
     deps.db.run("UPDATE team SET status = 'archived', time_updated = ? WHERE id = ?", [Date.now(), teamInfo.teamId])
-    deps.db.run("UPDATE team_message SET delivered = 1 WHERE team_id = ? AND delivered = 0", [teamInfo.teamId])
+    deps.db.run("UPDATE team_message SET delivered = 1, delivery_claimed_at = NULL WHERE team_id = ? AND delivered = 0", [teamInfo.teamId])
   })()
 
   // Clean up in-memory state

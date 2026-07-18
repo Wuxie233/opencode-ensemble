@@ -1,6 +1,8 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test"
 import { setupDeps, insertTeam, insertMember } from "./helpers"
 import { Watchdog } from "../src/watchdog"
+import { ProgressTracker } from "../src/progress"
+import { ActivityBuffer } from "../src/activity"
 
 describe("Watchdog", () => {
   let deps: ReturnType<typeof setupDeps>
@@ -130,6 +132,86 @@ describe("Watchdog", () => {
     // Should not time out — disabled
     const row = deps.db.query("SELECT status FROM team_member WHERE name = 'alice'").get() as Record<string, string>
     expect(row.status).toBe("busy")
+  })
+
+  describe("stall detection", () => {
+    test("does not flag low-output work when a recent tool result shows progress", async () => {
+      insertMember(deps.db, "t1", "alice", "sess-a", "busy", "running")
+      const progressTracker = new ProgressTracker()
+      progressTracker.recordStep("sess-a", 10)
+      progressTracker.recordStep("sess-a", 10)
+      progressTracker.recordStep("sess-a", 10)
+      const activityBuffer = new ActivityBuffer()
+      activityBuffer.record("sess-a", {
+        type: "tool_result",
+        tool: "bash",
+        output: "tests passed",
+        timestamp: Date.now(),
+      })
+      const watchdog = new Watchdog({
+        db: deps.db,
+        client: deps.client,
+        registry: deps.registry,
+        ttlMs: 0,
+        progressTracker,
+        activityBuffer,
+        stallThresholdMs: 60_000,
+        stallMinSteps: 3,
+        stallTokenThreshold: 500,
+      })
+
+      await watchdog.checkStalled()
+
+      expect(deps.client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(0)
+      expect(progressTracker.isTokenStalled("sess-a", 3, 500)).toBe(false)
+    })
+
+    test("still flags a genuine token stall without meaningful activity", async () => {
+      insertMember(deps.db, "t1", "alice", "sess-a", "busy", "running")
+      const progressTracker = new ProgressTracker()
+      progressTracker.recordStep("sess-a", 10)
+      progressTracker.recordStep("sess-a", 10)
+      progressTracker.recordStep("sess-a", 10)
+      const watchdog = new Watchdog({
+        db: deps.db,
+        client: deps.client,
+        registry: deps.registry,
+        ttlMs: 0,
+        progressTracker,
+        stallThresholdMs: 60_000,
+        stallMinSteps: 3,
+        stallTokenThreshold: 500,
+      })
+
+      await watchdog.checkStalled()
+
+      expect(deps.client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(1)
+    })
+
+    test("still flags a genuine time stall without recent activity", async () => {
+      insertMember(deps.db, "t1", "alice", "sess-a", "busy", "running")
+      const progressTracker = new ProgressTracker()
+      progressTracker.recordStep("sess-a", 1_000)
+      await Bun.sleep(5)
+      const watchdog = new Watchdog({
+        db: deps.db,
+        client: deps.client,
+        registry: deps.registry,
+        ttlMs: 0,
+        progressTracker,
+        stallThresholdMs: 1,
+        stallMinSteps: 3,
+        stallTokenThreshold: 500,
+      })
+
+      await watchdog.checkStalled()
+
+      expect(deps.client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(1)
+      const message = deps.db.query(
+        "SELECT content FROM team_message WHERE team_id = 't1' AND from_name = 'system' AND to_name = 'lead'",
+      ).get() as { content: string }
+      expect(message.content).toContain("no communication")
+    })
   })
 
   describe("stale worktree GC", () => {
