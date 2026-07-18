@@ -10,7 +10,7 @@ import { MemberRegistry, DescendantTracker, PendingPurgeApprovals } from "./stat
 import { isWorktreeInstance } from "./util"
 import { handleSessionStatusEvent, handleSessionCreatedEvent, checkToolIsolation, shouldNudgeIdleMember, handleSessionErrorEvent } from "./hooks"
 import { notifyTeamEvent, notifyWorkingProgress } from "./notify"
-import { sendMessage, hasReportedCompletion } from "./messaging"
+import { sendMessage, hasReportedCompletion, flushPendingPeerMessage, releasePendingPeerDelivery } from "./messaging"
 import { buildLeadSystemPrompt, buildTeammateSystemPrompt, buildTeamCompactionContext } from "./system-prompt"
 import { log, initLog } from "./log"
 import { findTeamBySession } from "./types"
@@ -142,6 +142,7 @@ const plugin: Plugin = async (input) => {
       if (event.type === "session.status") {
         const { sessionID, status } = event.properties
         const statusType = status.type as "idle" | "busy" | "retry"
+        if (statusType !== "idle") releasePendingPeerDelivery(sessionID)
         const transition = handleSessionStatusEvent(db, registry, sessionID, statusType)
 
         // Fire toast notifications for meaningful transitions
@@ -256,27 +257,10 @@ const plugin: Plugin = async (input) => {
             }
           }
 
-          // Also flush peer messages for teammates that just went idle
-          // Only flush messages older than 5s to avoid double-delivery with the direct promptAsync path
-          const member = db.query(
-            `SELECT tm.team_id, tm.name FROM team_member tm
-             JOIN team t ON tm.team_id = t.id
-             WHERE tm.session_id = ? AND t.status = 'active'`
-          ).get(sessionID) as { team_id: string; name: string } | null
-          if (member && !hasReportedCompletion(db, member.team_id, member.name)) {
-            const staleThreshold = Date.now() - 5000
-            const peerMsgs = db.query(
-              "SELECT COUNT(*) as c FROM team_message WHERE team_id = ? AND to_name = ? AND delivered = 0 AND time_created < ?"
-            ).get(member.team_id, member.name, staleThreshold) as { c: number }
-            if (peerMsgs.c > 0) {
-              log(`wake-peer: ${member.name} has ${peerMsgs.c} pending peer messages`)
-              client.session.promptAsync({
-                sessionID,
-                parts: [{ type: "text", text: `[System: ${peerMsgs.c} new message(s) from teammates]` }],
-              }).catch((err) => {
-                log(`wake-peer:failed err=${err instanceof Error ? err.message : String(err)}`)
-              })
-            }
+          // Messages older than 5s missed direct delivery. Claim one atomically so
+          // shared directory instances cannot wake the same teammate twice.
+          if (flushPendingPeerMessage(db, client, sessionID, Date.now() - 5000)) {
+            log(`wake-peer: claimed pending message for session=${sessionID}`)
           }
         }
       }

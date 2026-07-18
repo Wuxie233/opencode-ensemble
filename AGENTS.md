@@ -102,6 +102,12 @@ All messages delivered via client.session.promptAsync(). Single atomic
 operation: injects user message + starts prompt loop if idle. No polling,
 no file watching, no custom pub/sub.
 
+The idle peer-message backstop atomically claims only the oldest stale message
+for an active Team member whose status is `ready`. Keep one wake in flight per
+recipient until that Session starts a new turn. Delivery failure may restore
+the claim only while the Team and recipient remain eligible; cleanup archives
+the Team and consumes residual messages in the same transaction.
+
 ### State Machines
 
 Two-level per member:

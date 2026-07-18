@@ -546,8 +546,12 @@ export async function executeTeamCleanup(
     }
   }
 
-  // Archive team
-  deps.db.run("UPDATE team SET status = 'archived', time_updated = ? WHERE id = ?", [Date.now(), teamInfo.teamId])
+  // Archive the team and consume residual messages atomically. A failed
+  // fire-and-forget delivery cannot reopen messages after this boundary.
+  deps.db.transaction(() => {
+    deps.db.run("UPDATE team SET status = 'archived', time_updated = ? WHERE id = ?", [Date.now(), teamInfo.teamId])
+    deps.db.run("UPDATE team_message SET delivered = 1 WHERE team_id = ? AND delivered = 0", [teamInfo.teamId])
+  })()
 
   // Clean up in-memory state
   deps.registry.unregisterTeam(teamInfo.teamId)

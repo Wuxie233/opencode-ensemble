@@ -1,7 +1,10 @@
 import type { Database } from "./db"
+import type { PluginClient } from "./types"
+import { log } from "./log"
 import { generateId } from "./util"
 
 const MAX_CONTENT_BYTES = 10 * 1024 // 10KB
+const pendingPeerDeliveries = new Set<string>()
 
 /** Input for sending a direct message. */
 export interface SendMessageInput {
@@ -75,6 +78,76 @@ export function getUndeliveredMessages(db: Database, teamId: string): MessageRow
  */
 export function markDelivered(db: Database, messageId: string): void {
   db.run("UPDATE team_message SET delivered = 1 WHERE id = ?", [messageId])
+}
+
+/** Allow another stale peer message after the recipient starts a new turn. */
+export function releasePendingPeerDelivery(sessionId: string): void {
+  pendingPeerDeliveries.delete(sessionId)
+}
+
+/** Deliver the oldest stale peer message when an eligible teammate goes idle. */
+export function flushPendingPeerMessage(
+  db: Database,
+  client: PluginClient,
+  sessionId: string,
+  staleBefore: number,
+): boolean {
+  if (pendingPeerDeliveries.has(sessionId)) return false
+  pendingPeerDeliveries.add(sessionId)
+  const message = db.query(
+    `UPDATE team_message
+     SET delivered = 1
+     WHERE id = (
+       SELECT msg.id
+       FROM team_message msg
+       JOIN team_member tm ON tm.team_id = msg.team_id AND tm.name = msg.to_name
+       JOIN team t ON t.id = tm.team_id
+       WHERE tm.session_id = ?
+         AND tm.status = 'ready'
+         AND tm.reported_to_lead = 0
+         AND t.status = 'active'
+         AND msg.delivered = 0
+         AND msg.time_created < ?
+       ORDER BY msg.time_created ASC, msg.id ASC
+       LIMIT 1
+     )
+       AND delivered = 0
+     RETURNING *`
+  ).get(sessionId, staleBefore) as MessageRow | null
+  if (!message) {
+    pendingPeerDeliveries.delete(sessionId)
+    return false
+  }
+
+  client.session.promptAsync({
+    sessionID: sessionId,
+    parts: [{ type: "text", text: `[Team message from ${message.from_name}]: ${message.content}` }],
+  }).catch((err) => {
+    try {
+      db.run(
+        `UPDATE team_message
+         SET delivered = 0
+         WHERE id = ?
+           AND delivered = 1
+           AND EXISTS (
+             SELECT 1
+             FROM team t
+             JOIN team_member tm ON tm.team_id = t.id
+             WHERE t.id = team_message.team_id
+               AND t.status = 'active'
+               AND tm.name = team_message.to_name
+               AND tm.session_id = ?
+               AND tm.status = 'ready'
+               AND tm.reported_to_lead = 0
+           )`,
+        [message.id, sessionId],
+      )
+      log(`wake-peer:failed message=${message.id} err=${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      pendingPeerDeliveries.delete(sessionId)
+    }
+  })
+  return true
 }
 
 /**
