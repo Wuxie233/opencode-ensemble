@@ -152,6 +152,15 @@ meaningful assistant output, or terminal `session.error`; never append a new
 teammate prompt as an automatic retry for a terminal error because it starts a
 new agent turn and may repeat tool side effects.
 
+The only terminal-error recovery exception is a one-shot unexpected
+`MessageAbortedError` whose exact persisted assistant turn has zero tool parts.
+Require an active, incomplete teammate with no completion report, keep the
+member/task active, and send one silent recovery prompt that first inspects
+actual state. Persist the recovery claim across plugin instances. A second
+abort, ambiguous history, any tool part, shutdown/completion race, inspection
+failure, or recovery-prompt failure must fail closed through the normal Lead
+alert and task-release path.
+
 ### Sub-Agent Isolation
 
 Enforced via tool.execute.before hook. Maintains a Map<sessionID, parentSessionID>

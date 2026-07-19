@@ -132,11 +132,12 @@ export function handleSessionStatusEvent(
   const team = db.query("SELECT status FROM team WHERE id = ?").get(entry.teamId) as { status: string } | null
   if (!team || team.status === "archived") return undefined
 
-  const member = db.query("SELECT status, execution_status FROM team_member WHERE team_id = ? AND name = ?")
-    .get(entry.teamId, entry.memberName) as { status: string; execution_status: string } | null
+  const member = db.query("SELECT status, execution_status, abort_recovery_state FROM team_member WHERE team_id = ? AND name = ?")
+    .get(entry.teamId, entry.memberName) as { status: string; execution_status: string; abort_recovery_state: string } | null
   if (!member) return undefined
 
   if (member.status === "error" || member.status === "shutdown") return undefined
+  if (status === "idle" && member.abort_recovery_state === "checking") return undefined
 
   if (status === "idle") {
     const newStatus = member.status === "shutdown_requested" ? "shutdown" : "ready"

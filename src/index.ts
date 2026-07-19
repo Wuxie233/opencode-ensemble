@@ -35,6 +35,7 @@ import { executeTeamView } from "./tools/team-view"
 import type { ToolDeps, } from "./types"
 import { TokenBucket } from "./rate-limit"
 import { Watchdog } from "./watchdog"
+import { recoverStaleAbortChecks, SafeAbortRecovery } from "./safe-abort-recovery"
 
 const DEFAULT_RATE_LIMIT_REFILL = 2
 const DEFAULT_RATE_LIMIT_INTERVAL_MS = 1000
@@ -78,6 +79,15 @@ const plugin: Plugin = async (input) => {
   const db = runtime.db
   const activityBuffer = runtime.activityBuffer
   const deps: ToolDeps = { db, registry, tracker, purgeApprovals, client, directory: input.directory, config }
+  const wakeFailedMemberLead = (alert: { leadSessionId: string; memberName: string }) => {
+    client.session.promptAsync({
+      sessionID: alert.leadSessionId,
+      parts: [{ type: "text", text: `[System: Teammate ${alert.memberName} failed; recovery guidance is available in team messages]` }],
+    }).catch((err) => {
+      log(`session-error:wake-lead:failed member=${alert.memberName} err=${err instanceof Error ? err.message : String(err)}`)
+    })
+  }
+  const safeAbortRecovery = new SafeAbortRecovery({ db, registry, client, onTerminal: wakeFailedMemberLead })
 
   // Recovery only runs for the main project instance — NOT for teammate worktree instances.
   // Worktree instances are created during session.create. Running recovery there makes HTTP
@@ -91,6 +101,7 @@ const plugin: Plugin = async (input) => {
     // far more often than the CLI.
     const rehydrated = rehydrateRegistry(db, registry)
     if (rehydrated > 0) log(`init:registry:rehydrated members=${rehydrated}`)
+    recoverStaleAbortChecks(db, registry).forEach(wakeFailedMemberLead)
     void runtime
       .recover(path.resolve(input.worktree || input.directory), async (sharedDb) => {
         log("init:recovery:start (main instance)")
@@ -136,6 +147,7 @@ const plugin: Plugin = async (input) => {
 
   return {
     async dispose() {
+      safeAbortRecovery.dispose()
       dispose()
     },
     // Event hook — drives state machine transitions + descendant tracking + toasts
@@ -144,6 +156,10 @@ const plugin: Plugin = async (input) => {
         const { sessionID, status } = event.properties
         const statusType = status.type as "idle" | "busy" | "retry"
         const retry = status as { message?: string; attempt?: number }
+        if (statusType === "idle" && safeAbortRecovery.isChecking(sessionID)) {
+          safeAbortRecovery.observeMessage(sessionID)
+          return
+        }
         const retryWarning = retryTracker.observeStatus(
           db,
           registry,
@@ -286,15 +302,11 @@ const plugin: Plugin = async (input) => {
       // teammate just appears stuck.
       if (event.type === "session.error") {
         const props = event.properties as { sessionID?: string; error?: { name?: string; data?: { message?: string } } }
+        const eventId = (event as unknown as { id?: string }).id
         retryTracker.observeSessionError(props.sessionID)
-        const alert = handleSessionErrorEvent(db, registry, props.sessionID, props.error)
-        if (alert) {
-          client.session.promptAsync({
-            sessionID: alert.leadSessionId,
-            parts: [{ type: "text", text: `[System: Teammate ${alert.memberName} failed; recovery guidance is available in team messages]` }],
-          }).catch((err) => {
-            log(`session-error:wake-lead:failed member=${alert.memberName} err=${err instanceof Error ? err.message : String(err)}`)
-          })
+        if (!safeAbortRecovery.handleSessionError(props.sessionID, props.error, eventId)) {
+          const alert = handleSessionErrorEvent(db, registry, props.sessionID, props.error)
+          if (alert) wakeFailedMemberLead(alert)
         }
       }
 
@@ -302,6 +314,7 @@ const plugin: Plugin = async (input) => {
         const info = (event.properties as { info?: { id?: string; sessionID?: string; role?: string } }).info
         if (info?.id && info.sessionID && info.role) {
           retryTracker.observeMessage(info.sessionID, info.id, info.role)
+          safeAbortRecovery.observeMessage(info.sessionID)
         }
       }
 

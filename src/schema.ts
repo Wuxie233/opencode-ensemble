@@ -188,6 +188,12 @@ export const MIGRATIONS: string[] = [
    PRAGMA foreign_keys=ON;`,
   // Migration 9: Add a recoverable lease for asynchronous message redelivery.
   `ALTER TABLE team_message ADD COLUMN delivery_claimed_at INTEGER;`,
+  // Migration 10: Durable cross-instance state for one-shot unexpected abort recovery.
+  `ALTER TABLE team_member ADD COLUMN abort_recovery_state TEXT NOT NULL DEFAULT 'none'
+     CHECK(abort_recovery_state IN ('none', 'checking', 'prompted', 'consumed'));
+   ALTER TABLE team_member ADD COLUMN abort_recovery_message_id TEXT;
+   ALTER TABLE team_member ADD COLUMN abort_recovery_event_id TEXT;
+   ALTER TABLE team_member ADD COLUMN abort_recovery_started_at INTEGER;`,
 ]
 
 /**

@@ -36,6 +36,16 @@ describe("schema migrations", () => {
     expect(row).toBeTruthy()
   })
 
+  test("adds durable one-shot abort recovery state to team members", () => {
+    applyMigrations(db)
+    const columns = db.query("PRAGMA table_info(team_member)").all() as Array<{ name: string; dflt_value: string | null }>
+
+    expect(columns.find(column => column.name === "abort_recovery_state")?.dflt_value).toBe("'none'")
+    expect(columns.some(column => column.name === "abort_recovery_message_id")).toBe(true)
+    expect(columns.some(column => column.name === "abort_recovery_event_id")).toBe(true)
+    expect(columns.some(column => column.name === "abort_recovery_started_at")).toBe(true)
+  })
+
   test("creates team_task table", () => {
     applyMigrations(db)
     const row = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='team_task'").get()

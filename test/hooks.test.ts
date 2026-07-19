@@ -853,6 +853,21 @@ describe("handleSessionErrorEvent", () => {
   })
 })
 
+describe("handleSessionStatusEvent — abort recovery inspection", () => {
+  test("suppresses idle transitions while an abort recovery check is active", () => {
+    const db = setupDb()
+    const registry = new MemberRegistry()
+    insertTeam(db, "t1", "smoke", "lead-sess")
+    insertMember(db, "t1", "scout", "scout-sess", "busy", "running")
+    registry.register("t1", "scout", "scout-sess")
+    db.run("UPDATE team_member SET abort_recovery_state = 'checking' WHERE session_id = ?", ["scout-sess"])
+
+    expect(handleSessionStatusEvent(db, registry, "scout-sess", "idle")).toBeUndefined()
+    expect(db.query("SELECT status, execution_status FROM team_member WHERE session_id = ?").get("scout-sess"))
+      .toEqual({ status: "busy", execution_status: "running" })
+  })
+})
+
 // --- Multi-instance state partition: registry empty, SQLite is source of truth ---
 // When opencode runs multiple Plugin instances in one process (Desktop's local
 // sidecar + a connected WSL serve sharing the same SQLite DB), each instance
