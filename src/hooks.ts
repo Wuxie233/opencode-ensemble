@@ -5,23 +5,23 @@ import { findTeamBySession } from "./types"
 
 const TEAM_TOOL_PREFIX = "team_"
 const EMPTY_RESPONSE_MESSAGE = "Provider returned an empty response"
-const EMPTY_RESPONSE_WARNING_THRESHOLD = 6
+const RETRY_WARNING_THRESHOLD = 6
 
-interface EmptyResponseSequence {
+interface RetrySequence {
   count: number
-  lastAttempt?: number
+  attempts: Set<number>
   notified: boolean
 }
 
-/** Lead wake target returned when an empty-response sequence first crosses the threshold. */
-export interface EmptyResponseWarning {
+/** Lead wake target returned when a retry sequence first crosses the threshold. */
+export interface RetryWarning {
   leadSessionId: string
   memberName: string
 }
 
-/** Tracks and reports consecutive empty-response retries for teammate sessions. */
-export class EmptyResponseRetryTracker {
-  private readonly sequences = new Map<string, EmptyResponseSequence>()
+/** Tracks and reports consecutive retries for teammate sessions. */
+export class RetryTracker {
+  private readonly sequences = new Map<string, RetrySequence>()
   private readonly assistantMessages = new Map<string, Set<string>>()
 
   /** Observe a session status without treating retry-attempt busy transitions as progress. */
@@ -32,38 +32,43 @@ export class EmptyResponseRetryTracker {
     status: "idle" | "busy" | "retry",
     message?: string,
     attempt?: number,
-  ): EmptyResponseWarning | undefined {
+  ): RetryWarning | undefined {
     if (status === "busy") return
-    if (status === "idle" || message !== EMPTY_RESPONSE_MESSAGE) {
+    if (status === "idle") {
       this.sequences.delete(sessionId)
-      if (status === "idle") this.assistantMessages.delete(sessionId)
+      this.assistantMessages.delete(sessionId)
       return
     }
 
     const teamInfo = findTeamBySession(db, registry, sessionId)
     if (!teamInfo || teamInfo.role !== "member" || !teamInfo.memberName) return
+    if (attempt === undefined) return
 
-    const current = this.sequences.get(sessionId) ?? { count: 0, notified: false }
-    if (attempt !== undefined && current.lastAttempt === attempt) return
+    const current = this.sequences.get(sessionId) ?? { count: 0, attempts: new Set<number>(), notified: false }
+    if (current.attempts.has(attempt)) return
 
     const next = {
       count: current.count + 1,
-      lastAttempt: attempt,
+      attempts: new Set(current.attempts).add(attempt),
       notified: current.notified,
     }
     this.sequences.set(sessionId, next)
-    if (next.count !== EMPTY_RESPONSE_WARNING_THRESHOLD || next.notified) return
+    if (next.count !== RETRY_WARNING_THRESHOLD || next.notified) return
 
-    next.notified = true
+    const team = db.query("SELECT lead_session_id FROM team WHERE id = ? AND status = 'active'")
+      .get(teamInfo.teamId) as { lead_session_id: string } | null
+    if (!team) return
+
+    const content = message === EMPTY_RESPONSE_MESSAGE
+      ? `Teammate "${teamInfo.memberName}" (session ${sessionId}) returned an empty provider response ${RETRY_WARNING_THRESHOLD} consecutive times and may be bugged/unusable. Spawn a replacement with resume_from: "${teamInfo.memberName}" to continue with its context. The existing teammate was left running and unchanged.`
+      : `Teammate "${teamInfo.memberName}" (session ${sessionId}) retried ${RETRY_WARNING_THRESHOLD} consecutive times. Latest retry reason: ${message?.trim() || "unspecified retry reason"}. The session may be stuck. Inspect the provider/model availability; if retries continue, spawn a replacement with resume_from: "${teamInfo.memberName}" to continue with its context. The existing teammate was left running and unchanged.`
     sendMessage(db, {
       teamId: teamInfo.teamId,
       from: "system",
       to: "lead",
-      content: `Teammate "${teamInfo.memberName}" (session ${sessionId}) returned an empty provider response ${EMPTY_RESPONSE_WARNING_THRESHOLD} consecutive times and may be bugged/unusable. Spawn a replacement with resume_from: "${teamInfo.memberName}" to continue with its context. The existing teammate was left running and unchanged.`,
+      content,
     })
-    const team = db.query("SELECT lead_session_id FROM team WHERE id = ?")
-      .get(teamInfo.teamId) as { lead_session_id: string } | null
-    if (!team) return
+    next.notified = true
     return { leadSessionId: team.lead_session_id, memberName: teamInfo.memberName }
   }
 
@@ -175,9 +180,6 @@ export function handleSessionStatusEvent(
     if (member.status === "shutdown_requested") {
       return { memberName: entry.memberName, teamId: entry.teamId, from: "shutdown_requested", to: "busy_while_shutdown" }
     }
-  } else if (status === "retry") {
-    // Session is being rate-limited — signal for toast but don't change state
-    return { memberName: entry.memberName, teamId: entry.teamId, from: member.status, to: "retry" }
   }
   return undefined
 }

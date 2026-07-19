@@ -8,7 +8,7 @@ import { wrapThrowingClient } from "./client"
 import { recoverStaleMembers, recoverUndeliveredMessages, recoverOrphanedWorktrees, recoverOrphanedBranches, rehydrateRegistry } from "./recovery"
 import { MemberRegistry, DescendantTracker, PendingPurgeApprovals } from "./state"
 import { isWorktreeInstance } from "./util"
-import { handleSessionStatusEvent, handleSessionCreatedEvent, checkToolIsolation, shouldNudgeIdleMember, handleSessionErrorEvent, EmptyResponseRetryTracker } from "./hooks"
+import { handleSessionStatusEvent, handleSessionCreatedEvent, checkToolIsolation, shouldNudgeIdleMember, handleSessionErrorEvent, RetryTracker } from "./hooks"
 import { notifyTeamEvent, notifyWorkingProgress } from "./notify"
 import { sendMessage, hasReportedCompletion, flushPendingPeerMessage, releasePendingPeerDelivery } from "./messaging"
 import { buildLeadSystemPrompt, buildTeammateSystemPrompt, buildTeamCompactionContext } from "./system-prompt"
@@ -57,7 +57,7 @@ const plugin: Plugin = async (input) => {
   const purgeApprovals = new PendingPurgeApprovals()
   const nudgedMembers = new Set<string>()
   const progressTracker = new ProgressTracker()
-  const emptyResponseRetryTracker = new EmptyResponseRetryTracker()
+  const retryTracker = new RetryTracker()
   const wakeLeadTimestamps = new Map<string, number>()
   const WAKE_LEAD_COOLDOWN_MS = 5000
 
@@ -144,7 +144,7 @@ const plugin: Plugin = async (input) => {
         const { sessionID, status } = event.properties
         const statusType = status.type as "idle" | "busy" | "retry"
         const retry = status as { message?: string; attempt?: number }
-        const emptyResponseWarning = emptyResponseRetryTracker.observeStatus(
+        const retryWarning = retryTracker.observeStatus(
           db,
           registry,
           sessionID,
@@ -152,12 +152,12 @@ const plugin: Plugin = async (input) => {
           retry.message,
           retry.attempt,
         )
-        if (emptyResponseWarning) {
+        if (retryWarning) {
           client.session.promptAsync({
-            sessionID: emptyResponseWarning.leadSessionId,
-            parts: [{ type: "text", text: `[System: Teammate ${emptyResponseWarning.memberName} may have an unusable session]` }],
+            sessionID: retryWarning.leadSessionId,
+            parts: [{ type: "text", text: `[System: Teammate ${retryWarning.memberName} reached the consecutive retry warning threshold]` }],
           }).catch((err) => {
-            log(`empty-response:wake-lead:failed member=${emptyResponseWarning.memberName} err=${err instanceof Error ? err.message : String(err)}`)
+            log(`retry-threshold:wake-lead:failed member=${retryWarning.memberName} err=${err instanceof Error ? err.message : String(err)}`)
           })
         }
         if (statusType !== "idle") releasePendingPeerDelivery(sessionID)
@@ -215,16 +215,6 @@ const plugin: Plugin = async (input) => {
             }
           } else if (transition.to === "error") {
             notifyTeamEvent(client, "error", { memberName: transition.memberName })
-          } else if (transition.to === "retry") {
-            // Teammate is being rate-limited — notify user
-            try {
-              await client.tui.showToast({
-                title: "Team",
-                message: `${transition.memberName} is being rate-limited`,
-                variant: "warning",
-                duration: 3000,
-              })
-            } catch { /* TUI may not be available */ }
           } else if (transition.to === "busy_while_shutdown") {
             // Session went busy after shutdown was requested — re-issue abort
             // Branch should already be preserved by the graceful shutdown path,
@@ -296,7 +286,7 @@ const plugin: Plugin = async (input) => {
       // teammate just appears stuck.
       if (event.type === "session.error") {
         const props = event.properties as { sessionID?: string; error?: { name?: string; data?: { message?: string } } }
-        emptyResponseRetryTracker.observeSessionError(props.sessionID)
+        retryTracker.observeSessionError(props.sessionID)
         const alert = handleSessionErrorEvent(db, registry, props.sessionID, props.error)
         if (alert) {
           client.session.promptAsync({
@@ -311,14 +301,14 @@ const plugin: Plugin = async (input) => {
       if (event.type === "message.updated") {
         const info = (event.properties as { info?: { id?: string; sessionID?: string; role?: string } }).info
         if (info?.id && info.sessionID && info.role) {
-          emptyResponseRetryTracker.observeMessage(info.sessionID, info.id, info.role)
+          retryTracker.observeMessage(info.sessionID, info.id, info.role)
         }
       }
 
       // Track per-step output tokens for stall detection
       if (event.type === "message.part.updated") {
         const part = (event.properties as { part?: { type?: string; sessionID?: string; tokens?: { output?: number } } }).part
-        if (part?.sessionID) emptyResponseRetryTracker.observeOutput(part.sessionID, part)
+        if (part?.sessionID) retryTracker.observeOutput(part.sessionID, part)
         if (part?.type === "step-finish" && part.sessionID && part.tokens?.output !== undefined) {
           if (registry.getBySession(part.sessionID)) {
             progressTracker.recordStep(part.sessionID, part.tokens.output)

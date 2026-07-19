@@ -145,6 +145,13 @@ idle/busy events. Every Ensemble-initiated abort must first record
 `shutdown_requested` so the resulting `MessageAbortedError` is not reported as
 an unexpected failure.
 
+OpenCode owns provider retry policy. Keep ordinary `session.status=retry`
+events silent, preserve the member/task as running, and warn the Lead only once
+after six distinct consecutive retry attempts. Reset that sequence on idle,
+meaningful assistant output, or terminal `session.error`; never append a new
+teammate prompt as an automatic retry for a terminal error because it starts a
+new agent turn and may repeat tool side effects.
+
 ### Sub-Agent Isolation
 
 Enforced via tool.execute.before hook. Maintains a Map<sessionID, parentSessionID>
