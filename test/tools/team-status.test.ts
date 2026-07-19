@@ -39,6 +39,23 @@ describe("team_status", () => {
     expect(result).toContain("my-team")
   })
 
+  test("shows session IDs to the lead only", async () => {
+    insertMember(deps.db, "t1", "alice", "sess-alice", "busy", "running")
+    insertMember(deps.db, "t1", "bob", "sess-bob", "ready", "idle")
+    deps.registry.register("t1", "alice", "sess-alice")
+    deps.registry.register("t1", "bob", "sess-bob")
+
+    const leadResult = await executeTeamStatus(deps, "lead-sess")
+    expect(leadResult).toContain("session: sess-alice")
+    expect(leadResult).toContain("session: sess-bob")
+
+    lastCallTime.clear()
+    const memberResult = await executeTeamStatus(deps, "sess-alice")
+    expect(memberResult).not.toContain("sess-alice")
+    expect(memberResult).not.toContain("sess-bob")
+    expect(memberResult).not.toContain("session:")
+  })
+
   test("fires a toast with member summary", async () => {
     insertMember(deps.db, "t1", "alice", "sess-alice", "busy", "running")
     insertMember(deps.db, "t1", "bob", "sess-bob", "ready", "idle")

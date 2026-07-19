@@ -246,11 +246,11 @@ Build with `bun run build`, then restart OpenCode to pick up changes.
 | Tool | What it does |
 |------|-------------|
 | `team_create` | Create a team. Caller becomes the lead. Accepts optional `project_name` to label the project. |
-| `team_spawn` | Start a new teammate with a task. Supports `plan_approval` mode. |
+| `team_spawn` | Start a new teammate with a task. Supports `plan_approval` and `resume_from` handoff. |
 | `team_shutdown` | Ask a teammate to stop. Preserves their branch before aborting. Supports `force` flag. |
 | `team_merge` | Merge a shutdown teammate's branch into working directory (unstaged). Blocks if you have local changes to overlapping files. |
 | `team_cleanup` | Remove the current team when done. Safety-net merges forgotten branches. With `purge`, previews archived-team deletion and returns exact approval labels plus a confirmation token. |
-| `team_status` | See all members, their status, and a task summary. |
+| `team_status` | See all members, their status, and a task summary. Session IDs are shown only to the lead. |
 | `team_view` | Switch the TUI to a teammate's session. |
 
 Archived-team purge is intentionally two-step. First call `team_cleanup` with `purge` to get a preview, exact approval and denial option labels, and `confirm_token`; no data is deleted. Stale archived worktree/workspace references and stale Ensemble-owned branches are counted in the preview and cleaned during confirmed purge. Arbitrary non-Ensemble branches still block purge for safety. The lead must then use the question tool with those exact options. Only after the user selects the exact approval option should it call `team_cleanup` again with the same `purge`, `confirm_purge: true`, and the preview token.

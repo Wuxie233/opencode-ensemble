@@ -58,7 +58,8 @@ export async function executeTeamStatus(
         .get(teamInfo.teamId, m.name) as { last_msg: number | null } | null
       const msgInfo = lastMsg?.last_msg ? `last msg: ${formatDuration(now - lastMsg.last_msg)} ago` : "no messages yet"
 
-      lines.push(`  ${m.name}  [${statusIcon} ${duration}, ${msgInfo}${plan}]  agent: ${m.agent}${branch}`)
+      const session = teamInfo.role === "lead" ? `  session: ${m.session_id}` : ""
+      lines.push(`  ${m.name}  [${statusIcon} ${duration}, ${msgInfo}${plan}]  agent: ${m.agent}${branch}${session}`)
 
       // Current task
       const task = deps.db.query("SELECT content FROM team_task WHERE team_id = ? AND assignee = ? AND status = 'in_progress' LIMIT 1")

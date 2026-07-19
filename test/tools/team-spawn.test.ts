@@ -84,6 +84,127 @@ describe("team_spawn", () => {
     }, "lead-sess")).rejects.toThrow("reserved")
   })
 
+  test("resumes from an existing teammate by injecting ordered context into the new prompt only", async () => {
+    insertMember(deps.db, "t1", "alice", "alice-sess", "ready", "idle")
+    deps.registry.register("t1", "alice", "alice-sess")
+    deps.client.session.messages = async options => {
+      deps.client.calls.push({ method: "session.messages", args: [options] })
+      return { data: [
+        { info: { id: "msg-user", role: "user", time: { created: 1 } }, parts: [{ type: "text", text: "original decision" }] },
+        { info: { id: "msg-assistant", role: "assistant", time: { created: 2 } }, parts: [
+          { type: "text", text: "recent progress" },
+          { type: "tool", tool: "bash", state: { status: "completed", input: { command: "bun test" }, output: "2 pass" } },
+        ] },
+      ] }
+    }
+
+    const result = await executeTeamSpawn(deps, {
+      name: "bob",
+      agent: "build",
+      prompt: "Continue the fix",
+      resume_from: "alice",
+      worktree: false,
+    }, "lead-sess")
+
+    expect(deps.client.calls[0]?.method).toBe("session.messages")
+    expect(deps.client.calls[0]?.args[0]).toEqual({ sessionID: "alice-sess" })
+    const promptCall = deps.client.calls.find(call => call.method === "session.promptAsync")
+    const text = (promptCall!.args[0] as { sessionID: string; parts: Array<{ text: string }> }).parts[0]!.text
+    expect(text.indexOf("original decision")).toBeLessThan(text.indexOf("recent progress"))
+    expect(text).toContain('Resumed context from teammate "alice"')
+    expect(text).toContain('"command":"bun test"')
+    expect(text).toContain('"output":"2 pass"')
+    expect((promptCall!.args[0] as { sessionID: string }).sessionID).not.toBe("lead-sess")
+    expect(result).toContain('resuming from "alice"')
+    expect(result).toContain("complete context")
+  })
+
+  test("rejects an unknown resume_from before claiming tasks or creating resources", async () => {
+    insertTask(deps, "t1", "task-123")
+
+    await expect(executeTeamSpawn(deps, {
+      name: "bob",
+      agent: "build",
+      prompt: "Continue the fix",
+      resume_from: "missing",
+      claim_task: "task-123",
+    }, "lead-sess")).rejects.toThrow('Teammate "missing" not found')
+
+    const task = deps.db.query("SELECT status, assignee FROM team_task WHERE id = ?").get("task-123") as {
+      status: string
+      assignee: string | null
+    }
+    expect(task).toEqual({ status: "pending", assignee: null })
+    expect(deps.client.calls).toHaveLength(0)
+  })
+
+  test("fails before creating resources when predecessor messages cannot be read", async () => {
+    insertMember(deps.db, "t1", "alice", "alice-sess", "ready", "idle")
+    deps.client.session.messages = async options => {
+      deps.client.calls.push({ method: "session.messages", args: [options] })
+      throw new Error("messages unavailable")
+    }
+
+    await expect(executeTeamSpawn(deps, {
+      name: "bob",
+      agent: "build",
+      prompt: "Continue the fix",
+      resume_from: "alice",
+    }, "lead-sess")).rejects.toThrow("messages unavailable")
+
+    expect(deps.client.calls.map(call => call.method)).toEqual(["session.messages"])
+  })
+
+  test("preserves early and recent context and marks truncation when predecessor history exceeds the cap", async () => {
+    insertMember(deps.db, "t1", "alice", "alice-sess", "ready", "idle")
+    deps.client.session.messages = async () => ({ data: [
+      { info: { role: "user", time: { created: 1 } }, parts: [{ type: "text", text: `EARLY-DECISION ${"a".repeat(14_000)}` }] },
+      { info: { role: "assistant", time: { created: 2 } }, parts: [{ type: "text", text: `MIDDLE ${"b".repeat(14_000)}` }] },
+      { info: { role: "assistant", time: { created: 3 }, error: { name: "APIError", data: { message: "RECENT-ERROR" } } }, parts: [{ type: "text", text: `${"c".repeat(14_000)}` }] },
+    ] })
+
+    const result = await executeTeamSpawn(deps, {
+      name: "bob",
+      agent: "build",
+      prompt: "Continue the fix",
+      resume_from: "alice",
+      worktree: false,
+    }, "lead-sess")
+
+    const promptCall = deps.client.calls.find(call => call.method === "session.promptAsync")
+    const text = (promptCall!.args[0] as { parts: Array<{ text: string }> }).parts[0]!.text
+    expect(text).toContain("EARLY-DECISION")
+    expect(text).toContain("RECENT-ERROR")
+    expect(text).toContain("[... predecessor context truncated ...]")
+    expect(text).not.toContain("MIDDLE")
+    expect(result).toContain("truncated context")
+  })
+
+  test("caps resumed context by UTF-8 bytes", async () => {
+    insertMember(deps.db, "t1", "alice", "alice-sess", "ready", "idle")
+    deps.client.session.messages = async () => ({ data: [
+      { info: { role: "user", time: { created: 1 } }, parts: [{ type: "text", text: `EARLY ${"中".repeat(12_000)}` }] },
+      { info: { role: "assistant", time: { created: 2 } }, parts: [{ type: "text", text: `${"文".repeat(12_000)} RECENT` }] },
+    ] })
+
+    await executeTeamSpawn(deps, {
+      name: "bob",
+      agent: "build",
+      prompt: "Continue the fix",
+      resume_from: "alice",
+      worktree: false,
+    }, "lead-sess")
+
+    const promptCall = deps.client.calls.find(call => call.method === "session.promptAsync")
+    const text = (promptCall!.args[0] as { parts: Array<{ text: string }> }).parts[0]!.text
+    const resumeStart = text.indexOf("Original task:")
+    const resumeEnd = text.indexOf("\n\nYour task:", resumeStart)
+    const resumePacket = text.slice(resumeStart, resumeEnd)
+    expect(new TextEncoder().encode(resumePacket).length).toBeLessThanOrEqual(32 * 1024)
+    expect(resumePacket).toContain("EARLY")
+    expect(resumePacket).toContain("RECENT")
+  })
+
   test("context message instructs teammate to mark tasks complete before messaging lead", async () => {
     await executeTeamSpawn(deps, {
       name: "alice",

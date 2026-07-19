@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach } from "bun:test"
 import { Database } from "bun:sqlite"
 import { applyMigrations } from "../src/schema"
 import { MemberRegistry, DescendantTracker } from "../src/state"
-import { handleSessionStatusEvent, handleSessionCreatedEvent, checkToolIsolation, shouldNudgeIdleMember, handleSessionErrorEvent } from "../src/hooks"
+import { handleSessionStatusEvent, handleSessionCreatedEvent, checkToolIsolation, shouldNudgeIdleMember, handleSessionErrorEvent, EmptyResponseRetryTracker } from "../src/hooks"
 import { buildLeadSystemPrompt, buildTeammateSystemPrompt, buildTeamCompactionContext } from "../src/system-prompt"
 import { findTeamBySession } from "../src/types"
 import { sendMessage } from "../src/messaging"
@@ -258,6 +258,80 @@ describe("handleSessionStatusEvent", () => {
 
     const result = handleSessionStatusEvent(db, registry, "sess-1", "idle")
     expect(result).toBeUndefined()
+  })
+})
+
+describe("EmptyResponseRetryTracker", () => {
+  let db: Database
+  let registry: MemberRegistry
+  let tracker: EmptyResponseRetryTracker
+
+  beforeEach(() => {
+    db = setupDb()
+    registry = new MemberRegistry()
+    tracker = new EmptyResponseRetryTracker()
+    insertTeam(db, "t1", "my-team", "lead-sess")
+    insertMember(db, "t1", "alice", "sess-1", "busy", "running")
+    registry.register("t1", "alice", "sess-1")
+  })
+
+  test("notifies the lead exactly once on the sixth consecutive empty response retry", () => {
+    let warning: ReturnType<EmptyResponseRetryTracker["observeStatus"]>
+    for (let attempt = 0; attempt < 8; attempt++) {
+      warning = tracker.observeStatus(db, registry, "sess-1", "retry", "Provider returned an empty response") ?? warning
+      tracker.observeStatus(db, registry, "sess-1", "busy")
+    }
+
+    const messages = db.query(
+      "SELECT content FROM team_message WHERE team_id = ? AND from_name = 'system' AND to_name = 'lead'",
+    ).all("t1") as Array<{ content: string }>
+    expect(messages).toHaveLength(1)
+    expect(messages[0]!.content).toContain("alice")
+    expect(messages[0]!.content).toContain("sess-1")
+    expect(messages[0]!.content).toContain("bugged/unusable")
+    expect(messages[0]!.content).toContain("resume_from")
+    expect(warning).toEqual({ leadSessionId: "lead-sess", memberName: "alice" })
+    const member = db.query("SELECT status FROM team_member WHERE session_id = ?").get("sess-1") as { status: string }
+    expect(member.status).toBe("busy")
+  })
+
+  test("resets on different retry errors, idle completion, output, and terminal errors", () => {
+    const empty = () => tracker.observeStatus(db, registry, "sess-1", "retry", "Provider returned an empty response")
+    for (let index = 0; index < 5; index++) empty()
+    tracker.observeStatus(db, registry, "sess-1", "retry", "rate limited")
+    for (let index = 0; index < 5; index++) empty()
+    tracker.observeStatus(db, registry, "sess-1", "idle")
+    for (let index = 0; index < 5; index++) empty()
+    tracker.observeMessage("sess-1", "assistant-message", "assistant")
+    tracker.observeOutput("sess-1", { type: "text", messageID: "assistant-message", text: "meaningful progress" })
+    for (let index = 0; index < 5; index++) empty()
+    tracker.observeSessionError("sess-1")
+    for (let index = 0; index < 5; index++) empty()
+
+    const count = (db.query("SELECT COUNT(*) AS count FROM team_message").get() as { count: number }).count
+    expect(count).toBe(0)
+  })
+
+  test("does not reset empty-response retries for user text parts", () => {
+    for (let index = 0; index < 5; index++) {
+      tracker.observeStatus(db, registry, "sess-1", "retry", "Provider returned an empty response", index)
+    }
+    tracker.observeMessage("sess-1", "user-message", "user")
+    tracker.observeOutput("sess-1", { type: "text", messageID: "user-message", text: "incoming instruction" })
+    tracker.observeStatus(db, registry, "sess-1", "retry", "Provider returned an empty response", 6)
+
+    expect((db.query("SELECT COUNT(*) AS count FROM team_message").get() as { count: number }).count).toBe(1)
+  })
+
+  test("ignores duplicate retry events for the same attempt", () => {
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      tracker.observeStatus(db, registry, "sess-1", "retry", "Provider returned an empty response", attempt)
+      tracker.observeStatus(db, registry, "sess-1", "retry", "Provider returned an empty response", attempt)
+    }
+    expect((db.query("SELECT COUNT(*) AS count FROM team_message").get() as { count: number }).count).toBe(0)
+
+    tracker.observeStatus(db, registry, "sess-1", "retry", "Provider returned an empty response", 6)
+    expect((db.query("SELECT COUNT(*) AS count FROM team_message").get() as { count: number }).count).toBe(1)
   })
 })
 

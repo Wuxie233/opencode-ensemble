@@ -8,7 +8,7 @@ import { wrapThrowingClient } from "./client"
 import { recoverStaleMembers, recoverUndeliveredMessages, recoverOrphanedWorktrees, recoverOrphanedBranches, rehydrateRegistry } from "./recovery"
 import { MemberRegistry, DescendantTracker, PendingPurgeApprovals } from "./state"
 import { isWorktreeInstance } from "./util"
-import { handleSessionStatusEvent, handleSessionCreatedEvent, checkToolIsolation, shouldNudgeIdleMember, handleSessionErrorEvent } from "./hooks"
+import { handleSessionStatusEvent, handleSessionCreatedEvent, checkToolIsolation, shouldNudgeIdleMember, handleSessionErrorEvent, EmptyResponseRetryTracker } from "./hooks"
 import { notifyTeamEvent, notifyWorkingProgress } from "./notify"
 import { sendMessage, hasReportedCompletion, flushPendingPeerMessage, releasePendingPeerDelivery } from "./messaging"
 import { buildLeadSystemPrompt, buildTeammateSystemPrompt, buildTeamCompactionContext } from "./system-prompt"
@@ -39,7 +39,6 @@ import { Watchdog } from "./watchdog"
 const DEFAULT_RATE_LIMIT_REFILL = 2
 const DEFAULT_RATE_LIMIT_INTERVAL_MS = 1000
 const DEFAULT_WATCHDOG_CHECK_MS = 60 * 1000 // 60 seconds
-
 /**
  * opencode-ensemble plugin entry point.
  * Enables agent teams: multiple agents running in parallel with
@@ -58,6 +57,7 @@ const plugin: Plugin = async (input) => {
   const purgeApprovals = new PendingPurgeApprovals()
   const nudgedMembers = new Set<string>()
   const progressTracker = new ProgressTracker()
+  const emptyResponseRetryTracker = new EmptyResponseRetryTracker()
   const wakeLeadTimestamps = new Map<string, number>()
   const WAKE_LEAD_COOLDOWN_MS = 5000
 
@@ -143,6 +143,23 @@ const plugin: Plugin = async (input) => {
       if (event.type === "session.status") {
         const { sessionID, status } = event.properties
         const statusType = status.type as "idle" | "busy" | "retry"
+        const retry = status as { message?: string; attempt?: number }
+        const emptyResponseWarning = emptyResponseRetryTracker.observeStatus(
+          db,
+          registry,
+          sessionID,
+          statusType,
+          retry.message,
+          retry.attempt,
+        )
+        if (emptyResponseWarning) {
+          client.session.promptAsync({
+            sessionID: emptyResponseWarning.leadSessionId,
+            parts: [{ type: "text", text: `[System: Teammate ${emptyResponseWarning.memberName} may have an unusable session]` }],
+          }).catch((err) => {
+            log(`empty-response:wake-lead:failed member=${emptyResponseWarning.memberName} err=${err instanceof Error ? err.message : String(err)}`)
+          })
+        }
         if (statusType !== "idle") releasePendingPeerDelivery(sessionID)
         const transition = handleSessionStatusEvent(db, registry, sessionID, statusType)
 
@@ -279,12 +296,21 @@ const plugin: Plugin = async (input) => {
       // teammate just appears stuck.
       if (event.type === "session.error") {
         const props = event.properties as { sessionID?: string; error?: { name?: string; data?: { message?: string } } }
+        emptyResponseRetryTracker.observeSessionError(props.sessionID)
         handleSessionErrorEvent(db, registry, props.sessionID, props.error)
+      }
+
+      if (event.type === "message.updated") {
+        const info = (event.properties as { info?: { id?: string; sessionID?: string; role?: string } }).info
+        if (info?.id && info.sessionID && info.role) {
+          emptyResponseRetryTracker.observeMessage(info.sessionID, info.id, info.role)
+        }
       }
 
       // Track per-step output tokens for stall detection
       if (event.type === "message.part.updated") {
         const part = (event.properties as { part?: { type?: string; sessionID?: string; tokens?: { output?: number } } }).part
+        if (part?.sessionID) emptyResponseRetryTracker.observeOutput(part.sessionID, part)
         if (part?.type === "step-finish" && part.sessionID && part.tokens?.output !== undefined) {
           if (registry.getBySession(part.sessionID)) {
             progressTracker.recordStep(part.sessionID, part.tokens.output)
@@ -391,6 +417,7 @@ const plugin: Plugin = async (input) => {
           claim_task: tool.schema.string().optional().describe("Task ID to auto-claim for this teammate (optional)"),
           worktree: tool.schema.boolean().default(true).describe("Create a git worktree for file isolation (default: true, set false for read-only agents)"),
           plan_approval: tool.schema.boolean().default(false).describe("Require teammate to send a plan for approval before writing files (default: false)"),
+          resume_from: tool.schema.string().optional().describe("Existing teammate name whose session context should be passed to this new isolated teammate"),
         },
         async execute(args, ctx) {
           const result = await executeTeamSpawn(deps, args, ctx.sessionID)
@@ -580,7 +607,7 @@ const plugin: Plugin = async (input) => {
       }),
 
       team_status: tool({
-        description: "View team members with their current status, agent type, and session IDs. " +
+        description: "View team members with their current status and agent type. Team leads also see session IDs. " +
           "Use this to check who is working, idle, or shut down. Includes a task summary.",
         args: {},
         async execute(_args, ctx) {

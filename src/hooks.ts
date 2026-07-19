@@ -4,6 +4,101 @@ import { sendMessage } from "./messaging"
 import { findTeamBySession } from "./types"
 
 const TEAM_TOOL_PREFIX = "team_"
+const EMPTY_RESPONSE_MESSAGE = "Provider returned an empty response"
+const EMPTY_RESPONSE_WARNING_THRESHOLD = 6
+
+interface EmptyResponseSequence {
+  count: number
+  lastAttempt?: number
+  notified: boolean
+}
+
+/** Lead wake target returned when an empty-response sequence first crosses the threshold. */
+export interface EmptyResponseWarning {
+  leadSessionId: string
+  memberName: string
+}
+
+/** Tracks and reports consecutive empty-response retries for teammate sessions. */
+export class EmptyResponseRetryTracker {
+  private readonly sequences = new Map<string, EmptyResponseSequence>()
+  private readonly assistantMessages = new Map<string, Set<string>>()
+
+  /** Observe a session status without treating retry-attempt busy transitions as progress. */
+  observeStatus(
+    db: Database,
+    registry: MemberRegistry,
+    sessionId: string,
+    status: "idle" | "busy" | "retry",
+    message?: string,
+    attempt?: number,
+  ): EmptyResponseWarning | undefined {
+    if (status === "busy") return
+    if (status === "idle" || message !== EMPTY_RESPONSE_MESSAGE) {
+      this.sequences.delete(sessionId)
+      if (status === "idle") this.assistantMessages.delete(sessionId)
+      return
+    }
+
+    const teamInfo = findTeamBySession(db, registry, sessionId)
+    if (!teamInfo || teamInfo.role !== "member" || !teamInfo.memberName) return
+
+    const current = this.sequences.get(sessionId) ?? { count: 0, notified: false }
+    if (attempt !== undefined && current.lastAttempt === attempt) return
+
+    const next = {
+      count: current.count + 1,
+      lastAttempt: attempt,
+      notified: current.notified,
+    }
+    this.sequences.set(sessionId, next)
+    if (next.count !== EMPTY_RESPONSE_WARNING_THRESHOLD || next.notified) return
+
+    next.notified = true
+    sendMessage(db, {
+      teamId: teamInfo.teamId,
+      from: "system",
+      to: "lead",
+      content: `Teammate "${teamInfo.memberName}" (session ${sessionId}) returned an empty provider response ${EMPTY_RESPONSE_WARNING_THRESHOLD} consecutive times and may be bugged/unusable. Spawn a replacement with resume_from: "${teamInfo.memberName}" to continue with its context. The existing teammate was left running and unchanged.`,
+    })
+    const team = db.query("SELECT lead_session_id FROM team WHERE id = ?")
+      .get(teamInfo.teamId) as { lead_session_id: string } | null
+    if (!team) return
+    return { leadSessionId: team.lead_session_id, memberName: teamInfo.memberName }
+  }
+
+  /** Record message ownership so only assistant output resets a retry sequence. */
+  observeMessage(sessionId: string, messageId: string, role: string): void {
+    if (role !== "assistant") return
+    const messages = this.assistantMessages.get(sessionId) ?? new Set<string>()
+    messages.add(messageId)
+    this.assistantMessages.set(sessionId, messages)
+  }
+
+  /** Reset a session's retry sequence after meaningful model output. */
+  observeOutput(sessionId: string, part: unknown): void {
+    if (!part || typeof part !== "object") return
+    const messageId = (part as { messageID?: string }).messageID
+    if (!messageId || !this.assistantMessages.get(sessionId)?.has(messageId)) return
+    if (!isMeaningfulOutputPart(part)) return
+    this.sequences.delete(sessionId)
+  }
+
+  /** Reset a session's retry sequence after a terminal session error. */
+  observeSessionError(sessionId: string | undefined): void {
+    if (!sessionId) return
+    this.sequences.delete(sessionId)
+    this.assistantMessages.delete(sessionId)
+  }
+}
+
+function isMeaningfulOutputPart(part: unknown): boolean {
+  if (!part || typeof part !== "object") return false
+  const value = part as { type?: string; text?: string; tool?: string; state?: unknown; tokens?: { output?: number } }
+  if ((value.type === "text" || value.type === "reasoning") && value.text?.trim()) return true
+  if (value.type === "tool" && (value.tool || value.state)) return true
+  return value.type === "step-finish" && (value.tokens?.output ?? 0) > 0
+}
 
 /** Result of a session status event — tells the caller what transition happened. */
 export interface StatusTransition {

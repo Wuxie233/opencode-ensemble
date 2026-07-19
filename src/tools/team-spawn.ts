@@ -9,6 +9,25 @@ import { getTeamResourceParts, preserveBranch, preservedBranchName, teamWorktree
 /** Tracks consecutive spawn failures per team for circuit breaker. */
 export const spawnFailures = new Map<string, { count: number; lastError: string }>()
 const spawnsInFlight = new Set<string>()
+/** Maximum UTF-8 bytes copied from a predecessor session into a replacement prompt. */
+export const RESUME_CONTEXT_BYTE_LIMIT = 32 * 1024
+
+interface SpawnArgs {
+  name: string
+  agent: string
+  prompt: string
+  model?: string
+  claim_task?: string
+  worktree?: boolean
+  plan_approval?: boolean
+  resume_from?: string
+}
+
+interface ResumeContext {
+  predecessor: string
+  text: string
+  truncated: boolean
+}
 
 /** Parse "provider/model" string into { providerID, modelID } for the SDK. */
 function parseModelId(model: string): { providerID: string; modelID: string } | undefined {
@@ -95,7 +114,7 @@ function rollbackSpawnTask(deps: ToolDeps, teamId: string, taskId: string | unde
  */
 export async function executeTeamSpawn(
   deps: ToolDeps,
-  args: { name: string; agent: string; prompt: string; model?: string; claim_task?: string; worktree?: boolean; plan_approval?: boolean },
+  args: SpawnArgs,
   sessionId: string,
 ): Promise<string> {
   const nameError = validateMemberName(args.name)
@@ -117,7 +136,7 @@ export async function executeTeamSpawn(
 
 async function executeTeamSpawnLocked(
   deps: ToolDeps,
-  args: { name: string; agent: string; prompt: string; model?: string; claim_task?: string; worktree?: boolean; plan_approval?: boolean },
+  args: SpawnArgs,
   sessionId: string,
   teamInfo: ReturnType<typeof requireLead>,
 ): Promise<string> {
@@ -131,6 +150,10 @@ async function executeTeamSpawnLocked(
   const existing = deps.db.query("SELECT name FROM team_member WHERE team_id = ? AND name = ?")
     .get(teamInfo.teamId, args.name)
   if (existing) throw new Error(`Teammate "${args.name}" already exists in team "${teamInfo.teamName}"`)
+
+  const resumeContext = args.resume_from
+    ? await buildResumeContext(deps, teamInfo.teamId, args.resume_from)
+    : undefined
 
   if (args.claim_task) {
     claimSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name)
@@ -410,6 +433,14 @@ async function executeTeamSpawnLocked(
     "Your plain text output is NOT visible to the team. You MUST use team_message to communicate.",
   )
 
+  if (resumeContext) {
+    context.push(
+      "",
+      `Resumed context from teammate "${resumeContext.predecessor}" (reference only; your current task follows):`,
+      resumeContext.text,
+    )
+  }
+
   context.push(
     "",
     "Your task:",
@@ -474,5 +505,141 @@ async function executeTeamSpawnLocked(
   // Reset circuit breaker on success
   spawnFailures.delete(teamInfo.teamId)
   log(`spawn:done name=${args.name} sessionId=${childSessionId}`)
-  return `Teammate "${args.name}" spawned (agent: ${args.agent})${branchInfo}${planInfo}. They are working on: ${args.prompt.slice(0, 120)}${args.prompt.length > 120 ? "..." : ""}`
+  const resumeInfo = resumeContext
+    ? `, resuming from "${resumeContext.predecessor}" (${resumeContext.truncated ? "truncated context" : "complete context"})`
+    : ""
+  return `Teammate "${args.name}" spawned (agent: ${args.agent}${resumeInfo})${branchInfo}${planInfo}. They are working on: ${args.prompt.slice(0, 120)}${args.prompt.length > 120 ? "..." : ""}`
+}
+
+async function buildResumeContext(deps: ToolDeps, teamId: string, predecessorName: string): Promise<ResumeContext> {
+  const predecessor = deps.db.query(
+    "SELECT session_id, prompt FROM team_member WHERE team_id = ? AND name = ?",
+  ).get(teamId, predecessorName) as { session_id: string; prompt: string | null } | null
+  if (!predecessor) throw new Error(`Teammate "${predecessorName}" not found in this team`)
+
+  const result = await deps.client.session.messages({
+    sessionID: predecessor.session_id,
+  })
+  const messages = [...(result.data ?? [])].sort((left, right) => {
+    const leftTime = resumeMessageTime(left)
+    const rightTime = resumeMessageTime(right)
+    if (leftTime !== rightTime) return leftTime - rightTime
+    return resumeMessageId(left).localeCompare(resumeMessageId(right))
+  })
+  const transcript = messages
+    .map((message, index) => formatResumeMessage(message, index))
+    .filter((message): message is string => message !== undefined)
+    .join("\n\n")
+  const fullContext = [
+    `Original task:\n${predecessor.prompt ?? "(not recorded)"}`,
+    transcript ? `Session transcript (chronological):\n${transcript}` : "Session transcript: (no readable messages)",
+  ].join("\n\n")
+  if (utf8Length(fullContext) <= RESUME_CONTEXT_BYTE_LIMIT) {
+    return { predecessor: predecessorName, text: fullContext, truncated: false }
+  }
+
+  const marker = "\n\n[... predecessor context truncated ...]\n\n"
+  const available = RESUME_CONTEXT_BYTE_LIMIT - utf8Length(marker)
+  const earlyLength = Math.floor(available * 0.4)
+  const recentLength = available - earlyLength
+  return {
+    predecessor: predecessorName,
+    text: `${utf8Prefix(fullContext, earlyLength)}${marker}${utf8Suffix(fullContext, recentLength)}`,
+    truncated: true,
+  }
+}
+
+function formatResumeMessage(
+  message: { info: unknown; parts: unknown[] },
+  index: number,
+): string | undefined {
+  const info = message.info && typeof message.info === "object"
+    ? message.info as { role?: string; time?: { created?: number }; error?: unknown }
+    : {}
+  const parts = message.parts
+    .map(formatResumePart)
+    .filter((part): part is string => part !== undefined)
+  const error = info.error === undefined ? undefined : `[message error] ${renderResumeValue(info.error)}`
+  const content = [...parts, error].filter((part): part is string => part !== undefined).join("\n")
+  if (!content) return undefined
+  const role = info.role ?? "unknown"
+  const sequence = info.time?.created ?? index
+  return `[${sequence} ${role}]\n${content}`
+}
+
+function resumeMessageTime(message: { info: unknown }): number {
+  if (!message.info || typeof message.info !== "object") return Number.MAX_SAFE_INTEGER
+  const info = message.info as { time?: { created?: number } }
+  return info.time?.created ?? Number.MAX_SAFE_INTEGER
+}
+
+function resumeMessageId(message: { info: unknown }): string {
+  if (!message.info || typeof message.info !== "object") return ""
+  const info = message.info as { id?: string }
+  return info.id ?? ""
+}
+
+function formatResumePart(part: unknown): string | undefined {
+  if (!part || typeof part !== "object") return undefined
+  const value = part as {
+    type?: string
+    text?: string
+    tool?: string
+    state?: { status?: string; title?: string; input?: unknown; output?: unknown; error?: unknown }
+  }
+  if ((value.type === "text" || value.type === "reasoning") && value.text) return value.text
+  if (value.type !== "tool") return undefined
+
+  const details = value.state
+    ? Object.fromEntries(
+        Object.entries({
+          status: value.state.status,
+          title: value.state.title,
+          input: value.state.input,
+          output: value.state.output,
+          error: value.state.error,
+        }).filter((entry): entry is [string, unknown] => entry[1] !== undefined),
+      )
+    : undefined
+  const rendered = details === undefined ? "" : renderResumeValue(details)
+  return `[tool ${value.tool ?? "unknown"}]${rendered ? ` ${rendered}` : ""}`
+}
+
+function renderResumeValue(value: unknown): string {
+  if (typeof value === "string") return value
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
+  }
+}
+
+function utf8Length(value: string): number {
+  return new TextEncoder().encode(value).length
+}
+
+function utf8Prefix(value: string, maxBytes: number): string {
+  const bytes = new TextEncoder().encode(value)
+  const decoder = new TextDecoder("utf-8", { fatal: true })
+  for (let end = Math.min(bytes.length, maxBytes); end >= 0; end--) {
+    try {
+      return decoder.decode(bytes.slice(0, end))
+    } catch {
+      // Move at most a few bytes to the previous UTF-8 boundary.
+    }
+  }
+  return ""
+}
+
+function utf8Suffix(value: string, maxBytes: number): string {
+  const bytes = new TextEncoder().encode(value)
+  const decoder = new TextDecoder("utf-8", { fatal: true })
+  for (let start = Math.max(0, bytes.length - maxBytes); start <= bytes.length; start++) {
+    try {
+      return decoder.decode(bytes.slice(start))
+    } catch {
+      // Move at most a few bytes to the next UTF-8 boundary.
+    }
+  }
+  return ""
 }

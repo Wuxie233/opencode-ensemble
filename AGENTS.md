@@ -204,6 +204,10 @@ Three hooks wired in index.ts:
 13. `team_spawn(claim_task)` owns task coordination atomically. It must claim
     only a same-Team pending task before resource creation and conditionally
     roll the claim back on every spawn failure path.
+14. `team_spawn(resume_from)` creates a fresh isolated session and transfers a
+    bounded prompt context; it never forks or changes the predecessor session.
+    The 32 KiB packet keeps the original task and early context plus recent
+    progress/errors when truncation is required.
 
 ## Branch Preservation (Critical — Do Not Skip)
 
