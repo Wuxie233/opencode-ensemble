@@ -3,6 +3,7 @@ import { setupDeps, insertTeam, insertMember } from "../helpers"
 import { executeTeamShutdown } from "../../src/tools/team-shutdown"
 import { executeTeamCleanup } from "../../src/tools/team-cleanup"
 import type { MergeBranchFn, DeleteBranchFn } from "../../src/tools/merge-helper"
+import { handleSessionErrorEvent } from "../../src/hooks"
 
 /** Noop merge fn for tests that don't need real git. */
 const noopMerge: MergeBranchFn = async () => ({ ok: true })
@@ -166,6 +167,25 @@ describe("team_shutdown", () => {
     expect(row.status).toBe("shutdown")
   })
 
+  test("force shutdown records intent before abort so abort errors do not alert the lead", async () => {
+    deps.client.session.status = async () => ({ data: { "sess-alice": { type: "busy" } } })
+    deps.client.session.abort = async () => {
+      const member = deps.db.query("SELECT status FROM team_member WHERE session_id = ?")
+        .get("sess-alice") as { status: string }
+      expect(member.status).toBe("shutdown_requested")
+      handleSessionErrorEvent(deps.db, deps.registry, "sess-alice", {
+        name: "MessageAbortedError",
+        data: { message: "Aborted" },
+      })
+      return {}
+    }
+
+    await executeTeamShutdown(deps, { member: "alice", force: true }, "lead-sess")
+
+    expect((deps.db.query("SELECT COUNT(*) AS count FROM team_message").get() as { count: number }).count).toBe(0)
+    expect((deps.db.query("SELECT status FROM team_member WHERE session_id = ?").get("sess-alice") as { status: string }).status).toBe("shutdown")
+  })
+
   test("member already shutdown_requested → second call forces abort", async () => {
     // Set alice to shutdown_requested (as if first graceful call already happened)
     deps.db.run("UPDATE team_member SET status = 'shutdown_requested' WHERE name = 'alice'")
@@ -276,6 +296,21 @@ describe("team_cleanup", () => {
 
     const team = deps.db.query("SELECT status FROM team WHERE id = ?").get("t1") as Record<string, string>
     expect(team.status).toBe("archived")
+  })
+
+  test("force cleanup marks members shutdown_requested before aborting", async () => {
+    insertMember(deps.db, "t1", "alice", "sess-alice", "busy", "running")
+    deps.registry.register("t1", "alice", "sess-alice")
+    let statusAtAbort: string | undefined
+    deps.client.session.abort = async () => {
+      const member = deps.db.query("SELECT status FROM team_member WHERE session_id = ?")
+        .get("sess-alice") as { status: string }
+      statusAtAbort = member.status
+      return {}
+    }
+
+    await executeTeamCleanup(deps, { force: true }, "lead-sess", undefined, noopMerge, noopDelete, false)
+    expect(statusAtAbort).toBe("shutdown_requested")
   })
 
   test("rejects if caller is not the lead", async () => {

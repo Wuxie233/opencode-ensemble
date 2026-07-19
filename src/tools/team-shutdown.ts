@@ -100,6 +100,13 @@ async function preserveAndAbort(
   worktreeBranch: string | null,
   preserve: PreserveBranchFn,
 ): Promise<void> {
+  // Record shutdown intent before abort can emit MessageAbortedError.
+  deps.db.run(
+    `UPDATE team_member SET status = 'shutdown_requested', time_updated = ?
+     WHERE team_id = ? AND name = ? AND status NOT IN ('shutdown', 'error')`,
+    [Date.now(), teamId, memberName],
+  )
+
   // Preserve the branch BEFORE aborting — session.abort() may delete the worktree + branch
   if (worktreeBranch && !worktreeBranch.startsWith("ensemble/preserved/")) {
     const resource = getTeamResourceParts(deps.db, teamId)

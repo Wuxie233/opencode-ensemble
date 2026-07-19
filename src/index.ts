@@ -297,7 +297,15 @@ const plugin: Plugin = async (input) => {
       if (event.type === "session.error") {
         const props = event.properties as { sessionID?: string; error?: { name?: string; data?: { message?: string } } }
         emptyResponseRetryTracker.observeSessionError(props.sessionID)
-        handleSessionErrorEvent(db, registry, props.sessionID, props.error)
+        const alert = handleSessionErrorEvent(db, registry, props.sessionID, props.error)
+        if (alert) {
+          client.session.promptAsync({
+            sessionID: alert.leadSessionId,
+            parts: [{ type: "text", text: `[System: Teammate ${alert.memberName} failed; recovery guidance is available in team messages]` }],
+          }).catch((err) => {
+            log(`session-error:wake-lead:failed member=${alert.memberName} err=${err instanceof Error ? err.message : String(err)}`)
+          })
+        }
       }
 
       if (event.type === "message.updated") {

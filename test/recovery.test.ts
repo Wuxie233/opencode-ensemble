@@ -85,6 +85,10 @@ describe("recoverStaleMembers", () => {
     insertTeam(db, "t1", "my-team", "lead-sess")
     insertMember(db, "t1", "alice", "sess-1", "busy", "running")
     insertMember(db, "t1", "bob", "sess-2", "busy", "running")
+    db.run(
+      "INSERT INTO team_task (id, team_id, content, status, priority, assignee, time_created, time_updated) VALUES (?, ?, ?, 'in_progress', 'high', ?, ?, ?)",
+      ["task-alice", "t1", "recover interrupted task", "alice", Date.now(), Date.now()],
+    )
 
     const result = await recoverStaleMembers(db, client)
     expect(result.interrupted).toBe(2)
@@ -96,6 +100,18 @@ describe("recoverStaleMembers", () => {
     const bob = db.query("SELECT status, execution_status FROM team_member WHERE name = ?").get("bob") as Record<string, string>
     expect(bob.status).toBe("error")
     expect(bob.execution_status).toBe("idle")
+
+    const alerts = db.query(
+      "SELECT content FROM team_message WHERE team_id = ? AND from_name = 'system' AND to_name = 'lead' ORDER BY content",
+    ).all("t1") as Array<{ content: string }>
+    expect(alerts).toHaveLength(2)
+    expect(alerts.map(alert => alert.content).join("\n")).toContain("alice")
+    expect(alerts.map(alert => alert.content).join("\n")).toContain("bob")
+    expect((db.query("SELECT status, assignee FROM team_task WHERE id = ?").get("task-alice") as { status: string; assignee: string | null }))
+      .toEqual({ status: "pending", assignee: null })
+
+    expect((await recoverStaleMembers(db, client)).interrupted).toBe(0)
+    expect((db.query("SELECT COUNT(*) AS count FROM team_message").get() as { count: number }).count).toBe(2)
   })
 
   test("aborts orphaned sessions during recovery", async () => {

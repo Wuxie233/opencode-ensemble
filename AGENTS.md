@@ -136,7 +136,14 @@ Two-level per member:
 - Execution status: idle | starting | running | cancel_requested |
   cancelling | cancelled | completing | completed | failed | timed_out
 
-Driven by session.status events from the plugin event hook.
+Driven by session.status events and terminal session.error events from the
+plugin event hook. The first error for an active ready/busy teammate must
+atomically mark it `error`/`failed`, return its in-progress tasks to
+pending/unassigned, and persist an actionable system message to the Lead before
+attempting a fire-and-forget wake. Error members stay terminal across later
+idle/busy events. Every Ensemble-initiated abort must first record
+`shutdown_requested` so the resulting `MessageAbortedError` is not reported as
+an unexpected failure.
 
 ### Sub-Agent Isolation
 

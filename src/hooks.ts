@@ -131,6 +131,8 @@ export function handleSessionStatusEvent(
     .get(entry.teamId, entry.memberName) as { status: string; execution_status: string } | null
   if (!member) return undefined
 
+  if (member.status === "error" || member.status === "shutdown") return undefined
+
   if (status === "idle") {
     const newStatus = member.status === "shutdown_requested" ? "shutdown" : "ready"
     if (member.status === newStatus) return undefined
@@ -160,7 +162,7 @@ export function handleSessionStatusEvent(
       )
       return undefined
     }
-    if (member.status === "ready" || member.status === "error") {
+    if (member.status === "ready") {
       // Reset reported_to_lead so re-activated teammates can receive messages again (issue #3).
       // INVARIANT: every promptAsync delivery path must check hasReportedCompletion() to prevent loops.
       db.run(
@@ -267,32 +269,66 @@ export interface SessionErrorPayload {
   data?: { message?: string }
 }
 
+/** Lead wake target returned when a teammate first enters the error state. */
+export interface SessionErrorAlert {
+  leadSessionId: string
+  memberName: string
+}
+
 /**
  * Handle a session.error event. Surfaces tool/model failures from a teammate
  * as a system message to the lead, so otherwise-silent failures are visible.
  *
  * Ignored when:
  * - sessionID is undefined
- * - the session is not a registered teammate (leads are not in the registry)
+ * - the session is not an active teammate
+ * - the teammate is already terminal or shutting down
  */
 export function handleSessionErrorEvent(
   db: Database,
   registry: MemberRegistry,
   sessionId: string | undefined,
   error: SessionErrorPayload | undefined,
-): void {
+): SessionErrorAlert | undefined {
   if (!sessionId) return
-  // Use findTeamBySession so the SQLite fallback fires when this Plugin
-  // instance's in-memory registry doesn't have the teammate (multi-instance
-  // scenario — see findTeamBySession in src/types.ts).
-  const teamInfo = findTeamBySession(db, registry, sessionId)
-  if (!teamInfo || teamInfo.role !== "member" || !teamInfo.memberName) return
+
+  const member = db.query(
+    `SELECT tm.team_id, tm.name, t.lead_session_id
+     FROM team_member tm
+     JOIN team t ON t.id = tm.team_id
+     WHERE tm.session_id = ? AND t.status = 'active'`,
+  ).get(sessionId) as { team_id: string; name: string; lead_session_id: string } | null
+  if (!member) return
 
   const errMsg = error?.data?.message ?? error?.name ?? "unknown error"
-  sendMessage(db, {
-    teamId: teamInfo.teamId,
-    from: "system",
-    to: "lead",
-    content: `Teammate "${teamInfo.memberName}" had a session error: ${errMsg}. Check their session for details. They may be stuck and need investigation or shutdown.`,
-  })
+  const alert = db.transaction((): SessionErrorAlert | undefined => {
+    const claimed = db.run(
+      `UPDATE team_member
+       SET status = 'error', execution_status = 'failed', time_updated = ?
+       WHERE team_id = ? AND name = ? AND session_id = ? AND status IN ('ready', 'busy')`,
+      [Date.now(), member.team_id, member.name, sessionId],
+    )
+    if (claimed.changes !== 1) return undefined
+
+    const releasedTasks = db.run(
+      `UPDATE team_task
+       SET status = 'pending', assignee = NULL, time_updated = ?
+       WHERE team_id = ? AND assignee = ? AND status = 'in_progress'`,
+      [Date.now(), member.team_id, member.name],
+    ).changes
+    const taskNotice = releasedTasks > 0
+      ? ` ${releasedTasks} assigned task${releasedTasks === 1 ? " was" : "s were"} returned to pending so a replacement can claim ${releasedTasks === 1 ? "it" : "them"}.`
+      : ""
+
+    sendMessage(db, {
+      teamId: member.team_id,
+      from: "system",
+      to: "lead",
+      content: `Teammate "${member.name}" (${sessionId}) failed with a session error: ${errMsg}.${taskNotice} Inspect the session and preserved branch, then replace it with team_spawn using resume_from: "${member.name}" if the task still needs work.`,
+    })
+    return { leadSessionId: member.lead_session_id, memberName: member.name }
+  })()
+
+  if (alert) registry.register(member.team_id, member.name, sessionId)
+  return alert
 }

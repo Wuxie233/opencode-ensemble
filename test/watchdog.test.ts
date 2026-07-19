@@ -20,6 +20,10 @@ describe("Watchdog", () => {
       ["t1", "alice", "sess-a", pastTime, pastTime]
     )
     deps.registry.register("t1", "alice", "sess-a")
+    deps.db.run(
+      "INSERT INTO team_task (id, team_id, content, status, priority, assignee, time_created, time_updated) VALUES (?, ?, ?, 'in_progress', 'high', ?, ?, ?)",
+      ["task-a", "t1", "recover timed out task", "alice", pastTime, pastTime],
+    )
 
     const watchdog = new Watchdog({ db: deps.db, client: deps.client, registry: deps.registry, ttlMs: 30_000 })
     await watchdog.check()
@@ -39,6 +43,18 @@ describe("Watchdog", () => {
     const msg = (toastCalls[0]!.args[0] as Record<string, unknown>).message as string
     expect(msg).toContain("alice")
     expect(msg).toContain("timed out")
+
+    const alerts = deps.db.query(
+      "SELECT content FROM team_message WHERE team_id = ? AND from_name = 'system' AND to_name = 'lead'",
+    ).all("t1") as Array<{ content: string }>
+    expect(alerts).toHaveLength(1)
+    expect(alerts[0]!.content).toContain("alice")
+    expect(alerts[0]!.content).toContain("timed out")
+    expect((deps.db.query("SELECT status, assignee FROM team_task WHERE id = ?").get("task-a") as { status: string; assignee: string | null }))
+      .toEqual({ status: "pending", assignee: null })
+
+    await watchdog.check()
+    expect((deps.db.query("SELECT COUNT(*) AS count FROM team_message").get() as { count: number }).count).toBe(1)
   })
 
   test("does not time out a member within TTL", async () => {

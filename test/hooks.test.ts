@@ -120,22 +120,16 @@ describe("handleSessionStatusEvent", () => {
     expect(row.execution_status).toBe("idle")
   })
 
-  test("transitions error member to busy when session becomes busy", () => {
+  test("keeps error member terminal when later busy and idle events arrive", () => {
     insertTeam(db, "t1", "my-team", "lead-sess")
-    insertMember(db, "t1", "alice", "sess-1", "error", "idle")
+    insertMember(db, "t1", "alice", "sess-1", "error", "failed")
     registry.register("t1", "alice", "sess-1")
 
-    const result = handleSessionStatusEvent(db, registry, "sess-1", "busy")
-
-    expect(result).toEqual({
-      memberName: "alice",
-      teamId: "t1",
-      from: "error",
-      to: "busy",
-    })
+    expect(handleSessionStatusEvent(db, registry, "sess-1", "busy")).toBeUndefined()
+    expect(handleSessionStatusEvent(db, registry, "sess-1", "idle")).toBeUndefined()
     const row = db.query("SELECT status, execution_status FROM team_member WHERE session_id = ?").get("sess-1") as Record<string, string>
-    expect(row.status).toBe("busy")
-    expect(row.execution_status).toBe("running")
+    expect(row.status).toBe("error")
+    expect(row.execution_status).toBe("failed")
   })
 
   test("ignores busy event when member is shutdown_requested (not ready/error)", () => {
@@ -704,11 +698,16 @@ describe("handleSessionErrorEvent", () => {
     registry.register("t1", "scout", "scout-sess")
   })
 
-  test("posts a system message to the lead when a known member errors", () => {
-    handleSessionErrorEvent(db, registry, "scout-sess", {
+  test("atomically fails the member, posts one actionable alert, and returns lead wake metadata", () => {
+    const wake = handleSessionErrorEvent(db, registry, "scout-sess", {
       name: "UnknownError",
       data: { message: "Tool team_message failed: This session is not in a team." },
     })
+
+    expect(wake).toEqual({ leadSessionId: "lead-sess", memberName: "scout" })
+    const member = db.query("SELECT status, execution_status FROM team_member WHERE session_id = ?")
+      .get("scout-sess") as { status: string; execution_status: string }
+    expect(member).toEqual({ status: "error", execution_status: "failed" })
 
     const msgs = db.query(
       "SELECT from_name, to_name, content FROM team_message WHERE team_id = ?"
@@ -717,7 +716,44 @@ describe("handleSessionErrorEvent", () => {
     expect(msgs[0]?.from_name).toBe("system")
     expect(msgs[0]?.to_name).toBe("lead")
     expect(msgs[0]?.content).toContain("scout")
+    expect(msgs[0]?.content).toContain("scout-sess")
     expect(msgs[0]?.content).toContain("Tool team_message failed")
+    expect(msgs[0]?.content).toContain("team_spawn")
+    expect(msgs[0]?.content).toContain("resume_from")
+
+    expect(handleSessionErrorEvent(db, registry, "scout-sess", {
+      name: "UnknownError",
+      data: { message: "duplicate delivery" },
+    })).toBeUndefined()
+    expect((db.query("SELECT COUNT(*) AS count FROM team_message").get() as { count: number }).count).toBe(1)
+  })
+
+  test("releases in-progress tasks assigned to the failed member", () => {
+    const now = Date.now()
+    db.run(
+      "INSERT INTO team_task (id, team_id, content, status, priority, assignee, time_created, time_updated) VALUES (?, ?, ?, 'in_progress', 'high', ?, ?, ?)",
+      ["task-failed", "t1", "finish the interrupted work", "scout", now, now],
+    )
+    db.run(
+      "INSERT INTO team_task (id, team_id, content, status, priority, assignee, time_created, time_updated) VALUES (?, ?, ?, 'completed', 'medium', ?, ?, ?)",
+      ["task-done", "t1", "leave completed work alone", "scout", now, now],
+    )
+
+    handleSessionErrorEvent(db, registry, "scout-sess", {
+      name: "MessageAbortedError",
+      data: { message: "Aborted" },
+    })
+
+    const failed = db.query("SELECT status, assignee FROM team_task WHERE id = ?")
+      .get("task-failed") as { status: string; assignee: string | null }
+    const completed = db.query("SELECT status, assignee FROM team_task WHERE id = ?")
+      .get("task-done") as { status: string; assignee: string | null }
+    expect(failed).toEqual({ status: "pending", assignee: null })
+    expect(completed).toEqual({ status: "completed", assignee: "scout" })
+
+    const alert = db.query("SELECT content FROM team_message WHERE team_id = ? AND to_name = 'lead'")
+      .get("t1") as { content: string }
+    expect(alert.content).toContain("1 assigned task was returned to pending")
   })
 
   test("uses error.name as fallback when data.message is missing", () => {
@@ -763,6 +799,17 @@ describe("handleSessionErrorEvent", () => {
 
     const msgs = db.query("SELECT id FROM team_message").all() as unknown[]
     expect(msgs).toHaveLength(0)
+  })
+
+  test.each(["shutdown_requested", "shutdown", "error"])("suppresses errors for %s members", status => {
+    db.run("UPDATE team_member SET status = ? WHERE session_id = ?", [status, "scout-sess"])
+
+    expect(handleSessionErrorEvent(db, registry, "scout-sess", {
+      name: "AbortError",
+      data: { message: "aborted intentionally" },
+    })).toBeUndefined()
+
+    expect((db.query("SELECT COUNT(*) AS count FROM team_message").get() as { count: number }).count).toBe(0)
   })
 })
 

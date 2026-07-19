@@ -217,11 +217,28 @@ export class Watchdog {
         }
       }
 
-      // Mark as timed out
-      this.db.run(
-        "UPDATE team_member SET status = 'error', execution_status = 'timed_out', time_updated = ? WHERE team_id = ? AND name = ?",
-        [Date.now(), member.team_id, member.name]
-      )
+      // Claim the terminal transition so concurrent error/cleanup paths cannot
+      // abort or alert for the same member twice.
+      const claimed = this.db.transaction(() => {
+        const result = this.db.run(
+          "UPDATE team_member SET status = 'error', execution_status = 'timed_out', time_updated = ? WHERE team_id = ? AND name = ? AND status = 'busy'",
+          [Date.now(), member.team_id, member.name]
+        )
+        if (result.changes !== 1) return false
+        this.db.run(
+          `UPDATE team_task SET status = 'pending', assignee = NULL, time_updated = ?
+           WHERE team_id = ? AND assignee = ? AND status = 'in_progress'`,
+          [Date.now(), member.team_id, member.name],
+        )
+        sendMessage(this.db, {
+          teamId: member.team_id,
+          from: "system",
+          to: "lead",
+          content: `Teammate "${member.name}" (${member.session_id}) timed out and was stopped. Inspect its session and preserved branch, then replace it with team_spawn using resume_from: "${member.name}" if needed.`,
+        })
+        return true
+      })()
+      if (!claimed) continue
 
       // Abort session (best effort)
       try {

@@ -484,6 +484,13 @@ export async function executeTeamCleanup(
 
   // Force-abort active members — preserve branches BEFORE aborting
   if (args.force) {
+    if (active.length > 0) {
+      deps.db.run(
+        `UPDATE team_member SET status = 'shutdown_requested', time_updated = ?
+         WHERE team_id = ? AND status NOT IN ('shutdown', 'shutdown_requested', 'error')`,
+        [Date.now(), teamInfo.teamId],
+      )
+    }
     for (const member of active) {
       // Preserve branch before abort — session.abort() may destroy the worktree + branch
       if (member.worktree_branch && !member.worktree_branch.startsWith("ensemble/preserved/")) {

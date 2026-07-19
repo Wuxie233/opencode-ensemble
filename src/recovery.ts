@@ -8,6 +8,7 @@ import {
   hasReportedCompletion,
   MESSAGE_DELIVERY_LEASE_MS,
   restoreFailedPeerMessageDelivery,
+  sendMessage,
 } from "./messaging"
 import { preserveBranch, preservedBranchName, teamResourceSegment } from "./tools/merge-helper"
 import { log } from "./log"
@@ -31,16 +32,10 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
         AND (? IS NULL OR t.project_id = ? OR t.project_id = 'default')`
   ).all(cwd ?? null, cwd ?? null) as Array<{ session_id: string; worktree_branch: string | null; name: string; team_id: string; team_name: string; project_name: string }>
 
-  const result = db.run(
-    `UPDATE team_member SET status = 'error', execution_status = 'idle', time_updated = ?
-      WHERE status = 'busy'
-        AND team_id IN (SELECT id FROM team WHERE status = 'active' AND (? IS NULL OR project_id = ? OR project_id = 'default'))`,
-    [Date.now(), cwd ?? null, cwd ?? null]
-  )
-
   // Preserve branches then abort orphaned sessions
-  if (client) {
-    for (const member of stale) {
+  let interrupted = 0
+  for (const member of stale) {
+    if (client) {
       // Preserve branch BEFORE abort — session.abort() may destroy the worktree + branch
       if (cwd && member.worktree_branch && !member.worktree_branch.startsWith("ensemble/preserved/")) {
         const safeBranch = preservedBranchName(member.project_name, member.team_name, member.team_id, member.name)
@@ -51,13 +46,38 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
           log(`recovery:branch:preserved src=${member.worktree_branch} target=${safeBranch}`)
         }
       }
+    }
+
+    const claimed = db.transaction(() => {
+      const result = db.run(
+        "UPDATE team_member SET status = 'error', execution_status = 'idle', time_updated = ? WHERE team_id = ? AND name = ? AND status = 'busy'",
+        [Date.now(), member.team_id, member.name],
+      )
+      if (result.changes !== 1) return false
+      db.run(
+        `UPDATE team_task SET status = 'pending', assignee = NULL, time_updated = ?
+         WHERE team_id = ? AND assignee = ? AND status = 'in_progress'`,
+        [Date.now(), member.team_id, member.name],
+      )
+      sendMessage(db, {
+        teamId: member.team_id,
+        from: "system",
+        to: "lead",
+        content: `Teammate "${member.name}" (${member.session_id}) was interrupted by startup recovery. Inspect its session and preserved branch, then replace it with team_spawn using resume_from: "${member.name}" if the task still needs work.`,
+      })
+      return true
+    })()
+    if (!claimed) continue
+    interrupted++
+
+    if (client) {
       try {
         await client.session.abort({ sessionID: member.session_id })
       } catch { /* best effort */ }
     }
   }
 
-  return { interrupted: result.changes }
+  return { interrupted }
 }
 
 /**
