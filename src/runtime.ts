@@ -25,15 +25,26 @@ export interface RuntimeHandle {
   release(): void
 }
 
+/** Start a directory watchdog and return it for local disposal. */
+export function startMainWatchdog<T extends { start(): void }>(
+  mainInstance: boolean,
+  create: () => T,
+): T | undefined {
+  if (!mainInstance) return undefined
+  const watchdog = create()
+  watchdog.start()
+  return watchdog
+}
+
 export function createLocalDisposer(
-  watchdog: { stop(): void },
+  watchdog: { stop(): void } | undefined,
   runtime: { release(): void },
 ): () => void {
   let disposed = false
   return () => {
     if (disposed) return
     disposed = true
-    watchdog.stop()
+    watchdog?.stop()
     runtime.release()
   }
 }

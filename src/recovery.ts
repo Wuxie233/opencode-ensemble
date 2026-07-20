@@ -8,7 +8,9 @@ import {
   hasReportedCompletion,
   MESSAGE_DELIVERY_LEASE_MS,
   restoreFailedPeerMessageDelivery,
+  sendLeadAlert,
   sendMessage,
+  wakeTeamLead,
 } from "./messaging"
 import { preserveBranch, preservedBranchName, teamResourceSegment } from "./tools/merge-helper"
 import { log } from "./log"
@@ -32,19 +34,36 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
         AND (? IS NULL OR t.project_id = ? OR t.project_id = 'default')`
   ).all(cwd ?? null, cwd ?? null) as Array<{ session_id: string; worktree_branch: string | null; name: string; team_id: string; team_name: string; project_name: string }>
 
+  let liveSessions: Record<string, { type: string }> = {}
+  if (client) {
+    try {
+      liveSessions = (await client.session.status()).data ?? {}
+    } catch {
+      log("recovery:status:failed; skipping destructive stale-member recovery")
+      return { interrupted: 0 }
+    }
+  }
+
   // Preserve branches then abort orphaned sessions
   let interrupted = 0
   for (const member of stale) {
+    if (liveSessions[member.session_id]) continue
     if (client) {
       // Preserve branch BEFORE abort — session.abort() may destroy the worktree + branch
-      if (cwd && member.worktree_branch && !member.worktree_branch.startsWith("ensemble/preserved/")) {
+      if (cwd && member.worktree_branch) {
         const safeBranch = preservedBranchName(member.project_name, member.team_name, member.team_id, member.name)
         const ok = await preserveBranch(member.worktree_branch, safeBranch, cwd)
-        if (ok) {
-          db.run("UPDATE team_member SET worktree_branch = ? WHERE team_id = ? AND name = ?",
-            [safeBranch, member.team_id, member.name])
-          log(`recovery:branch:preserved src=${member.worktree_branch} target=${safeBranch}`)
+        if (!ok) {
+          sendLeadAlert(db, client, {
+            teamId: member.team_id,
+            content: `Teammate "${member.name}" appears orphaned, but branch "${member.worktree_branch}" could not be preserved. Startup recovery left the member and its task unchanged for a later retry.`,
+            wakeText: `[System: Startup recovery could not preserve ${member.name}'s branch; guidance is available in team messages]`,
+          })
+          continue
         }
+        db.run("UPDATE team_member SET worktree_branch = ? WHERE team_id = ? AND name = ?",
+          [safeBranch, member.team_id, member.name])
+        log(`recovery:branch:preserved src=${member.worktree_branch} target=${safeBranch}`)
       }
     }
 
@@ -71,6 +90,12 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
     interrupted++
 
     if (client) {
+      wakeTeamLead(
+        db,
+        client,
+        member.team_id,
+        `[System: Teammate ${member.name} was interrupted during startup recovery; guidance is available in team messages]`,
+      )
       try {
         await client.session.abort({ sessionID: member.session_id })
       } catch { /* best effort */ }

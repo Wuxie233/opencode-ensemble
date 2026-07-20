@@ -107,6 +107,9 @@ describe("recoverStaleMembers", () => {
     expect(alerts).toHaveLength(2)
     expect(alerts.map(alert => alert.content).join("\n")).toContain("alice")
     expect(alerts.map(alert => alert.content).join("\n")).toContain("bob")
+    const leadWakes = client.calls.filter(call => call.method === "session.promptAsync")
+    expect(leadWakes).toHaveLength(2)
+    expect(leadWakes.every(call => (call.args[0] as { sessionID: string }).sessionID === "lead-sess")).toBe(true)
     expect((db.query("SELECT status, assignee FROM team_task WHERE id = ?").get("task-alice") as { status: string; assignee: string | null }))
       .toEqual({ status: "pending", assignee: null })
 
@@ -123,6 +126,51 @@ describe("recoverStaleMembers", () => {
 
     const abortCalls = client.calls.filter(c => c.method === "session.abort")
     expect(abortCalls).toHaveLength(2)
+  })
+
+  test("does not abort a session the server still reports as live", async () => {
+    insertTeam(db, "t1", "my-team", "lead-sess")
+    insertMember(db, "t1", "alice", "sess-1", "busy", "running")
+    client.session.status = async () => {
+      client.calls.push({ method: "session.status", args: [] })
+      return { data: { "sess-1": { type: "busy" } } }
+    }
+
+    const result = await recoverStaleMembers(db, client)
+
+    expect(result.interrupted).toBe(0)
+    expect((db.query("SELECT status FROM team_member WHERE name = ?").get("alice") as { status: string }).status).toBe("busy")
+    expect(client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
+  })
+
+  test("fails closed when server liveness cannot be confirmed", async () => {
+    insertTeam(db, "t1", "my-team", "lead-sess")
+    insertMember(db, "t1", "alice", "sess-1", "busy", "running")
+    client.session.status = async () => { throw new Error("server unavailable") }
+
+    const result = await recoverStaleMembers(db, client)
+
+    expect(result.interrupted).toBe(0)
+    expect((db.query("SELECT status FROM team_member WHERE name = ?").get("alice") as { status: string }).status).toBe("busy")
+    expect(client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
+  })
+
+  test("keeps an orphan retryable when branch preservation fails", async () => {
+    insertTeam(db, "t1", "my-team", "lead-sess")
+    insertMember(db, "t1", "alice", "sess-1", "busy", "running")
+    db.run("UPDATE team_member SET worktree_branch = ? WHERE team_id = ? AND name = ?", ["missing-branch", "t1", "alice"])
+    db.run(
+      "INSERT INTO team_task (id, team_id, content, status, priority, assignee, time_created, time_updated) VALUES ('task-a', 't1', 'work', 'in_progress', 'high', 'alice', ?, ?)",
+      [Date.now(), Date.now()],
+    )
+
+    const result = await recoverStaleMembers(db, client, "/does/not/exist")
+
+    expect(result.interrupted).toBe(0)
+    expect((db.query("SELECT status FROM team_member WHERE name = 'alice'").get() as { status: string }).status).toBe("busy")
+    expect((db.query("SELECT status, assignee FROM team_task WHERE id = 'task-a'").get() as { status: string; assignee: string })).toEqual({ status: "in_progress", assignee: "alice" })
+    expect(client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
+    expect((db.query("SELECT content FROM team_message WHERE team_id = 't1' AND to_name = 'lead'").get() as { content: string }).content).toContain("could not be preserved")
   })
 
   test("continues recovery even if abort fails", async () => {
@@ -496,6 +544,27 @@ describe("recoverOrphanedWorktrees", () => {
     const { recoverOrphanedWorktrees } = await import("../src/recovery")
     const result = await recoverOrphanedWorktrees(db, client)
     expect(result.removed).toBe(0)
+  })
+
+  test("does not remove an active worktree belonging to another project", async () => {
+    const now = Date.now()
+    db.run(
+      "INSERT INTO project (id, name, path, status, time_created, time_updated) VALUES ('/tmp/project-b', 'project-b', '/tmp/project-b', 'active', ?, ?)",
+      [now, now],
+    )
+    db.run(
+      "INSERT INTO team (id, name, project_id, lead_session_id, status, delegate, time_created, time_updated) VALUES ('t2', 'team-b', '/tmp/project-b', 'lead-b', 'active', 0, ?, ?)",
+      [now, now],
+    )
+    insertMember(db, "t2", "bob", "sess-bob", "busy", "running")
+    db.run("UPDATE team_member SET worktree_dir = '/tmp/wt-bob' WHERE team_id = 't2' AND name = 'bob'")
+    client.worktree.list = async () => ({
+      data: [{ name: "ensemble-project-b-team-b-bob", branch: "ensemble-bob", directory: "/tmp/wt-bob" }],
+    })
+
+    const { recoverOrphanedWorktrees } = await import("../src/recovery")
+    expect(await recoverOrphanedWorktrees(db, client)).toEqual({ removed: 0 })
+    expect(client.calls.filter(call => call.method === "worktree.remove")).toHaveLength(0)
   })
 
   test("ignores non-ensemble worktrees", async () => {

@@ -192,6 +192,67 @@ describe("Watchdog", () => {
     expect(bob.status).toBe("error")
   })
 
+  test("only times out members owned by its project", async () => {
+    const projectB = "/tmp/project-b"
+    const now = Date.now()
+    const pastTime = now - 60_000
+    deps.db.run(
+      "INSERT INTO project (id, name, path, status, time_created, time_updated) VALUES (?, 'project-b', ?, 'active', ?, ?)",
+      [projectB, projectB, now, now],
+    )
+    deps.db.run(
+      "INSERT INTO team (id, name, project_id, lead_session_id, status, delegate, time_created, time_updated) VALUES ('t2', 'team-b', ?, 'lead-b', 'active', 0, ?, ?)",
+      [projectB, now, now],
+    )
+    deps.db.run(
+      "INSERT INTO team_member (team_id, name, session_id, agent, status, execution_status, time_created, time_updated) VALUES (?, ?, ?, 'build', 'busy', 'running', ?, ?)",
+      ["t1", "alice", "sess-a", pastTime, pastTime],
+    )
+    deps.db.run(
+      "INSERT INTO team_member (team_id, name, session_id, agent, status, execution_status, time_created, time_updated) VALUES (?, ?, ?, 'build', 'busy', 'running', ?, ?)",
+      ["t2", "bob", "sess-b", pastTime, pastTime],
+    )
+
+    const watchdog = new Watchdog({
+      db: deps.db,
+      client: deps.client,
+      registry: deps.registry,
+      ttlMs: 30_000,
+      cwd: projectB,
+    })
+    await watchdog.check()
+
+    expect((deps.db.query("SELECT status FROM team_member WHERE name = 'alice'").get() as { status: string }).status).toBe("busy")
+    expect((deps.db.query("SELECT status FROM team_member WHERE name = 'bob'").get() as { status: string }).status).toBe("error")
+    expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(1)
+  })
+
+  test("keeps a timed-out member retryable when branch preservation fails", async () => {
+    const pastTime = Date.now() - 60_000
+    deps.db.run(
+      "INSERT INTO team_member (team_id, name, session_id, agent, status, execution_status, worktree_branch, time_created, time_updated) VALUES ('t1', 'alice', 'sess-a', 'build', 'busy', 'running', 'missing-branch', ?, ?)",
+      [pastTime, pastTime],
+    )
+    deps.db.run(
+      "INSERT INTO team_task (id, team_id, content, status, priority, assignee, time_created, time_updated) VALUES ('task-a', 't1', 'work', 'in_progress', 'high', 'alice', ?, ?)",
+      [pastTime, pastTime],
+    )
+    const watchdog = new Watchdog({
+      db: deps.db,
+      client: deps.client,
+      registry: deps.registry,
+      ttlMs: 30_000,
+      cwd: "/tmp/test-project",
+    })
+
+    await watchdog.check()
+
+    expect((deps.db.query("SELECT status FROM team_member WHERE name = 'alice'").get() as { status: string }).status).toBe("busy")
+    expect((deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-a'").get() as { status: string; assignee: string })).toEqual({ status: "in_progress", assignee: "alice" })
+    expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
+    expect((deps.db.query("SELECT content FROM team_message WHERE team_id = 't1' AND to_name = 'lead'").get() as { content: string }).content).toContain("could not be preserved")
+  })
+
   test("start and stop control the interval", () => {
     const watchdog = new Watchdog({ db: deps.db, client: deps.client, registry: deps.registry, ttlMs: 30_000, checkIntervalMs: 60_000 })
     watchdog.start()
@@ -216,6 +277,44 @@ describe("Watchdog", () => {
   })
 
   describe("stall detection", () => {
+    test("only checks stalled members owned by its project", async () => {
+      const projectB = "/tmp/project-b"
+      const now = Date.now()
+      insertMember(deps.db, "t1", "alice", "sess-a", "busy", "running")
+      deps.db.run(
+        "INSERT INTO project (id, name, path, status, time_created, time_updated) VALUES (?, 'project-b', ?, 'active', ?, ?)",
+        [projectB, projectB, now, now],
+      )
+      deps.db.run(
+        "INSERT INTO team (id, name, project_id, lead_session_id, status, delegate, time_created, time_updated) VALUES ('t2', 'team-b', ?, 'lead-b', 'active', 0, ?, ?)",
+        [projectB, now, now],
+      )
+      insertMember(deps.db, "t2", "bob", "sess-b", "busy", "running")
+      const progressTracker = new ProgressTracker()
+      for (const sessionID of ["sess-a", "sess-b"]) {
+        progressTracker.recordStep(sessionID, 10)
+        progressTracker.recordStep(sessionID, 10)
+        progressTracker.recordStep(sessionID, 10)
+      }
+      const watchdog = new Watchdog({
+        db: deps.db,
+        client: deps.client,
+        registry: deps.registry,
+        ttlMs: 0,
+        cwd: projectB,
+        progressTracker,
+        stallThresholdMs: 60_000,
+        stallMinSteps: 3,
+        stallTokenThreshold: 500,
+      })
+
+      await watchdog.checkStalled()
+
+      const promptCalls = deps.client.calls.filter(call => call.method === "session.promptAsync")
+      expect(promptCalls).toHaveLength(2)
+      expect(promptCalls.map(call => (call.args[0] as { sessionID: string }).sessionID).sort()).toEqual(["lead-b", "sess-b"])
+    })
+
     test("does not flag low-output work when a recent tool result shows progress", async () => {
       insertMember(deps.db, "t1", "alice", "sess-a", "busy", "running")
       const progressTracker = new ProgressTracker()
@@ -301,7 +400,80 @@ describe("Watchdog", () => {
     })
   })
 
+  describe("chatty detection", () => {
+    test("only checks chatty members owned by its project", async () => {
+      const projectB = "/tmp/project-b"
+      const now = Date.now()
+      insertMember(deps.db, "t1", "alice", "sess-a", "busy", "running")
+      deps.db.run(
+        "INSERT INTO project (id, name, path, status, time_created, time_updated) VALUES (?, 'project-b', ?, 'active', ?, ?)",
+        [projectB, projectB, now, now],
+      )
+      deps.db.run(
+        "INSERT INTO team (id, name, project_id, lead_session_id, status, delegate, time_created, time_updated) VALUES ('t2', 'team-b', ?, 'lead-b', 'active', 0, ?, ?)",
+        [projectB, now, now],
+      )
+      insertMember(deps.db, "t2", "bob", "sess-b", "busy", "running")
+      const progressTracker = new ProgressTracker()
+      for (const sessionID of ["sess-a", "sess-b"]) {
+        progressTracker.recordPeerMessage(sessionID)
+        progressTracker.recordPeerMessage(sessionID)
+      }
+      const watchdog = new Watchdog({
+        db: deps.db,
+        client: deps.client,
+        registry: deps.registry,
+        ttlMs: 0,
+        cwd: projectB,
+        progressTracker,
+        peerMessageLimit: 2,
+      })
+
+      await watchdog.checkChatty()
+
+      const promptCalls = deps.client.calls.filter(call => call.method === "session.promptAsync")
+      expect(promptCalls).toHaveLength(2)
+      expect(promptCalls.map(call => (call.args[0] as { sessionID: string }).sessionID).sort()).toEqual(["lead-b", "sess-b"])
+    })
+  })
+
   describe("stale worktree GC", () => {
+    test("only cleans stale worktrees owned by its project", async () => {
+      const projectB = "/tmp/project-b"
+      const now = Date.now()
+      const pastTime = now - 600_000
+      deps.db.run(
+        "INSERT INTO project (id, name, path, status, time_created, time_updated) VALUES (?, 'project-b', ?, 'active', ?, ?)",
+        [projectB, projectB, now, now],
+      )
+      deps.db.run(
+        "INSERT INTO team (id, name, project_id, lead_session_id, status, delegate, time_created, time_updated) VALUES ('t2', 'team-b', ?, 'lead-b', 'active', 0, ?, ?)",
+        [projectB, now, now],
+      )
+      deps.db.run(
+        "INSERT INTO team_member (team_id, name, session_id, agent, status, execution_status, worktree_dir, time_created, time_updated) VALUES ('t1', 'alice', 'sess-a', 'build', 'shutdown', 'completed', '/tmp/wt-a', ?, ?)",
+        [pastTime, pastTime],
+      )
+      deps.db.run(
+        "INSERT INTO team_member (team_id, name, session_id, agent, status, execution_status, worktree_dir, time_created, time_updated) VALUES ('t2', 'bob', 'sess-b', 'build', 'shutdown', 'completed', '/tmp/wt-b', ?, ?)",
+        [pastTime, pastTime],
+      )
+      const watchdog = new Watchdog({
+        db: deps.db,
+        client: deps.client,
+        registry: deps.registry,
+        ttlMs: 0,
+        cwd: projectB,
+      })
+
+      await watchdog.cleanupStaleWorktrees()
+
+      const removeCalls = deps.client.calls.filter(call => call.method === "worktree.remove")
+      expect(removeCalls).toHaveLength(1)
+      expect((removeCalls[0]!.args[0] as { worktreeRemoveInput: { directory: string } }).worktreeRemoveInput.directory).toBe("/tmp/wt-b")
+      expect((deps.db.query("SELECT worktree_dir FROM team_member WHERE name = 'alice'").get() as { worktree_dir: string }).worktree_dir).toBe("/tmp/wt-a")
+    })
+
     test("cleans up stale worktrees for shutdown members past threshold", async () => {
       const pastTime = Date.now() - 600_000 // 10 min ago
       deps.db.run(

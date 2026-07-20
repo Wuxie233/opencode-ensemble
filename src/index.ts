@@ -17,7 +17,7 @@ import { findTeamBySession } from "./types"
 import { loadConfig } from "./config"
 import { ProgressTracker } from "./progress"
 import { recordFromV2Event, recordFromToolBefore, recordFromToolAfter } from "./activity"
-import { createLocalDisposer, processRuntime } from "./runtime"
+import { createLocalDisposer, processRuntime, startMainWatchdog } from "./runtime"
 import { executeTeamCreate } from "./tools/team-create"
 import { executeTeamSpawn } from "./tools/team-spawn"
 import { executeTeamMessage } from "./tools/team-message"
@@ -129,8 +129,10 @@ const plugin: Plugin = async (input) => {
   })
 
   // Initialize watchdog — config value already accounts for env var override
-  const watchdog = new Watchdog({
-    db, client, registry,
+  const watchdog = startMainWatchdog(mainInstance, () => new Watchdog({
+    db,
+    client,
+    registry,
     ttlMs: config.timeoutMs,
     checkIntervalMs: DEFAULT_WATCHDOG_CHECK_MS,
     progressTracker,
@@ -141,8 +143,7 @@ const plugin: Plugin = async (input) => {
     cwd: input.directory,
     peerMessageLimit: config.peerMessageLimit,
     peerMessageWindowMs: config.peerMessageWindowMs,
-  })
-  watchdog.start()
+  }))
   const dispose = createLocalDisposer(watchdog, runtime)
 
   return {

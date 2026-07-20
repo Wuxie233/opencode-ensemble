@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { ActivityBuffer } from "../src/activity"
 import type { Database } from "../src/db"
-import { createLocalDisposer, createRuntimeCoordinator } from "../src/runtime"
+import { createLocalDisposer, createRuntimeCoordinator, startMainWatchdog } from "../src/runtime"
 
 function fakeDb(onClose: () => void): Database {
   return {
@@ -20,6 +20,20 @@ function fakeDb(onClose: () => void): Database {
 }
 
 describe("process runtime lifecycle", () => {
+  test("does not start a watchdog for a worktree directory instance", () => {
+    let created = 0
+    let started = 0
+
+    const watchdog = startMainWatchdog(false, () => {
+      created++
+      return { start() { started++ } }
+    })
+
+    expect(watchdog).toBeUndefined()
+    expect(created).toBe(0)
+    expect(started).toBe(0)
+  })
+
   test("shares one database and dashboard until the final directory releases them", async () => {
     let dbOpens = 0
     let dbCloses = 0

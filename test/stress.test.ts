@@ -268,7 +268,9 @@ describe("stress: stall detection via watchdog", () => {
     await watchdog.checkStalled()
 
     // Teammate was nudged via promptAsync
-    const nudges = deps.client.calls.filter(c => c.method === "session.promptAsync")
+    const nudges = deps.client.calls.filter(c =>
+      c.method === "session.promptAsync" && (c.args[0] as { sessionID: string }).sessionID === stuckSess
+    )
     expect(nudges).toHaveLength(1)
     const nudgeText = (nudges[0]!.args[0] as { parts: Array<{ text: string }> }).parts[0]!.text
     expect(nudgeText).toContain("stalled")
@@ -319,7 +321,9 @@ describe("stress: stall detection via watchdog", () => {
 
     // Now it fires again
     await watchdog.checkStalled()
-    const nudges2 = deps.client.calls.filter(c => c.method === "session.promptAsync")
+    const nudges2 = deps.client.calls.filter(c =>
+      c.method === "session.promptAsync" && (c.args[0] as { sessionID: string }).sessionID === sess
+    )
     expect(nudges2).toHaveLength(1)
   })
 

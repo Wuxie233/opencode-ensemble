@@ -80,9 +80,10 @@ export class Watchdog {
        JOIN team t ON tm.team_id = t.id
        WHERE t.status = 'active'
          AND tm.status IN ('shutdown', 'error')
-         AND tm.worktree_dir IS NOT NULL
-         AND tm.time_updated < ?`
-    ).all(cutoff) as Array<{ team_id: string; name: string; worktree_dir: string; workspace_id: string | null }>
+          AND tm.worktree_dir IS NOT NULL
+          AND tm.time_updated < ?
+          AND (? IS NULL OR t.project_id = ?)`
+    ).all(cutoff, this.cwd ?? null, this.cwd ?? null) as Array<{ team_id: string; name: string; worktree_dir: string; workspace_id: string | null }>
 
     for (const m of stale) {
       try {
@@ -106,8 +107,9 @@ export class Watchdog {
       `SELECT tm.team_id, tm.name, tm.session_id
        FROM team_member tm
        JOIN team t ON tm.team_id = t.id
-       WHERE t.status = 'active' AND tm.status = 'busy'`
-    ).all() as Array<{ team_id: string; name: string; session_id: string }>
+       WHERE t.status = 'active' AND tm.status = 'busy'
+         AND (? IS NULL OR t.project_id = ?)`
+    ).all(this.cwd ?? null, this.cwd ?? null) as Array<{ team_id: string; name: string; session_id: string }>
 
     for (const member of busy) {
       const toolResult = this.activityBuffer
@@ -159,8 +161,9 @@ export class Watchdog {
       `SELECT tm.team_id, tm.name, tm.session_id
        FROM team_member tm
        JOIN team t ON tm.team_id = t.id
-       WHERE t.status = 'active' AND tm.status = 'busy'`
-    ).all() as Array<{ team_id: string; name: string; session_id: string }>
+       WHERE t.status = 'active' AND tm.status = 'busy'
+         AND (? IS NULL OR t.project_id = ?)`
+    ).all(this.cwd ?? null, this.cwd ?? null) as Array<{ team_id: string; name: string; session_id: string }>
 
     for (const member of busy) {
       if (this.progressTracker.isChattyReported(member.session_id)) continue
@@ -200,9 +203,10 @@ export class Watchdog {
        JOIN team t ON tm.team_id = t.id
        JOIN project p ON t.project_id = p.id
        WHERE t.status = 'active'
-         AND tm.status = 'busy'
-         AND tm.time_updated < ?`
-    ).all(cutoff) as Array<{
+          AND tm.status = 'busy'
+          AND tm.time_updated < ?
+          AND (? IS NULL OR t.project_id = ?)`
+    ).all(cutoff, this.cwd ?? null, this.cwd ?? null) as Array<{
       team_id: string
       name: string
       session_id: string
@@ -219,14 +223,20 @@ export class Watchdog {
       if (hasRecentActivity()) continue
 
       // Preserve branch BEFORE abort — session.abort() may destroy the worktree + branch
-      if (this.cwd && member.worktree_branch && !member.worktree_branch.startsWith("ensemble/preserved/")) {
+      if (this.cwd && member.worktree_branch) {
         const safeBranch = preservedBranchName(member.project_name, member.team_name, member.team_id, member.name)
         const ok = await preserveBranch(member.worktree_branch, safeBranch, this.cwd)
-        if (ok) {
-          this.db.run("UPDATE team_member SET worktree_branch = ? WHERE team_id = ? AND name = ?",
-            [safeBranch, member.team_id, member.name])
-          log(`watchdog:branch:preserved src=${member.worktree_branch} target=${safeBranch}`)
+        if (!ok) {
+          sendLeadAlert(this.db, this.client, {
+            teamId: member.team_id,
+            content: `Teammate "${member.name}" exceeded its timeout, but branch "${member.worktree_branch}" could not be preserved. The member and its task were left unchanged for a later retry.`,
+            wakeText: `[System: Watchdog could not preserve ${member.name}'s branch; guidance is available in team messages]`,
+          })
+          continue
         }
+        this.db.run("UPDATE team_member SET worktree_branch = ? WHERE team_id = ? AND name = ?",
+          [safeBranch, member.team_id, member.name])
+        log(`watchdog:branch:preserved src=${member.worktree_branch} target=${safeBranch}`)
       }
 
       // Claim the terminal transition so concurrent error/cleanup paths cannot
