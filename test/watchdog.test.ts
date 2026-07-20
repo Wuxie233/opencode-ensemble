@@ -1,8 +1,22 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import path from "node:path"
 import { setupDeps, insertTeam, insertMember } from "./helpers"
 import { Watchdog } from "../src/watchdog"
 import { ProgressTracker } from "../src/progress"
 import { ActivityBuffer } from "../src/activity"
+
+async function git(cwd: string, args: string[]): Promise<string> {
+  const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" })
+  const [stdout, stderr, exit] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ])
+  if (exit !== 0) throw new Error(stderr.trim() || `git ${args.join(" ")} exited with code ${exit}`)
+  return stdout
+}
 
 describe("Watchdog", () => {
   let deps: ReturnType<typeof setupDeps>
@@ -152,23 +166,194 @@ describe("Watchdog", () => {
     expect(row.status).toBe("ready")
   })
 
-  test("handles abort failure gracefully", async () => {
+  test("does not mark a timed-out member terminal or release its task before abort resolves", async () => {
     const pastTime = Date.now() - 60_000
     deps.db.run(
       "INSERT INTO team_member (team_id, name, session_id, agent, status, execution_status, time_created, time_updated) VALUES (?, ?, ?, 'build', 'busy', 'running', ?, ?)",
       ["t1", "alice", "sess-a", pastTime, pastTime]
     )
+    deps.db.run(
+      "INSERT INTO team_task (id, team_id, content, status, priority, assignee, time_created, time_updated) VALUES ('task-a', 't1', 'work', 'in_progress', 'high', 'alice', ?, ?)",
+      [pastTime, pastTime],
+    )
+    let resolveAbort: (() => void) | undefined
+    deps.client.session.abort = async () => new Promise<void>(resolve => { resolveAbort = resolve })
+
+    const watchdog = new Watchdog({ db: deps.db, client: deps.client, registry: deps.registry, ttlMs: 30_000 })
+    const check = watchdog.check()
+    await Bun.sleep(10)
+
+    expect((deps.db.query("SELECT status, execution_status FROM team_member WHERE name = 'alice'").get() as { status: string; execution_status: string })).toEqual({ status: "busy", execution_status: "cancelling" })
+    expect((deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-a'").get() as { status: string; assignee: string })).toEqual({ status: "in_progress", assignee: "alice" })
+
+    resolveAbort?.()
+    await check
+    expect((deps.db.query("SELECT status FROM team_member WHERE name = 'alice'").get() as { status: string }).status).toBe("error")
+  })
+
+  test("claims a timed-out member once across overlapping watchdog checks", async () => {
+    const pastTime = Date.now() - 60_000
+    deps.db.run(
+      "INSERT INTO team_member (team_id, name, session_id, agent, status, execution_status, time_created, time_updated) VALUES (?, ?, ?, 'build', 'busy', 'running', ?, ?)",
+      ["t1", "alice", "sess-a", pastTime, pastTime]
+    )
+    let resolveAbort: (() => void) | undefined
+    deps.client.session.abort = async options => {
+      deps.client.calls.push({ method: "session.abort", args: [options] })
+      return new Promise<void>(resolve => { resolveAbort = resolve })
+    }
+    const first = new Watchdog({ db: deps.db, client: deps.client, registry: deps.registry, ttlMs: 30_000 })
+    const second = new Watchdog({ db: deps.db, client: deps.client, registry: deps.registry, ttlMs: 30_000 })
+
+    const checks = Promise.all([first.check(), second.check()])
+    await Bun.sleep(10)
+
+    expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(1)
+    resolveAbort?.()
+    await checks
+  })
+
+  test("keeps member and task ownership retryable when abort fails", async () => {
+    const pastTime = Date.now() - 60_000
+    deps.db.run(
+      "INSERT INTO team_member (team_id, name, session_id, agent, status, execution_status, time_created, time_updated) VALUES (?, ?, ?, 'build', 'busy', 'running', ?, ?)",
+      ["t1", "alice", "sess-a", pastTime, pastTime]
+    )
+    deps.db.run(
+      "INSERT INTO team_task (id, team_id, content, status, priority, assignee, time_created, time_updated) VALUES ('task-a', 't1', 'work', 'in_progress', 'high', 'alice', ?, ?)",
+      [pastTime, pastTime],
+    )
     deps.registry.register("t1", "alice", "sess-a")
-    deps.client.session.abort = async () => { throw new Error("abort failed") }
+    deps.client.session.abort = async () => {
+      deps.db.run("UPDATE team_member SET status = 'ready', execution_status = 'idle' WHERE team_id = 't1' AND name = 'alice'")
+      throw new Error("abort failed")
+    }
 
     const watchdog = new Watchdog({ db: deps.db, client: deps.client, registry: deps.registry, ttlMs: 30_000 })
     // Should not throw
     await watchdog.check()
 
-    // Member should still be marked timed_out despite abort failure
     const row = deps.db.query("SELECT status, execution_status FROM team_member WHERE name = 'alice'").get() as Record<string, string>
-    expect(row.status).toBe("error")
-    expect(row.execution_status).toBe("timed_out")
+    expect(row.status).toBe("busy")
+    expect(row.execution_status).toBe("cancel_requested")
+    expect((deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-a'").get() as { status: string; assignee: string })).toEqual({ status: "in_progress", assignee: "alice" })
+    const alert = deps.db.query(
+      "SELECT content FROM team_message WHERE team_id = 't1' AND from_name = 'system' AND to_name = 'lead'",
+    ).get() as { content: string }
+    expect(alert.content).toContain("could not abort")
+    expect(alert.content).toContain("retry")
+    expect(deps.client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(1)
+
+    deps.client.session.abort = async options => {
+      deps.client.calls.push({ method: "session.abort", args: [options] })
+      return {}
+    }
+    await watchdog.check()
+    expect((deps.db.query("SELECT status FROM team_member WHERE name = 'alice'").get() as { status: string }).status).toBe("error")
+    expect((deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-a'").get() as { status: string; assignee: string | null })).toEqual({ status: "pending", assignee: null })
+  })
+
+  test("retains and refreshes the live branch when a timeout abort must be retried", async () => {
+    const repo = await mkdtemp(path.join(tmpdir(), "ensemble-watchdog-abort-"))
+    try {
+      await git(repo, ["init"])
+      await Bun.write(path.join(repo, "tracked.txt"), "first\n")
+      await git(repo, ["add", "tracked.txt"])
+      await git(repo, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "first"])
+      await git(repo, ["branch", "live-alice"])
+      await git(repo, ["checkout", "live-alice"])
+
+      const now = Date.now()
+      const pastTime = now - 60_000
+      deps.db.run(
+        "INSERT INTO project (id, name, path, status, time_created, time_updated) VALUES (?, 'watchdog-project', ?, 'active', ?, ?)",
+        [repo, repo, now, now],
+      )
+      deps.db.run(
+        "UPDATE team SET project_id = ? WHERE id = 't1'",
+        [repo],
+      )
+      deps.db.run(
+        "INSERT INTO team_member (team_id, name, session_id, agent, status, execution_status, worktree_branch, time_created, time_updated) VALUES ('t1', 'alice', 'sess-a', 'build', 'busy', 'running', 'live-alice', ?, ?)",
+        [pastTime, pastTime],
+      )
+      let abortAttempts = 0
+      deps.client.session.abort = async () => {
+        abortAttempts += 1
+        if (abortAttempts === 1) throw new Error("transport unavailable")
+        return {}
+      }
+      const watchdog = new Watchdog({ db: deps.db, client: deps.client, registry: deps.registry, ttlMs: 30_000, cwd: repo })
+
+      await watchdog.check()
+      expect((deps.db.query("SELECT worktree_branch FROM team_member WHERE name = 'alice'").get() as { worktree_branch: string }).worktree_branch).toBe("live-alice")
+
+      await Bun.write(path.join(repo, "tracked.txt"), "second\n")
+      await git(repo, ["add", "tracked.txt"])
+      await git(repo, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "second"])
+      await watchdog.check()
+
+      const safeBranch = (deps.db.query("SELECT worktree_branch FROM team_member WHERE name = 'alice'").get() as { worktree_branch: string }).worktree_branch
+      expect(safeBranch).toStartWith("ensemble/preserved/")
+      expect((await git(repo, ["rev-parse", safeBranch])).trim()).toBe((await git(repo, ["rev-parse", "live-alice"])).trim())
+    } finally {
+      await rm(repo, { recursive: true, force: true })
+    }
+  })
+
+  test("refreshes a legacy preserved record from its live worktree before abort", async () => {
+    const repo = await mkdtemp(path.join(tmpdir(), "ensemble-watchdog-legacy-"))
+    try {
+      await git(repo, ["init"])
+      await Bun.write(path.join(repo, "tracked.txt"), "latest\n")
+      await git(repo, ["add", "tracked.txt"])
+      await git(repo, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "latest"])
+      await git(repo, ["branch", "live-alice"])
+      await git(repo, ["checkout", "live-alice"])
+      const now = Date.now()
+      const pastTime = now - 60_000
+      deps.db.run(
+        "INSERT INTO project (id, name, path, status, time_created, time_updated) VALUES (?, 'watchdog-project', ?, 'active', ?, ?)",
+        [repo, repo, now, now],
+      )
+      deps.db.run("UPDATE team SET project_id = ? WHERE id = 't1'", [repo])
+      const safeBranch = "ensemble/preserved/watchdog-project/my-team#t1/alice"
+      deps.db.run(
+        `INSERT INTO team_member
+         (team_id, name, session_id, agent, status, execution_status, worktree_dir, worktree_branch, time_created, time_updated)
+         VALUES ('t1', 'alice', 'sess-a', 'build', 'busy', 'running', ?, ?, ?, ?)`,
+        [repo, safeBranch, pastTime, pastTime],
+      )
+
+      await new Watchdog({ db: deps.db, client: deps.client, registry: deps.registry, ttlMs: 30_000, cwd: repo }).check()
+
+      expect((await git(repo, ["rev-parse", safeBranch])).trim()).toBe((await git(repo, ["rev-parse", "live-alice"])).trim())
+      expect((deps.db.query("SELECT status FROM team_member WHERE name = 'alice'").get() as { status: string }).status).toBe("error")
+    } finally {
+      await rm(repo, { recursive: true, force: true })
+    }
+  })
+
+  test("does not overwrite a genuine completed idle transition when abort fails", async () => {
+    const pastTime = Date.now() - 60_000
+    deps.db.run(
+      "INSERT INTO team_member (team_id, name, session_id, agent, status, execution_status, time_created, time_updated) VALUES ('t1', 'alice', 'sess-a', 'build', 'busy', 'running', ?, ?)",
+      [pastTime, pastTime],
+    )
+    deps.db.run(
+      "INSERT INTO team_task (id, team_id, content, status, priority, assignee, time_created, time_updated) VALUES ('task-a', 't1', 'work', 'in_progress', 'high', 'alice', ?, ?)",
+      [pastTime, pastTime],
+    )
+    deps.client.session.abort = async () => {
+      deps.db.run("UPDATE team_task SET status = 'completed' WHERE id = 'task-a'")
+      deps.db.run("UPDATE team_member SET status = 'ready', execution_status = 'idle', reported_to_lead = 1 WHERE team_id = 't1' AND name = 'alice'")
+      throw new Error("abort failed after completion")
+    }
+
+    await new Watchdog({ db: deps.db, client: deps.client, registry: deps.registry, ttlMs: 30_000 }).check()
+
+    expect((deps.db.query("SELECT status, execution_status FROM team_member WHERE name = 'alice'").get() as { status: string; execution_status: string })).toEqual({ status: "ready", execution_status: "idle" })
+    expect((deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-a'").get() as { status: string; assignee: string })).toEqual({ status: "completed", assignee: "alice" })
   })
 
   test("times out multiple stale members across teams", async () => {

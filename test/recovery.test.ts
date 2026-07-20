@@ -8,6 +8,7 @@ import { recoverStaleMembers, recoverUndeliveredMessages, rehydrateRegistry } fr
 import type { PluginClient } from "../src/types"
 import { MemberRegistry } from "../src/state"
 import { sendMessage, broadcastMessage } from "../src/messaging"
+import { getTeamResourceParts, preservedBranchName } from "../src/tools/merge-helper"
 
 async function git(cwd: string, args: string[]): Promise<string> {
   const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" })
@@ -173,20 +174,158 @@ describe("recoverStaleMembers", () => {
     expect((db.query("SELECT content FROM team_message WHERE team_id = 't1' AND to_name = 'lead'").get() as { content: string }).content).toContain("could not be preserved")
   })
 
-  test("continues recovery even if abort fails", async () => {
+  test("does not mark an orphan terminal or release its task before abort resolves", async () => {
     insertTeam(db, "t1", "my-team", "lead-sess")
     insertMember(db, "t1", "alice", "sess-1", "busy", "running")
-    insertMember(db, "t1", "bob", "sess-2", "busy", "running")
-    client.session.abort = async () => { throw new Error("abort failed") }
+    db.run(
+      "INSERT INTO team_task (id, team_id, content, status, priority, assignee, time_created, time_updated) VALUES ('task-a', 't1', 'work', 'in_progress', 'high', 'alice', ?, ?)",
+      [Date.now(), Date.now()],
+    )
+    let resolveAbort: (() => void) | undefined
+    client.session.abort = async () => new Promise<void>(resolve => { resolveAbort = resolve })
+
+    const recovery = recoverStaleMembers(db, client)
+    await Bun.sleep(10)
+
+    expect((db.query("SELECT status, execution_status FROM team_member WHERE name = 'alice'").get() as { status: string; execution_status: string })).toEqual({ status: "busy", execution_status: "cancelling" })
+    expect((db.query("SELECT status, assignee FROM team_task WHERE id = 'task-a'").get() as { status: string; assignee: string })).toEqual({ status: "in_progress", assignee: "alice" })
+
+    resolveAbort?.()
+    expect((await recovery).interrupted).toBe(1)
+    expect((db.query("SELECT status FROM team_member WHERE name = 'alice'").get() as { status: string }).status).toBe("error")
+  })
+
+  test("claims an orphan once across overlapping startup recovery calls", async () => {
+    insertTeam(db, "t1", "my-team", "lead-sess")
+    insertMember(db, "t1", "alice", "sess-1", "busy", "running")
+    let resolveAbort: (() => void) | undefined
+    client.session.abort = async options => {
+      client.calls.push({ method: "session.abort", args: [options] })
+      return new Promise<void>(resolve => { resolveAbort = resolve })
+    }
+
+    const recoveries = Promise.all([
+      recoverStaleMembers(db, client),
+      recoverStaleMembers(db, client),
+    ])
+    await Bun.sleep(10)
+
+    expect(client.calls.filter(call => call.method === "session.abort")).toHaveLength(1)
+    resolveAbort?.()
+    expect(await recoveries).toEqual([{ interrupted: 1 }, { interrupted: 0 }])
+  })
+
+  test("keeps orphan and task ownership retryable when abort fails", async () => {
+    insertTeam(db, "t1", "my-team", "lead-sess")
+    insertMember(db, "t1", "alice", "sess-1", "busy", "running")
+    db.run(
+      "INSERT INTO team_task (id, team_id, content, status, priority, assignee, time_created, time_updated) VALUES ('task-a', 't1', 'work', 'in_progress', 'high', 'alice', ?, ?)",
+      [Date.now(), Date.now()],
+    )
+    client.session.abort = async () => {
+      db.run("UPDATE team_member SET status = 'ready', execution_status = 'idle' WHERE team_id = 't1' AND name = 'alice'")
+      throw new Error("abort failed")
+    }
 
     const result = await recoverStaleMembers(db, client)
-    expect(result.interrupted).toBe(2)
+    expect(result.interrupted).toBe(0)
 
-    // Both should still be marked error despite abort failures
-    const alice = db.query("SELECT status FROM team_member WHERE name = ?").get("alice") as Record<string, string>
-    const bob = db.query("SELECT status FROM team_member WHERE name = ?").get("bob") as Record<string, string>
-    expect(alice.status).toBe("error")
-    expect(bob.status).toBe("error")
+    expect((db.query("SELECT status, execution_status FROM team_member WHERE name = 'alice'").get() as { status: string; execution_status: string })).toEqual({ status: "busy", execution_status: "cancel_requested" })
+    expect((db.query("SELECT status, assignee FROM team_task WHERE id = 'task-a'").get() as { status: string; assignee: string })).toEqual({ status: "in_progress", assignee: "alice" })
+    const alert = db.query(
+      "SELECT content FROM team_message WHERE team_id = 't1' AND from_name = 'system' AND to_name = 'lead'",
+    ).get() as { content: string }
+    expect(alert.content).toContain("could not abort")
+    expect(alert.content).toContain("retry")
+    expect(client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(1)
+
+    client.session.abort = async options => {
+      client.calls.push({ method: "session.abort", args: [options] })
+      return {}
+    }
+    expect((await recoverStaleMembers(db, client)).interrupted).toBe(1)
+    expect((db.query("SELECT status FROM team_member WHERE name = 'alice'").get() as { status: string }).status).toBe("error")
+    expect((db.query("SELECT status, assignee FROM team_task WHERE id = 'task-a'").get() as { status: string; assignee: string | null })).toEqual({ status: "pending", assignee: null })
+  })
+
+  test("retains and refreshes the live branch when startup abort must be retried", async () => {
+    const repo = await mkdtemp(path.join(tmpdir(), "ensemble-recovery-abort-"))
+    try {
+      await git(repo, ["init"])
+      await Bun.write(path.join(repo, "tracked.txt"), "first\n")
+      await git(repo, ["add", "tracked.txt"])
+      await git(repo, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "first"])
+      await git(repo, ["branch", "live-alice"])
+      await git(repo, ["checkout", "live-alice"])
+      insertTeam(db, "t1", "my-team", "lead-sess")
+      insertMember(db, "t1", "alice", "sess-1", "busy", "running")
+      db.run("UPDATE team_member SET worktree_branch = 'live-alice' WHERE team_id = 't1' AND name = 'alice'")
+      let abortAttempts = 0
+      client.session.abort = async () => {
+        abortAttempts += 1
+        if (abortAttempts === 1) throw new Error("transport unavailable")
+        return {}
+      }
+
+      expect((await recoverStaleMembers(db, client, repo)).interrupted).toBe(0)
+      expect((db.query("SELECT worktree_branch FROM team_member WHERE name = 'alice'").get() as { worktree_branch: string }).worktree_branch).toBe("live-alice")
+
+      await Bun.write(path.join(repo, "tracked.txt"), "second\n")
+      await git(repo, ["add", "tracked.txt"])
+      await git(repo, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "second"])
+      expect((await recoverStaleMembers(db, client, repo)).interrupted).toBe(1)
+
+      const safeBranch = (db.query("SELECT worktree_branch FROM team_member WHERE name = 'alice'").get() as { worktree_branch: string }).worktree_branch
+      expect(safeBranch).toStartWith("ensemble/preserved/")
+      expect((await git(repo, ["rev-parse", safeBranch])).trim()).toBe((await git(repo, ["rev-parse", "live-alice"])).trim())
+    } finally {
+      await rm(repo, { recursive: true, force: true })
+    }
+  })
+
+  test("refreshes a legacy preserved record from its live worktree before startup abort", async () => {
+    const repo = await mkdtemp(path.join(tmpdir(), "ensemble-recovery-legacy-"))
+    try {
+      await git(repo, ["init"])
+      await Bun.write(path.join(repo, "tracked.txt"), "latest\n")
+      await git(repo, ["add", "tracked.txt"])
+      await git(repo, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "latest"])
+      await git(repo, ["branch", "live-alice"])
+      await git(repo, ["checkout", "live-alice"])
+      insertTeam(db, "t1", "my-team", "lead-sess")
+      insertMember(db, "t1", "alice", "sess-1", "busy", "running")
+      const resource = getTeamResourceParts(db, "t1")
+      const safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, "alice")
+      db.run(
+        "UPDATE team_member SET worktree_dir = ?, worktree_branch = ? WHERE team_id = 't1' AND name = 'alice'",
+        [repo, safeBranch],
+      )
+
+      expect((await recoverStaleMembers(db, client, repo)).interrupted).toBe(1)
+
+      expect((await git(repo, ["rev-parse", safeBranch])).trim()).toBe((await git(repo, ["rev-parse", "live-alice"])).trim())
+      expect((db.query("SELECT status FROM team_member WHERE name = 'alice'").get() as { status: string }).status).toBe("error")
+    } finally {
+      await rm(repo, { recursive: true, force: true })
+    }
+  })
+
+  test("does not overwrite a genuine completed idle transition when abort fails", async () => {
+    insertTeam(db, "t1", "my-team", "lead-sess")
+    insertMember(db, "t1", "alice", "sess-1", "busy", "running")
+    db.run(
+      "INSERT INTO team_task (id, team_id, content, status, priority, assignee, time_created, time_updated) VALUES ('task-a', 't1', 'work', 'in_progress', 'high', 'alice', ?, ?)",
+      [Date.now(), Date.now()],
+    )
+    client.session.abort = async () => {
+      db.run("UPDATE team_task SET status = 'completed' WHERE id = 'task-a'")
+      db.run("UPDATE team_member SET status = 'ready', execution_status = 'idle', reported_to_lead = 1 WHERE team_id = 't1' AND name = 'alice'")
+      throw new Error("abort failed after completion")
+    }
+
+    expect((await recoverStaleMembers(db, client)).interrupted).toBe(0)
+    expect((db.query("SELECT status, execution_status FROM team_member WHERE name = 'alice'").get() as { status: string; execution_status: string })).toEqual({ status: "ready", execution_status: "idle" })
+    expect((db.query("SELECT status, assignee FROM team_task WHERE id = 'task-a'").get() as { status: string; assignee: string })).toEqual({ status: "completed", assignee: "alice" })
   })
 
   test("does not touch non-busy members", async () => {

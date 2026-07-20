@@ -1,21 +1,10 @@
 import type { ToolDeps } from "../types"
 import { requireLead, checkWorktreeDirty, countBranchCommits } from "./shared"
 import type { IsDirtyFn, CommitCountFn } from "./shared"
-import { getTeamResourceParts, preserveBranch, preservedBranchName } from "./merge-helper"
-import type { PreserveBranchFn } from "./merge-helper"
+import { getTeamResourceParts, preserveBranch, preservedBranchName, resolveWorktreeBranch } from "./merge-helper"
+import type { PreserveBranchFn, ResolveWorktreeBranchFn } from "./merge-helper"
 import { log } from "../log"
 import { sendLeadAlert } from "../messaging"
-import { runCommand } from "../process"
-
-/** Injectable function for resolving the branch currently checked out in a live worktree. */
-export type ResolveWorktreeBranchFn = (worktreeDir: string) => Promise<string | null>
-
-/** Resolve the branch currently checked out in a worktree. */
-export async function resolveWorktreeBranch(worktreeDir: string): Promise<string | null> {
-  const result = await runCommand(["git", "-C", worktreeDir, "branch", "--show-current"])
-  if (result.exitCode !== 0) return null
-  return result.stdout.trim() || null
-}
 
 /**
  * Execute the team_shutdown tool. Requests a teammate to shut down.

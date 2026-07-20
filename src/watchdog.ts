@@ -3,7 +3,7 @@ import type { PluginClient } from "./types"
 import type { MemberRegistry } from "./state"
 import type { ProgressTracker } from "./progress"
 import type { ActivityBuffer } from "./activity"
-import { preserveBranch, preservedBranchName } from "./tools/merge-helper"
+import { preserveBranch, preservedBranchName, resolveWorktreeBranch } from "./tools/merge-helper"
 import { sendLeadAlert, sendMessage, wakeTeamLead } from "./messaging"
 import { log } from "./log"
 
@@ -35,7 +35,7 @@ interface WatchdogOpts {
 
 /**
  * Periodic watchdog that times out teammates stuck in busy state.
- * Transitions them to error/timed_out, aborts their session, and fires a toast.
+ * Preserves and aborts their session before transitioning to error/timed_out.
  */
 export class Watchdog {
   private readonly db: Database
@@ -51,6 +51,7 @@ export class Watchdog {
   private readonly cwd?: string
   private readonly peerMessageLimit: number
   private readonly peerMessageWindowMs: number
+  private readonly abortingSessions = new Set<string>()
   private timer: ReturnType<typeof setInterval> | undefined
 
   constructor(opts: WatchdogOpts) {
@@ -197,13 +198,14 @@ export class Watchdog {
 
     const cutoff = Date.now() - this.ttlMs
     const stale = this.db.query(
-      `SELECT tm.team_id, tm.name, tm.session_id, tm.time_updated, tm.worktree_branch,
+      `SELECT tm.team_id, tm.name, tm.session_id, tm.time_updated, tm.worktree_branch, tm.worktree_dir,
               t.name as team_name, p.name as project_name
        FROM team_member tm
        JOIN team t ON tm.team_id = t.id
        JOIN project p ON t.project_id = p.id
        WHERE t.status = 'active'
           AND tm.status = 'busy'
+          AND tm.execution_status IN ('idle', 'starting', 'running', 'cancel_requested')
           AND tm.time_updated < ?
           AND (? IS NULL OR t.project_id = ?)`
     ).all(cutoff, this.cwd ?? null, this.cwd ?? null) as Array<{
@@ -212,40 +214,104 @@ export class Watchdog {
       session_id: string
       time_updated: number
       worktree_branch: string | null
+      worktree_dir: string | null
       team_name: string
       project_name: string
     }>
 
     for (const member of stale) {
+      if (this.abortingSessions.has(member.session_id)) continue
       const hasRecentActivity = () => this.activityBuffer
         ?.getActivity(member.session_id)
         .some(entry => entry.timestamp >= cutoff) ?? false
       if (hasRecentActivity()) continue
+      this.abortingSessions.add(member.session_id)
 
       // Preserve branch BEFORE abort — session.abort() may destroy the worktree + branch
-      if (this.cwd && member.worktree_branch) {
+      let preservedBranch: string | null = null
+      let sourceBranch = member.worktree_branch
+      if (sourceBranch?.startsWith("ensemble/preserved/") && member.worktree_dir) {
+        sourceBranch = await resolveWorktreeBranch(member.worktree_dir)
+        if (!sourceBranch || sourceBranch.startsWith("ensemble/preserved/")) {
+          sendLeadAlert(this.db, this.client, {
+            teamId: member.team_id,
+            content: `Teammate "${member.name}" exceeded its timeout, but its live branch could not be resolved from worktree ${member.worktree_dir}. No abort was attempted; inspect the worktree and retry.`,
+            wakeText: `[System: Watchdog could not resolve ${member.name}'s live worktree branch; guidance is available in team messages]`,
+          })
+          this.abortingSessions.delete(member.session_id)
+          continue
+        }
+      }
+      if (this.cwd && sourceBranch && !sourceBranch.startsWith("ensemble/preserved/")) {
         const safeBranch = preservedBranchName(member.project_name, member.team_name, member.team_id, member.name)
-        const ok = await preserveBranch(member.worktree_branch, safeBranch, this.cwd)
+        const ok = await preserveBranch(sourceBranch, safeBranch, this.cwd)
         if (!ok) {
           sendLeadAlert(this.db, this.client, {
             teamId: member.team_id,
-            content: `Teammate "${member.name}" exceeded its timeout, but branch "${member.worktree_branch}" could not be preserved. The member and its task were left unchanged for a later retry.`,
+            content: `Teammate "${member.name}" exceeded its timeout, but branch "${sourceBranch}" could not be preserved. The member and its task were left unchanged for a later retry.`,
             wakeText: `[System: Watchdog could not preserve ${member.name}'s branch; guidance is available in team messages]`,
           })
+          this.abortingSessions.delete(member.session_id)
           continue
         }
-        this.db.run("UPDATE team_member SET worktree_branch = ? WHERE team_id = ? AND name = ?",
-          [safeBranch, member.team_id, member.name])
-        log(`watchdog:branch:preserved src=${member.worktree_branch} target=${safeBranch}`)
+        preservedBranch = safeBranch
+        log(`watchdog:branch:preserved src=${sourceBranch} target=${safeBranch}`)
       }
 
-      // Claim the terminal transition so concurrent error/cleanup paths cannot
-      // abort or alert for the same member twice.
-      if (hasRecentActivity()) continue
-      const claimed = this.db.transaction(() => {
+      if (hasRecentActivity()) {
+        this.abortingSessions.delete(member.session_id)
+        continue
+      }
+      const claimed = this.db.run(
+        `UPDATE team_member SET execution_status = 'cancelling', time_updated = ?
+         WHERE team_id = ? AND name = ? AND status = 'busy'
+           AND execution_status IN ('idle', 'starting', 'running', 'cancel_requested')`,
+        [Date.now(), member.team_id, member.name],
+      ).changes === 1
+      if (!claimed) {
+        this.abortingSessions.delete(member.session_id)
+        continue
+      }
+      try {
+        await this.client.session.abort({ sessionID: member.session_id })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        this.db.run(
+          `UPDATE team_member SET status = 'busy', execution_status = 'cancel_requested', time_updated = ?
+           WHERE team_id = ? AND name = ?
+             AND (
+               (status = 'busy' AND execution_status = 'cancelling')
+               OR (status = 'ready' AND execution_status = 'idle' AND reported_to_lead = 0
+                 AND EXISTS (
+                   SELECT 1 FROM team_task
+                   WHERE team_id = ? AND assignee = ? AND status = 'in_progress'
+                 ))
+             )`,
+          [member.time_updated, member.team_id, member.name, member.team_id, member.name],
+        )
+        sendLeadAlert(this.db, this.client, {
+          teamId: member.team_id,
+          content: `Teammate "${member.name}" exceeded its timeout, but the session could not abort. The member and its in-progress task remain owned and retryable; retry the watchdog or use team_shutdown with force: true. Error: ${message}.`,
+          wakeText: `[System: Watchdog could not abort ${member.name}; retry guidance is available in team messages]`,
+        })
+        continue
+      } finally {
+        this.abortingSessions.delete(member.session_id)
+      }
+
+      if (preservedBranch) {
+        this.db.run(
+          "UPDATE team_member SET worktree_branch = ? WHERE team_id = ? AND name = ?",
+          [preservedBranch, member.team_id, member.name],
+        )
+      }
+
+      const transitioned = this.db.transaction(() => {
         const result = this.db.run(
-          "UPDATE team_member SET status = 'error', execution_status = 'timed_out', time_updated = ? WHERE team_id = ? AND name = ? AND status = 'busy'",
-          [Date.now(), member.team_id, member.name]
+          `UPDATE team_member SET status = 'error', execution_status = 'timed_out', time_updated = ?
+           WHERE team_id = ? AND name = ?
+             AND (status = 'ready' OR (status = 'busy' AND execution_status = 'cancelling'))`,
+          [Date.now(), member.team_id, member.name],
         )
         if (result.changes !== 1) return false
         this.db.run(
@@ -261,7 +327,7 @@ export class Watchdog {
         })
         return true
       })()
-      if (!claimed) continue
+      if (!transitioned) continue
 
       wakeTeamLead(
         this.db,
@@ -269,11 +335,6 @@ export class Watchdog {
         member.team_id,
         `[System: Teammate ${member.name} timed out; recovery guidance is available in team messages]`,
       )
-
-      // Abort session (best effort)
-      try {
-        await this.client.session.abort({ sessionID: member.session_id })
-      } catch { /* best effort */ }
 
       // Notify
       try {

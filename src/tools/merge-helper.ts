@@ -17,6 +17,9 @@ export type OverlapCheckFn = (branch: string, cwd: string) => Promise<string[]>
 /** Injectable function for preserving a branch before worktree deletion. */
 export type PreserveBranchFn = (sourceBranch: string, targetBranch: string, cwd: string) => Promise<boolean>
 
+/** Injectable function for resolving the branch currently checked out in a live worktree. */
+export type ResolveWorktreeBranchFn = (worktreeDir: string) => Promise<string | null>
+
 /** Injectable function for deleting a branch. */
 export type DeleteBranchFn = (branch: string, cwd: string) => Promise<boolean>
 
@@ -95,6 +98,13 @@ export async function preserveBranch(sourceBranch: string, targetBranch: string,
     return false
   }
   return true
+}
+
+/** Resolve the branch currently checked out in a worktree. */
+export async function resolveWorktreeBranch(worktreeDir: string): Promise<string | null> {
+  const result = await runCommand(["git", "-C", worktreeDir, "branch", "--show-current"])
+  if (result.exitCode !== 0) return null
+  return result.stdout.trim() || null
 }
 
 /**
