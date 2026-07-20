@@ -10,7 +10,7 @@ import { MemberRegistry, DescendantTracker, PendingPurgeApprovals } from "./stat
 import { isWorktreeInstance } from "./util"
 import { handleSessionStatusEvent, handleSessionCreatedEvent, checkToolIsolation, shouldNudgeIdleMember, handleSessionErrorEvent, RetryTracker } from "./hooks"
 import { notifyTeamEvent, notifyWorkingProgress } from "./notify"
-import { sendMessage, hasReportedCompletion, flushPendingPeerMessage, releasePendingPeerDelivery } from "./messaging"
+import { sendLeadAlert, hasReportedCompletion, flushPendingPeerMessage, releasePendingPeerDelivery } from "./messaging"
 import { buildLeadSystemPrompt, buildTeammateSystemPrompt, buildTeamCompactionContext } from "./system-prompt"
 import { log, initLog } from "./log"
 import { findTeamBySession } from "./types"
@@ -202,11 +202,10 @@ const plugin: Plugin = async (input) => {
                   nudgedMembers.add(fastIdleKey)
                   const modelInfo = memberInfo.model ? ` (model: ${memberInfo.model})` : ""
                   log(`fast-idle: ${transition.memberName} went idle ${Math.round(spawnAge / 1000)}s after spawn with 0 messages${modelInfo}`)
-                  sendMessage(db, {
+                  sendLeadAlert(db, client, {
                     teamId: transition.teamId,
-                    from: "system",
-                    to: "lead",
                     content: `Warning: Teammate "${transition.memberName}" went idle immediately after spawning with no output${modelInfo}. This usually means the model failed to start (authentication error, invalid model, or provider issue). Check your API key and model configuration, then retry the spawn.`,
+                    wakeText: `[System: Teammate ${transition.memberName} went idle without output; guidance is available in team messages]`,
                   })
                   client.tui.showToast({
                     title: "Team",
@@ -264,12 +263,8 @@ const plugin: Plugin = async (input) => {
           const team = db.query("SELECT id FROM team WHERE lead_session_id = ? AND status = 'active'").get(sessionID) as { id: string } | null
           if (team) {
             const pending = db.query("SELECT COUNT(*) as c FROM team_message WHERE team_id = ? AND to_name = 'lead' AND delivered = 0").get(team.id) as { c: number }
-            // Skip wake if all teammates are done or if we woke recently (issue #3 — breaks completion loop)
-            const allDone = (db.query(
-              "SELECT COUNT(*) as c FROM team_member WHERE team_id = ? AND status NOT IN ('ready', 'shutdown', 'error')"
-            ).get(team.id) as { c: number }).c === 0
             const lastWake = wakeLeadTimestamps.get(team.id) ?? 0
-            if (pending.c > 0 && !allDone && Date.now() - lastWake > WAKE_LEAD_COOLDOWN_MS) {
+            if (pending.c > 0 && Date.now() - lastWake > WAKE_LEAD_COOLDOWN_MS) {
               wakeLeadTimestamps.set(team.id, Date.now())
               log(`wake-lead: ${pending.c} pending messages, sending promptAsync`)
               client.session.promptAsync({

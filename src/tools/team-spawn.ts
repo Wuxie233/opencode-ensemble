@@ -1,7 +1,7 @@
 import type { ToolDeps, PermissionRule } from "../types"
 import { validateMemberName } from "../util"
 import { requireLead } from "./shared"
-import { sendMessage } from "../messaging"
+import { sendLeadAlert } from "../messaging"
 import { log } from "../log"
 import type { EnsembleConfig } from "../config"
 import { getTeamResourceParts, preserveBranch, preservedBranchName, teamWorktreeName } from "./merge-helper"
@@ -491,11 +491,10 @@ async function executeTeamSpawnLocked(
         variant: "error",
         duration: 8000,
       }).catch(() => { /* TUI may not be available */ })
-      sendMessage(deps.db, {
+      sendLeadAlert(deps.db, deps.client, {
         teamId: teamInfo.teamId,
-        from: "system",
-        to: "lead",
         content: `Teammate "${args.name}" failed to start and was removed${modelInfo}. Error: ${errMsg}. You may retry the spawn.`,
+        wakeText: `[System: Teammate ${args.name} failed to start; guidance is available in team messages]`,
       })
     } catch { /* rollback failed — watchdog will clean up stale member */ }
   })

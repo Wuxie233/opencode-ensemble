@@ -126,10 +126,10 @@ describe("team_broadcast", () => {
     const promptCalls = deps.client.calls.filter(c => c.method === "session.promptAsync")
     expect(promptCalls).toHaveLength(2)
 
-    // Check DB has one broadcast row
+    // Each recipient has independent durable delivery state.
     const rows = deps.db.query("SELECT * FROM team_message WHERE team_id = ?").all("t1") as Record<string, unknown>[]
-    expect(rows).toHaveLength(1)
-    expect(rows[0]!.to_name).toBeNull()
+    expect(rows).toHaveLength(2)
+    expect(rows.map(row => row.to_name).sort()).toEqual(["bob", "lead"])
   })
 
   test("lead broadcasts to all members", async () => {
@@ -153,25 +153,25 @@ describe("team_broadcast", () => {
 
     // Message should remain undelivered in DB
     const rows = deps.db.query("SELECT delivered FROM team_message WHERE team_id = ?").all("t1") as Array<{ delivered: number }>
-    expect(rows).toHaveLength(1)
-    expect(rows[0]!.delivered).toBe(0)
+    expect(rows).toHaveLength(2)
+    expect(rows.every(row => row.delivered === 0)).toBe(true)
   })
 
-  test("marks message delivered when at least one delivery succeeds", async () => {
-    let callCount = 0
+  test("tracks each broadcast recipient independently", async () => {
     deps.client.session.promptAsync = async (opts: unknown) => {
-      callCount++
       deps.client.calls.push({ method: "session.promptAsync", args: [opts] })
-      // First call succeeds, second fails
-      if (callCount === 2) throw new Error("delivery failed")
+      if ((opts as { sessionID: string }).sessionID === "lead-sess") throw new Error("delivery failed")
       return {}
     }
 
     await executeTeamBroadcast(deps, { text: "status update" }, "sess-alice")
+    await Bun.sleep(1)
 
-    const rows = deps.db.query("SELECT delivered FROM team_message WHERE team_id = ?").all("t1") as Array<{ delivered: number }>
-    expect(rows).toHaveLength(1)
-    expect(rows[0]!.delivered).toBe(1)
+    const rows = deps.db.query(
+      "SELECT to_name, delivered, content FROM team_message WHERE team_id = ? ORDER BY to_name",
+    ).all("t1") as Array<{ to_name: string | null; delivered: number; content: string }>
+    expect(rows).toContainEqual({ to_name: "lead", delivered: 0, content: "status update" })
+    expect(rows).toContainEqual({ to_name: "bob", delivered: 1, content: "status update" })
   })
 })
 
@@ -346,4 +346,3 @@ describe("team_message — plan approval", () => {
       .rejects.toThrow("Only the lead can approve or reject")
   })
 })
-

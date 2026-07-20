@@ -1,6 +1,6 @@
 import type { ToolDeps } from "../types"
 import { requireTeamMember } from "./shared"
-import { broadcastMessage, markDelivered, hasReportedCompletion } from "../messaging"
+import { sendMessage, markDelivered, hasReportedCompletion } from "../messaging"
 import { log } from "../log"
 
 /**
@@ -14,12 +14,6 @@ export async function executeTeamBroadcast(
   const teamInfo = requireTeamMember(deps, sessionId)
 
   const senderName = teamInfo.role === "lead" ? "lead" : (teamInfo.memberName ?? "unknown")
-
-  const msgId = broadcastMessage(deps.db, {
-    teamId: teamInfo.teamId,
-    from: senderName,
-    content: args.text,
-  })
 
   // Collect all recipient session IDs (excluding sender)
   const recipients: Array<{ name: string; sessionId: string }> = []
@@ -39,21 +33,28 @@ export async function executeTeamBroadcast(
     }
   }
 
-  // Fire-and-forget: deliver to all recipients. Message is already persisted in DB.
-  // Skip completed teammates to prevent re-waking them (issue #3).
-  let delivered = 0
+  // Persist and deliver independently per recipient so one successful transport
+  // cannot hide another recipient's failed delivery.
   let skipped = 0
   for (const recipient of recipients) {
     if (recipient.name !== "lead" && hasReportedCompletion(deps.db, teamInfo.teamId, recipient.name)) {
       skipped++
       continue
     }
+    const msgId = sendMessage(deps.db, {
+      teamId: teamInfo.teamId,
+      from: senderName,
+      to: recipient.name,
+      content: args.text,
+    })
+    const text = recipient.name === "lead"
+      ? `[System: New team broadcast from ${senderName}]`
+      : `[Team broadcast from ${senderName}]: ${args.text}`
     deps.client.session.promptAsync({
       sessionID: recipient.sessionId,
-      parts: [{ type: "text", text: `[Team broadcast from ${senderName}]: ${args.text}` }],
+      parts: [{ type: "text", text }],
     }).then(() => {
-      delivered++
-      if (delivered === 1) markDelivered(deps.db, msgId)
+      if (recipient.name !== "lead") markDelivered(deps.db, msgId)
     }).catch((err) => {
       log(`team_broadcast:deliver:failed to=${recipient.name} err=${err instanceof Error ? err.message : String(err)}`)
     })

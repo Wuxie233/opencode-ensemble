@@ -22,6 +22,13 @@ export interface BroadcastMessageInput {
   content: string
 }
 
+/** Input for a durable system alert that must wake the Team Lead. */
+export interface LeadAlertInput {
+  teamId: string
+  content: string
+  wakeText: string
+}
+
 /** A message row from the database. */
 export interface MessageRow {
   id: string
@@ -48,6 +55,31 @@ export function sendMessage(db: Database, input: SendMessageInput): string {
     [id, input.teamId, input.from, input.to, input.content, Date.now()]
   )
   return id
+}
+
+/** Persist a system alert for the Lead, then wake the Lead without blocking the caller. */
+export function sendLeadAlert(db: Database, client: PluginClient, input: LeadAlertInput): string {
+  const messageId = sendMessage(db, {
+    teamId: input.teamId,
+    from: "system",
+    to: "lead",
+    content: input.content,
+  })
+  wakeTeamLead(db, client, input.teamId, input.wakeText)
+  return messageId
+}
+
+/** Wake a Team Lead after its durable message transaction has committed. */
+export function wakeTeamLead(db: Database, client: PluginClient, teamId: string, wakeText: string): void {
+  const team = db.query("SELECT lead_session_id FROM team WHERE id = ? AND status = 'active'")
+    .get(teamId) as { lead_session_id: string } | null
+  if (!team) return
+  client.session.promptAsync({
+    sessionID: team.lead_session_id,
+    parts: [{ type: "text", text: wakeText }],
+  }).catch(error => {
+    log(`lead-alert:wake:failed team=${teamId} err=${error instanceof Error ? error.message : String(error)}`)
+  })
 }
 
 /**

@@ -4,7 +4,7 @@ import type { MemberRegistry } from "./state"
 import type { ProgressTracker } from "./progress"
 import type { ActivityBuffer } from "./activity"
 import { preserveBranch, preservedBranchName } from "./tools/merge-helper"
-import { sendMessage } from "./messaging"
+import { sendLeadAlert, sendMessage, wakeTeamLead } from "./messaging"
 import { log } from "./log"
 
 interface WatchdogOpts {
@@ -133,11 +133,10 @@ export class Watchdog {
       }).catch(() => { /* best effort */ })
 
       // Notify the lead
-      sendMessage(this.db, {
+      sendLeadAlert(this.db, this.client, {
         teamId: member.team_id,
-        from: "system",
-        to: "lead",
         content: `Teammate "${member.name}" appears stalled (${reason}). Consider checking on them via team_message or shutting them down.`,
+        wakeText: `[System: Teammate ${member.name} appears stalled; guidance is available in team messages]`,
       })
 
       // Toast for the user
@@ -176,11 +175,10 @@ export class Watchdog {
       }).catch(() => { /* best effort */ })
 
       // Notify the lead
-      sendMessage(this.db, {
+      sendLeadAlert(this.db, this.client, {
         teamId: member.team_id,
-        from: "system",
-        to: "lead",
         content: `Agent "${member.name}" is sending many peer messages and may be over-coordinating. Consider checking on them.`,
+        wakeText: `[System: Teammate ${member.name} may be over-coordinating; guidance is available in team messages]`,
       })
 
       log(`watchdog:chatty member=${member.name} limit=${this.peerMessageLimit}`)
@@ -197,7 +195,7 @@ export class Watchdog {
     const cutoff = Date.now() - this.ttlMs
     const stale = this.db.query(
       `SELECT tm.team_id, tm.name, tm.session_id, tm.time_updated, tm.worktree_branch,
-              t.name as team_name, t.lead_session_id, p.name as project_name
+              t.name as team_name, p.name as project_name
        FROM team_member tm
        JOIN team t ON tm.team_id = t.id
        JOIN project p ON t.project_id = p.id
@@ -211,7 +209,6 @@ export class Watchdog {
       time_updated: number
       worktree_branch: string | null
       team_name: string
-      lead_session_id: string
       project_name: string
     }>
 
@@ -256,10 +253,12 @@ export class Watchdog {
       })()
       if (!claimed) continue
 
-      this.client.session.promptAsync({
-        sessionID: member.lead_session_id,
-        parts: [{ type: "text", text: `[System: Teammate ${member.name} timed out; recovery guidance is available in team messages]` }],
-      }).catch(() => { /* best effort; durable guidance remains in team_message */ })
+      wakeTeamLead(
+        this.db,
+        this.client,
+        member.team_id,
+        `[System: Teammate ${member.name} timed out; recovery guidance is available in team messages]`,
+      )
 
       // Abort session (best effort)
       try {

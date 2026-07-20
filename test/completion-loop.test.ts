@@ -84,17 +84,22 @@ describe("issue #3: completion loop prevention", () => {
     expect(result).toContain("completed")
   })
 
-  test("wake-lead skips when all teammates are ready/shutdown", async () => {
+  test("completed teams retain pending Lead messages for the wake backstop", async () => {
     const { teamId } = await spawnAndComplete("done-team", "dave")
 
     // Insert another undelivered message to lead (simulating the loop)
     sendMessage(deps.db, { teamId, from: "dave", to: "lead", content: "duplicate" })
 
-    // All members should be in a terminal state
+    // Completion state must not suppress pending message delivery. Delivered rows,
+    // rather than teammate status, prevent the old courtesy-reply loop.
     const activeBusy = deps.db.query(
       "SELECT COUNT(*) as c FROM team_member WHERE team_id = ? AND status NOT IN ('ready', 'shutdown', 'error')"
     ).get(teamId) as { c: number }
     expect(activeBusy.c).toBe(0)
+    const pending = deps.db.query(
+      "SELECT COUNT(*) AS c FROM team_message WHERE team_id = ? AND to_name = 'lead' AND delivered = 0",
+    ).get(teamId) as { c: number }
+    expect(pending.c).toBeGreaterThan(0)
   })
 
   test("peer-flush skips for completed teammates", async () => {

@@ -266,7 +266,10 @@ describe("Watchdog", () => {
 
       await watchdog.checkStalled()
 
-      expect(deps.client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(1)
+      const prompts = deps.client.calls.filter(call => call.method === "session.promptAsync")
+      expect(prompts).toHaveLength(2)
+      expect(prompts.map(call => (call.args[0] as { sessionID: string }).sessionID).sort())
+        .toEqual(["lead-sess", "sess-a"])
     })
 
     test("still flags a genuine time stall without recent activity", async () => {
@@ -287,7 +290,10 @@ describe("Watchdog", () => {
 
       await watchdog.checkStalled()
 
-      expect(deps.client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(1)
+      const prompts = deps.client.calls.filter(call => call.method === "session.promptAsync")
+      expect(prompts).toHaveLength(2)
+      expect(prompts.map(call => (call.args[0] as { sessionID: string }).sessionID).sort())
+        .toEqual(["lead-sess", "sess-a"])
       const message = deps.db.query(
         "SELECT content FROM team_message WHERE team_id = 't1' AND from_name = 'system' AND to_name = 'lead'",
       ).get() as { content: string }
