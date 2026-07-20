@@ -161,6 +161,11 @@ abort, ambiguous history, any tool part, shutdown/completion race, inspection
 failure, or recovery-prompt failure must fail closed through the normal Lead
 alert and task-release path.
 
+The hard-timeout watchdog must honor recent process-shared `ActivityBuffer`
+activity before claiming a busy member, including a second check after branch
+preservation. A claimed timeout persists recovery guidance and wakes the Lead
+with fire-and-forget `promptAsync` before aborting the teammate.
+
 ### Sub-Agent Isolation
 
 Enforced via tool.execute.before hook. Maintains a Map<sessionID, parentSessionID>

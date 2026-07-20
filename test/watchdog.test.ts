@@ -73,6 +73,71 @@ describe("Watchdog", () => {
     expect(row.status).toBe("busy")
   })
 
+  test("uses the latest session activity timestamp before timing out stale members", async () => {
+    const now = Date.now()
+    const staleTime = now - 60_000
+    for (const [name, sessionID] of [["active", "sess-active"], ["inactive", "sess-inactive"], ["silent", "sess-silent"]]) {
+      deps.db.run(
+        "INSERT INTO team_member (team_id, name, session_id, agent, status, execution_status, time_created, time_updated) VALUES (?, ?, ?, 'build', 'busy', 'running', ?, ?)",
+        ["t1", name, sessionID, staleTime, staleTime],
+      )
+    }
+    const activityBuffer = new ActivityBuffer()
+    activityBuffer.record("sess-active", { type: "tool_call", tool: "bash", timestamp: now })
+    activityBuffer.record("sess-active", { type: "step", timestamp: staleTime })
+    activityBuffer.record("sess-inactive", { type: "tool_result", tool: "bash", timestamp: staleTime })
+
+    const watchdog = new Watchdog({
+      db: deps.db,
+      client: deps.client,
+      registry: deps.registry,
+      ttlMs: 30_000,
+      activityBuffer,
+    })
+    await watchdog.check()
+
+    const members = deps.db.query(
+      "SELECT name, status, execution_status FROM team_member ORDER BY name",
+    ).all() as Array<{ name: string; status: string; execution_status: string }>
+    expect(members).toEqual([
+      { name: "active", status: "busy", execution_status: "running" },
+      { name: "inactive", status: "error", execution_status: "timed_out" },
+      { name: "silent", status: "error", execution_status: "timed_out" },
+    ])
+    expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(2)
+  })
+
+  test("wakes the lead without awaiting prompt delivery after claiming a timeout", async () => {
+    const pastTime = Date.now() - 60_000
+    deps.db.run(
+      "INSERT INTO team_member (team_id, name, session_id, agent, status, execution_status, time_created, time_updated) VALUES (?, ?, ?, 'build', 'busy', 'running', ?, ?)",
+      ["t1", "alice", "sess-a", pastTime, pastTime],
+    )
+    deps.client.session.promptAsync = options => {
+      deps.client.calls.push({ method: "session.promptAsync", args: [options] })
+      return new Promise(() => { /* never resolves */ })
+    }
+    const watchdog = new Watchdog({ db: deps.db, client: deps.client, registry: deps.registry, ttlMs: 30_000 })
+
+    const outcome = await Promise.race([
+      watchdog.check().then(() => "completed"),
+      Bun.sleep(100).then(() => "blocked"),
+    ])
+
+    expect(outcome).toBe("completed")
+    const prompts = deps.client.calls.filter(call => call.method === "session.promptAsync")
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]?.args[0]).toEqual({
+      sessionID: "lead-sess",
+      parts: [{ type: "text", text: "[System: Teammate alice timed out; recovery guidance is available in team messages]" }],
+    })
+    const alert = deps.db.query(
+      "SELECT content, delivered FROM team_message WHERE team_id = ? AND from_name = 'system' AND to_name = 'lead'",
+    ).get("t1") as { content: string; delivered: number }
+    expect(alert.content).toContain('resume_from: "alice"')
+    expect(alert.delivered).toBe(0)
+  })
+
   test("does not time out non-busy members", async () => {
     const pastTime = Date.now() - 60_000
     deps.db.run(

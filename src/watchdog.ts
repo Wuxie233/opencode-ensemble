@@ -196,16 +196,31 @@ export class Watchdog {
 
     const cutoff = Date.now() - this.ttlMs
     const stale = this.db.query(
-      `SELECT tm.team_id, tm.name, tm.session_id, tm.worktree_branch, t.name as team_name, p.name as project_name
+      `SELECT tm.team_id, tm.name, tm.session_id, tm.time_updated, tm.worktree_branch,
+              t.name as team_name, t.lead_session_id, p.name as project_name
        FROM team_member tm
        JOIN team t ON tm.team_id = t.id
        JOIN project p ON t.project_id = p.id
        WHERE t.status = 'active'
          AND tm.status = 'busy'
          AND tm.time_updated < ?`
-    ).all(cutoff) as Array<{ team_id: string; name: string; session_id: string; worktree_branch: string | null; team_name: string; project_name: string }>
+    ).all(cutoff) as Array<{
+      team_id: string
+      name: string
+      session_id: string
+      time_updated: number
+      worktree_branch: string | null
+      team_name: string
+      lead_session_id: string
+      project_name: string
+    }>
 
     for (const member of stale) {
+      const hasRecentActivity = () => this.activityBuffer
+        ?.getActivity(member.session_id)
+        .some(entry => entry.timestamp >= cutoff) ?? false
+      if (hasRecentActivity()) continue
+
       // Preserve branch BEFORE abort — session.abort() may destroy the worktree + branch
       if (this.cwd && member.worktree_branch && !member.worktree_branch.startsWith("ensemble/preserved/")) {
         const safeBranch = preservedBranchName(member.project_name, member.team_name, member.team_id, member.name)
@@ -219,6 +234,7 @@ export class Watchdog {
 
       // Claim the terminal transition so concurrent error/cleanup paths cannot
       // abort or alert for the same member twice.
+      if (hasRecentActivity()) continue
       const claimed = this.db.transaction(() => {
         const result = this.db.run(
           "UPDATE team_member SET status = 'error', execution_status = 'timed_out', time_updated = ? WHERE team_id = ? AND name = ? AND status = 'busy'",
@@ -239,6 +255,11 @@ export class Watchdog {
         return true
       })()
       if (!claimed) continue
+
+      this.client.session.promptAsync({
+        sessionID: member.lead_session_id,
+        parts: [{ type: "text", text: `[System: Teammate ${member.name} timed out; recovery guidance is available in team messages]` }],
+      }).catch(() => { /* best effort; durable guidance remains in team_message */ })
 
       // Abort session (best effort)
       try {
