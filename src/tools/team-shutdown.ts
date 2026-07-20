@@ -5,6 +5,17 @@ import { getTeamResourceParts, preserveBranch, preservedBranchName } from "./mer
 import type { PreserveBranchFn } from "./merge-helper"
 import { log } from "../log"
 import { sendLeadAlert } from "../messaging"
+import { runCommand } from "../process"
+
+/** Injectable function for resolving the branch currently checked out in a live worktree. */
+export type ResolveWorktreeBranchFn = (worktreeDir: string) => Promise<string | null>
+
+/** Resolve the branch currently checked out in a worktree. */
+export async function resolveWorktreeBranch(worktreeDir: string): Promise<string | null> {
+  const result = await runCommand(["git", "-C", worktreeDir, "branch", "--show-current"])
+  if (result.exitCode !== 0) return null
+  return result.stdout.trim() || null
+}
 
 /**
  * Execute the team_shutdown tool. Requests a teammate to shut down.
@@ -19,6 +30,7 @@ export async function executeTeamShutdown(
   isDirty: IsDirtyFn = checkWorktreeDirty,
   preserve: PreserveBranchFn = preserveBranch,
   commitCount: CommitCountFn = countBranchCommits,
+  resolveBranch: ResolveWorktreeBranchFn = resolveWorktreeBranch,
 ): Promise<string> {
   const teamInfo = requireLead(deps, sessionId)
 
@@ -31,7 +43,7 @@ export async function executeTeamShutdown(
 
   // Second call on an already-requested member → force abort
   if (member.status === "shutdown_requested") {
-    await preserveAndAbort(deps, teamInfo.teamId, args.member, member.session_id, member.worktree_branch, preserve)
+    await preserveAndAbort(deps, teamInfo.teamId, args.member, member.session_id, member.worktree_branch, member.worktree_dir, preserve, resolveBranch)
     const status = await getBranchStatus(deps, teamInfo.teamId, args.member, member.worktree_dir, isDirty, commitCount)
     return `Force shut down "${args.member}".${status}`
   }
@@ -47,7 +59,7 @@ export async function executeTeamShutdown(
   }
 
   if (isIdle || force) {
-    await preserveAndAbort(deps, teamInfo.teamId, args.member, member.session_id, member.worktree_branch, preserve)
+    await preserveAndAbort(deps, teamInfo.teamId, args.member, member.session_id, member.worktree_branch, member.worktree_dir, preserve, resolveBranch)
     const status = await getBranchStatus(deps, teamInfo.teamId, args.member, member.worktree_dir, isDirty, commitCount)
     return `Teammate "${args.member}" has been shut down.${status}`
   }
@@ -92,6 +104,64 @@ export async function executeTeamShutdown(
   return `Shutdown requested for ${args.member}. They will finish current work and shut down. Call team_shutdown with force: true to abort immediately.`
 }
 
+/** Re-abort a session that became busy after graceful shutdown was requested. */
+export async function abortShutdownRequestedMember(
+  deps: ToolDeps,
+  teamId: string,
+  memberName: string,
+  sessionId: string,
+  worktreeBranch: string | null,
+  worktreeDir: string | null,
+  preserve: PreserveBranchFn = preserveBranch,
+  resolveBranch: ResolveWorktreeBranchFn = resolveWorktreeBranch,
+): Promise<boolean> {
+  const sourceBranch = await resolvePreservationSource(
+    deps,
+    teamId,
+    memberName,
+    worktreeBranch,
+    worktreeDir,
+    resolveBranch,
+  )
+  let preservedBranch: string | null = null
+  if (sourceBranch) {
+    const resource = getTeamResourceParts(deps.db, teamId)
+    const safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, memberName)
+    const ok = await preserve(sourceBranch, safeBranch, deps.directory)
+    if (!ok) {
+      log(`busy_while_shutdown:branch:preserve-failed src=${sourceBranch} target=${safeBranch}`)
+      sendLeadAlert(deps.db, deps.client, {
+        teamId,
+        content: `Re-abort for "${memberName}" was blocked because branch ${sourceBranch} could not be preserved. No abort was attempted; resolve the branch and retry shutdown.`,
+        wakeText: `[System: Re-abort for ${memberName} was blocked by branch preservation failure; guidance is available in team messages]`,
+      })
+      return false
+    }
+    preservedBranch = safeBranch
+    log(`busy_while_shutdown:branch:preserved src=${sourceBranch} target=${safeBranch}`)
+  }
+
+  try {
+    await deps.client.session.abort({ sessionID: sessionId })
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    log(`busy_while_shutdown:abort-failed member=${memberName} err=${detail}`)
+    sendLeadAlert(deps.db, deps.client, {
+      teamId,
+      content: `Teammate "${memberName}" became busy after shutdown was requested but could not be aborted (${detail}). The member remains shutdown_requested; retry shutdown.`,
+      wakeText: `[System: Re-abort for ${memberName} failed; guidance is available in team messages]`,
+    })
+    return false
+  }
+  if (preservedBranch) {
+    deps.db.run(
+      "UPDATE team_member SET worktree_branch = ? WHERE team_id = ? AND name = ?",
+      [preservedBranch, teamId, memberName],
+    )
+  }
+  return true
+}
+
 /**
  * Preserve the worktree branch, then abort the session and mark shutdown.
  * The branch is copied to ensemble/preserved/{team_id}/{name} BEFORE abort,
@@ -103,27 +173,35 @@ async function preserveAndAbort(
   memberName: string,
   sessionId: string,
   worktreeBranch: string | null,
+  worktreeDir: string | null,
   preserve: PreserveBranchFn,
+  resolveBranch: ResolveWorktreeBranchFn,
 ): Promise<void> {
+  const sourceBranch = await resolvePreservationSource(
+    deps,
+    teamId,
+    memberName,
+    worktreeBranch,
+    worktreeDir,
+    resolveBranch,
+  )
+  let preservedBranch: string | null = null
   // Preserve the branch BEFORE aborting — session.abort() may delete the worktree + branch
-  if (worktreeBranch && !worktreeBranch.startsWith("ensemble/preserved/")) {
+  if (sourceBranch) {
     const resource = getTeamResourceParts(deps.db, teamId)
     const safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, memberName)
-    const ok = await preserve(worktreeBranch, safeBranch, deps.directory)
+    const ok = await preserve(sourceBranch, safeBranch, deps.directory)
     if (ok) {
-      deps.db.run(
-        "UPDATE team_member SET worktree_branch = ? WHERE team_id = ? AND name = ?",
-        [safeBranch, teamId, memberName],
-      )
-      log(`shutdown:branch:preserved src=${worktreeBranch} target=${safeBranch}`)
+      preservedBranch = safeBranch
+      log(`shutdown:branch:preserved src=${sourceBranch} target=${safeBranch}`)
     } else {
-      log(`shutdown:branch:preserve-failed src=${worktreeBranch} target=${safeBranch}`)
+      log(`shutdown:branch:preserve-failed src=${sourceBranch} target=${safeBranch}`)
       sendLeadAlert(deps.db, deps.client, {
         teamId,
-        content: `Shutdown for "${memberName}" was blocked because branch ${worktreeBranch} could not be preserved. No abort was attempted; resolve the branch and retry.`,
+        content: `Shutdown for "${memberName}" was blocked because branch ${sourceBranch} could not be preserved. No abort was attempted; resolve the branch and retry.`,
         wakeText: `[System: Shutdown for ${memberName} was blocked by branch preservation failure; guidance is available in team messages]`,
       })
-      throw new Error(`Cannot shut down "${memberName}": failed to preserve branch ${worktreeBranch}. The session was left running so you can retry.`)
+      throw new Error(`Cannot shut down "${memberName}": failed to preserve branch ${sourceBranch}. The session was left running so you can retry.`)
     }
   }
 
@@ -138,14 +216,48 @@ async function preserveAndAbort(
   // Now safe to abort — the branch is preserved
   try {
     await deps.client.session.abort({ sessionID: sessionId })
-  } catch {
-    // Abort failed — session may already be gone
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    log(`shutdown:abort-failed member=${memberName} err=${detail}`)
+    sendLeadAlert(deps.db, deps.client, {
+      teamId,
+      content: `Teammate "${memberName}" could not be aborted (${detail}). The member remains shutdown_requested; retry shutdown.`,
+      wakeText: `[System: Shutdown abort for ${memberName} failed; guidance is available in team messages]`,
+    })
+    throw new Error(`Cannot shut down "${memberName}": failed to abort the session. The member remains shutdown_requested so you can retry.`)
+  }
+
+  if (preservedBranch) {
+    deps.db.run(
+      "UPDATE team_member SET worktree_branch = ? WHERE team_id = ? AND name = ?",
+      [preservedBranch, teamId, memberName],
+    )
   }
 
   deps.db.run(
     "UPDATE team_member SET status = 'shutdown', execution_status = 'idle', time_updated = ? WHERE team_id = ? AND name = ?",
     [Date.now(), teamId, memberName],
   )
+}
+
+async function resolvePreservationSource(
+  deps: ToolDeps,
+  teamId: string,
+  memberName: string,
+  worktreeBranch: string | null,
+  worktreeDir: string | null,
+  resolveBranch: ResolveWorktreeBranchFn,
+): Promise<string | null> {
+  if (!worktreeBranch?.startsWith("ensemble/preserved/")) return worktreeBranch
+  if (!worktreeDir) return null
+  const liveBranch = await resolveBranch(worktreeDir)
+  if (liveBranch && !liveBranch.startsWith("ensemble/preserved/")) return liveBranch
+  sendLeadAlert(deps.db, deps.client, {
+    teamId,
+    content: `Shutdown for "${memberName}" was blocked because its live source branch could not be resolved from worktree ${worktreeDir}. No abort was attempted; inspect the worktree and retry.`,
+    wakeText: `[System: Shutdown for ${memberName} could not resolve its live worktree branch; guidance is available in team messages]`,
+  })
+  throw new Error(`Cannot shut down "${memberName}": failed to resolve the live branch from ${worktreeDir}. The session was left running so you can retry.`)
 }
 
 /** Build a status line describing the teammate's work: commit count, dirty state, next step. */

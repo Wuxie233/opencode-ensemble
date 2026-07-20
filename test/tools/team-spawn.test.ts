@@ -230,7 +230,7 @@ describe("team_spawn", () => {
       agent: "build",
       prompt: "Fix the tests",
       claim_task: "task-123",
-    }, "lead-sess")
+    }, "lead-sess", async () => true)
 
     const promptCall = deps.client.calls.find(c => c.method === "session.promptAsync")
     expect(promptCall).toBeTruthy()
@@ -248,7 +248,7 @@ describe("team_spawn", () => {
       agent: "build",
       prompt: "Fix the tests",
       claim_task: "task-123",
-    }, "lead-sess")
+    }, "lead-sess", async () => true)
 
     const task = deps.db.query("SELECT status, assignee FROM team_task WHERE id = ?").get("task-123") as {
       status: string
@@ -377,6 +377,29 @@ describe("team_spawn", () => {
     expect(deps.client.calls.filter(call => call.method === "worktree.remove")).toHaveLength(0)
   })
 
+  test("keeps registration-failure resources and alerts when abort fails", async () => {
+    const originalRun = deps.db.run.bind(deps.db)
+    deps.db.run = (sql, ...params) => {
+      if (sql.startsWith("INSERT INTO team_member")) throw new Error("registration failed")
+      return originalRun(sql, ...params)
+    }
+    deps.client.session.abort = async () => { throw new Error("abort failed") }
+
+    await expect(executeTeamSpawn(deps, {
+      name: "alice",
+      agent: "build",
+      prompt: "Fix the tests",
+    }, "lead-sess", async () => true)).rejects.toThrow("abort failed")
+
+    expect(deps.client.calls.filter(call => call.method === "worktree.remove")).toHaveLength(0)
+    expect(deps.client.calls.filter(call => call.method === "workspace.remove")).toHaveLength(0)
+    const alert = deps.db.query(
+      "SELECT content FROM team_message WHERE team_id = 't1' AND from_name = 'system' AND to_name = 'lead'",
+    ).get() as { content: string }
+    expect(alert.content).toContain("could not be aborted")
+    expect(alert.content).toContain("manual recovery")
+  })
+
   test("rolls back claim_task when prompt dispatch fails asynchronously", async () => {
     insertTask(deps, "t1", "task-123")
     deps.client.session.promptAsync = async () => { throw new Error("delivery failed") }
@@ -386,7 +409,7 @@ describe("team_spawn", () => {
       agent: "build",
       prompt: "Fix the tests",
       claim_task: "task-123",
-    }, "lead-sess")
+    }, "lead-sess", async () => true)
     await new Promise(resolve => setTimeout(resolve, 10))
 
     const task = deps.db.query("SELECT status, assignee FROM team_task WHERE id = ?").get("task-123") as {
@@ -455,11 +478,13 @@ describe("team_spawn", () => {
 
   test("retains failed member resources when prompt rollback cannot preserve the branch", async () => {
     deps.client.session.promptAsync = async () => { throw new Error("promptAsync failed") }
+    insertTask(deps, "t1", "task-123")
 
     await executeTeamSpawn(deps, {
       name: "alice",
       agent: "build",
       prompt: "Fix the tests",
+      claim_task: "task-123",
     }, "lead-sess")
     await new Promise(resolve => setTimeout(resolve, 10))
 
@@ -467,9 +492,12 @@ describe("team_spawn", () => {
     expect(deps.client.calls.filter(call => call.method === "worktree.remove")).toHaveLength(0)
     const member = deps.db.query("SELECT status, execution_status, worktree_branch FROM team_member WHERE name = 'alice'")
       .get() as { status: string; execution_status: string; worktree_branch: string }
-    expect(member.status).toBe("error")
-    expect(member.execution_status).toBe("failed")
+    expect(member.status).toBe("busy")
+    expect(member.execution_status).toBe("starting")
     expect(member.worktree_branch).toStartWith("ensemble-")
+    expect(deps.registry.listByTeam("t1")).toHaveLength(1)
+    expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-123'").get())
+      .toEqual({ status: "in_progress", assignee: "alice" })
   })
 
   test("response is clean without LLM instructions", async () => {
@@ -487,12 +515,14 @@ describe("team_spawn", () => {
   test("retains preserved ownership if session.abort fails during promptAsync rollback", async () => {
     deps.client.session.promptAsync = async () => { throw new Error("promptAsync failed") }
     deps.client.session.abort = async () => { throw new Error("abort also failed") }
+    insertTask(deps, "t1", "task-123")
 
     // Spawn returns immediately — does NOT throw (fire-and-forget)
     const result = await executeTeamSpawn(deps, {
       name: "alice",
       agent: "build",
       prompt: "Fix the tests",
+      claim_task: "task-123",
     }, "lead-sess", async () => true)
 
     expect(result).toContain("alice")
@@ -505,8 +535,11 @@ describe("team_spawn", () => {
       worktree_branch: string
     }
     expect(row.status).toBe("shutdown_requested")
-    expect(row.worktree_branch).toStartWith("ensemble/preserved/")
-    expect(deps.registry.listByTeam("t1")).toHaveLength(0)
+    expect(row.worktree_branch).toStartWith("ensemble-")
+    expect(row.worktree_branch).not.toStartWith("ensemble/preserved/")
+    expect(deps.registry.listByTeam("t1")).toHaveLength(1)
+    expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-123'").get())
+      .toEqual({ status: "in_progress", assignee: "alice" })
   })
 
   test("context message includes structured completion format", async () => {

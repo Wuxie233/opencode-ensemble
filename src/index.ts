@@ -22,7 +22,7 @@ import { executeTeamCreate } from "./tools/team-create"
 import { executeTeamSpawn } from "./tools/team-spawn"
 import { executeTeamMessage } from "./tools/team-message"
 import { executeTeamBroadcast } from "./tools/team-broadcast"
-import { executeTeamShutdown } from "./tools/team-shutdown"
+import { abortShutdownRequestedMember, executeTeamShutdown } from "./tools/team-shutdown"
 import { executeTeamCleanup } from "./tools/team-cleanup"
 import { executeTeamMerge } from "./tools/team-merge"
 import { executeTeamTasksList } from "./tools/team-tasks-list"
@@ -232,26 +232,19 @@ const plugin: Plugin = async (input) => {
           } else if (transition.to === "error") {
             notifyTeamEvent(client, "error", { memberName: transition.memberName })
           } else if (transition.to === "busy_while_shutdown") {
-            // Session went busy after shutdown was requested — re-issue abort
-            // Branch should already be preserved by the graceful shutdown path,
-            // but verify and re-preserve if needed
             const member = deps.db.query(
-              "SELECT worktree_branch, name, team_id FROM team_member WHERE session_id = ?"
-            ).get(sessionID) as { worktree_branch: string | null; name: string; team_id: string } | null
-            if (member?.worktree_branch && !member.worktree_branch.startsWith("ensemble/preserved/")) {
-              const { getTeamResourceParts, preserveBranch: preserve, preservedBranchName: branchName } = await import("./tools/merge-helper")
-              const resource = getTeamResourceParts(deps.db, member.team_id)
-              const safeBranch = branchName(resource.projectName, resource.teamName, resource.teamId, member.name)
-              const ok = await preserve(member.worktree_branch, safeBranch, deps.directory)
-              if (ok) {
-                deps.db.run("UPDATE team_member SET worktree_branch = ? WHERE team_id = ? AND name = ?",
-                  [safeBranch, member.team_id, member.name])
-                log(`busy_while_shutdown:branch:preserved src=${member.worktree_branch} target=${safeBranch}`)
-              }
+              "SELECT worktree_branch, worktree_dir, name, team_id FROM team_member WHERE session_id = ?"
+            ).get(sessionID) as { worktree_branch: string | null; worktree_dir: string | null; name: string; team_id: string } | null
+            if (member) {
+              await abortShutdownRequestedMember(
+                deps,
+                member.team_id,
+                member.name,
+                sessionID,
+                member.worktree_branch,
+                member.worktree_dir,
+              )
             }
-            try {
-              await client.session.abort({ sessionID })
-            } catch { /* best effort */ }
           }
 
           // Show working progress after every transition so the user sees who's still active

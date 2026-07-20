@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach } from "bun:test"
 import { setupDeps, insertTeam, insertMember } from "../helpers"
-import { executeTeamShutdown } from "../../src/tools/team-shutdown"
+import { abortShutdownRequestedMember, executeTeamShutdown } from "../../src/tools/team-shutdown"
 import { executeTeamCleanup } from "../../src/tools/team-cleanup"
 import type { MergeBranchFn, DeleteBranchFn } from "../../src/tools/merge-helper"
 import { handleSessionErrorEvent } from "../../src/hooks"
@@ -122,20 +122,74 @@ describe("team_shutdown", () => {
       .rejects.toThrow("already shut down")
   })
 
-  test("handles abort failure gracefully on idle member", async () => {
-    // Status says idle, so we try to abort, but abort fails
+  test("keeps shutdown_requested when abort fails on idle member", async () => {
     deps.client.session.status = async () => {
       deps.client.calls.push({ method: "session.status", args: [] })
       return { data: { "sess-alice": { type: "idle" } } }
     }
     deps.client.session.abort = async () => { throw new Error("session gone") }
 
-    const result = await executeTeamShutdown(deps, { member: "alice" }, "lead-sess", undefined, noopPreserve)
-    // Should still transition to shutdown since member was idle
-    expect(result).toContain("shut down")
+    await expect(executeTeamShutdown(deps, { member: "alice" }, "lead-sess", undefined, noopPreserve))
+      .rejects.toThrow("failed to abort")
 
     const row = deps.db.query("SELECT status FROM team_member WHERE name = 'alice'").get() as Record<string, string>
-    expect(row.status).toBe("shutdown")
+    expect(row.status).toBe("shutdown_requested")
+    const alert = deps.db.query(
+      "SELECT content FROM team_message WHERE team_id = 't1' AND from_name = 'system' AND to_name = 'lead'",
+    ).get() as { content: string }
+    expect(alert.content).toContain("could not be aborted")
+  })
+
+  test("does not re-abort a shutdown_requested member when branch refresh fails", async () => {
+    deps.db.run(
+      "UPDATE team_member SET status = 'shutdown_requested', worktree_branch = ? WHERE name = 'alice'",
+      ["ensemble-my-team-alice"],
+    )
+
+    const aborted = await abortShutdownRequestedMember(
+      deps,
+      "t1",
+      "alice",
+      "sess-alice",
+      "ensemble-my-team-alice",
+      null,
+      async () => false,
+    )
+
+    expect(aborted).toBe(false)
+    expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
+    const row = deps.db.query("SELECT status, worktree_branch FROM team_member WHERE name = 'alice'")
+      .get() as { status: string; worktree_branch: string }
+    expect(row.status).toBe("shutdown_requested")
+    expect(row.worktree_branch).toBe("ensemble-my-team-alice")
+    const alert = deps.db.query(
+      "SELECT content FROM team_message WHERE team_id = 't1' AND from_name = 'system' AND to_name = 'lead'",
+    ).get() as { content: string }
+    expect(alert.content).toContain("No abort was attempted")
+  })
+
+  test("keeps shutdown_requested and alerts when re-abort fails", async () => {
+    deps.db.run("UPDATE team_member SET status = 'shutdown_requested' WHERE name = 'alice'")
+    deps.client.session.abort = async () => { throw new Error("transport unavailable") }
+
+    const aborted = await abortShutdownRequestedMember(
+      deps,
+      "t1",
+      "alice",
+      "sess-alice",
+      null,
+      null,
+      noopPreserve,
+    )
+
+    expect(aborted).toBe(false)
+    const row = deps.db.query("SELECT status FROM team_member WHERE name = 'alice'")
+      .get() as { status: string }
+    expect(row.status).toBe("shutdown_requested")
+    const alert = deps.db.query(
+      "SELECT content FROM team_message WHERE team_id = 't1' AND from_name = 'system' AND to_name = 'lead'",
+    ).get() as { content: string }
+    expect(alert.content).toContain("could not be aborted")
   })
 
   test("falls back to shutdown_requested when status poll fails", async () => {

@@ -262,19 +262,56 @@ describe("SafeAbortRecovery", () => {
     expect((db.query("SELECT status FROM team_member WHERE session_id = ?").get("scout-sess") as { status: string }).status).toBe("shutdown_requested")
   })
 
-  test("allows another instance to resume a durable checking claim on message update", async () => {
+  test("allows another instance to resume an expired durable checking claim on message update", async () => {
     let messages: ReturnType<typeof abortedMessage>[] = []
     client.session.messages = async () => ({ data: messages })
     const owner = new SafeAbortRecovery({ db, registry, client, retryDelaysMs: [1000], onTerminal: alert => terminalAlerts.push(alert) })
     const observer = coordinator()
     owner.handleSessionError("scout-sess", ABORT_ERROR)
     await Bun.sleep(2)
+    db.run("UPDATE team_member SET abort_recovery_claim_expires_at = ? WHERE session_id = ?", [Date.now() - 1, "scout-sess"])
     messages = [abortedMessage()]
 
     observer.observeMessage("scout-sess")
     await settle()
 
     expect(client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(1)
+  })
+
+  test("preserves a live owner lease but durably claims a distinct abort seen by an observer", async () => {
+    const ownerClient = mockClient()
+    ownerClient.session.messages = () => new Promise(() => {})
+    const observerClient = mockClient()
+    observerClient.session.messages = async () => ({ data: [abortedMessage("msg-2")] })
+    const owner = new SafeAbortRecovery({ db, registry, client: ownerClient, retryDelaysMs: [1000], onTerminal: alert => terminalAlerts.push(alert) })
+    const observer = new SafeAbortRecovery({ db, registry, client: observerClient, retryDelaysMs: [0], onTerminal: alert => terminalAlerts.push(alert) })
+    owner.handleSessionError("scout-sess", ABORT_ERROR, "event-1")
+    await Bun.sleep(2)
+    const liveClaim = db.query(
+      "SELECT abort_recovery_claim_token, abort_recovery_claim_expires_at FROM team_member WHERE session_id = ?",
+    ).get("scout-sess")
+
+    observer.observeMessage("scout-sess")
+    await Bun.sleep(2)
+
+    expect(db.query(
+      "SELECT abort_recovery_claim_token, abort_recovery_claim_expires_at FROM team_member WHERE session_id = ?",
+    ).get("scout-sess")).toEqual(liveClaim)
+    expect(observerClient.calls.filter(call => call.method === "session.messages")).toHaveLength(0)
+
+    expect(observer.handleSessionError("scout-sess", ABORT_ERROR, "event-2")).toBe(true)
+    await settle()
+
+    expect(terminalAlerts).toEqual([{ leadSessionId: "lead-sess", memberName: "scout" }])
+    expect(db.query(
+      "SELECT status, execution_status, abort_recovery_state, abort_recovery_event_id, abort_recovery_claim_token FROM team_member WHERE session_id = ?",
+    ).get("scout-sess")).toEqual({
+      status: "error",
+      execution_status: "failed",
+      abort_recovery_state: "consumed",
+      abort_recovery_event_id: "event-2",
+      abort_recovery_claim_token: null,
+    })
   })
 
   test("does not let a stale inspector fail closed a row another instance already prompted", async () => {
@@ -287,6 +324,7 @@ describe("SafeAbortRecovery", () => {
     const observer = new SafeAbortRecovery({ db, registry, client: observerClient, retryDelaysMs: [0], onTerminal: alert => terminalAlerts.push(alert) })
     owner.handleSessionError("scout-sess", ABORT_ERROR)
     await Bun.sleep(2)
+    db.run("UPDATE team_member SET abort_recovery_claim_expires_at = ? WHERE session_id = ?", [Date.now() - 1, "scout-sess"])
 
     observer.observeMessage("scout-sess")
     await settle()

@@ -111,6 +111,71 @@ describe("branch preservation", () => {
     expect(after).toEqual(before)
   })
 
+  test("shutdown refreshes from the live source branch after an abort failure", async () => {
+    await executeTeamCreate(deps, { name: "abort-retry" }, lead)
+    await executeTeamSpawn(deps, { name: "erin", agent: "build", prompt: "task" }, lead)
+    const before = deps.db.query("SELECT worktree_branch FROM team_member WHERE name = 'erin'")
+      .get() as { worktree_branch: string }
+    const preserveSources: string[] = []
+    const trackPreserve: PreserveBranchFn = async source => {
+      preserveSources.push(source)
+      return true
+    }
+    let abortAttempts = 0
+    deps.client.session.abort = async () => {
+      abortAttempts++
+      if (abortAttempts === 1) throw new Error("transport unavailable")
+      return {}
+    }
+
+    await expect(executeTeamShutdown(deps, { member: "erin", force: true }, lead, undefined, trackPreserve))
+      .rejects.toThrow("failed to abort")
+    expect((deps.db.query("SELECT status, worktree_branch FROM team_member WHERE name = 'erin'").get() as {
+      status: string
+      worktree_branch: string
+    })).toEqual({ status: "shutdown_requested", worktree_branch: before.worktree_branch })
+
+    await executeTeamShutdown(deps, { member: "erin", force: true }, lead, undefined, trackPreserve)
+
+    expect(preserveSources).toEqual([before.worktree_branch, before.worktree_branch])
+    const after = deps.db.query("SELECT status, worktree_branch FROM team_member WHERE name = 'erin'")
+      .get() as { status: string; worktree_branch: string }
+    expect(after.status).toBe("shutdown")
+    expect(after.worktree_branch).toBe(preservedFor(deps, "abort-retry", "erin"))
+  })
+
+  test("shutdown refreshes a legacy preserved record from its live worktree branch", async () => {
+    await executeTeamCreate(deps, { name: "legacy-retry" }, lead)
+    await executeTeamSpawn(deps, { name: "faye", agent: "build", prompt: "task" }, lead)
+    const liveBranch = (deps.db.query("SELECT worktree_branch FROM team_member WHERE name = 'faye'")
+      .get() as { worktree_branch: string }).worktree_branch
+    const stalePreserved = preservedFor(deps, "legacy-retry", "faye")
+    deps.db.run(
+      "UPDATE team_member SET status = 'shutdown_requested', worktree_branch = ? WHERE name = 'faye'",
+      [stalePreserved],
+    )
+    const preserveSources: string[] = []
+
+    await executeTeamShutdown(
+      deps,
+      { member: "faye", force: true },
+      lead,
+      undefined,
+      async source => {
+        preserveSources.push(source)
+        return true
+      },
+      undefined,
+      async () => liveBranch,
+    )
+
+    expect(preserveSources).toEqual([liveBranch])
+    expect((deps.db.query("SELECT status, worktree_branch FROM team_member WHERE name = 'faye'").get() as {
+      status: string
+      worktree_branch: string
+    })).toEqual({ status: "shutdown", worktree_branch: stalePreserved })
+  })
+
   test("shutdown without worktree branch skips preservation", async () => {
     await executeTeamCreate(deps, { name: "no-wt" }, lead)
     await executeTeamSpawn(deps, { name: "carol", agent: "explore", prompt: "task", worktree: false }, lead)

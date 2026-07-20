@@ -143,7 +143,9 @@ pending/unassigned, and persist an actionable system message to the Lead before
 attempting a fire-and-forget wake. Error members stay terminal across later
 idle/busy events. Every Ensemble-initiated abort must first record
 `shutdown_requested` so the resulting `MessageAbortedError` is not reported as
-an unexpected failure.
+an unexpected failure. Only transition a member to `shutdown` after
+`session.abort()` resolves; preservation or abort failures must leave it
+`shutdown_requested`, persist guidance for the Lead, and remain retryable.
 
 OpenCode owns provider retry policy. Keep ordinary `session.status=retry`
 events silent, preserve the member/task as running, and warn the Lead only once

@@ -83,9 +83,8 @@ export class SafeAbortRecovery {
     if (member.abort_recovery_state === "consumed") return false
     if (eventId && member.abort_recovery_event_id === eventId) return true
     if (member.abort_recovery_state === "checking") {
-      const check = this.pending.get(sessionId)
-      if (eventId && member.abort_recovery_event_id && eventId !== member.abort_recovery_event_id && check) {
-        this.failClosed(sessionId, check.claimToken, "a distinct abort arrived while recovery inspection was already active")
+      if (eventId && member.abort_recovery_event_id && eventId !== member.abort_recovery_event_id) {
+        this.claimDistinctAbort(sessionId, member, eventId)
       }
       return true
     }
@@ -137,16 +136,45 @@ export class SafeAbortRecovery {
   }
 
   private resumeDurableCheck(sessionId: string): PendingCheck | undefined {
+    const now = Date.now()
+    const owner = this.db.query(
+      `SELECT abort_recovery_claim_token FROM team_member
+       WHERE session_id = ? AND abort_recovery_state = 'checking'
+         AND (abort_recovery_claim_expires_at IS NULL OR abort_recovery_claim_expires_at <= ?)`,
+    ).get(sessionId, now) as { abort_recovery_claim_token: string | null } | null
+    if (!owner) return
     const claimToken = generateId("abort")
     const claimed = this.db.run(
       `UPDATE team_member SET abort_recovery_claim_token = ?, abort_recovery_claim_expires_at = ?, time_updated = ?
-       WHERE session_id = ? AND abort_recovery_state = 'checking'`,
-      [claimToken, this.inspectionClaimExpiry(), Date.now(), sessionId],
+       WHERE session_id = ? AND abort_recovery_state = 'checking'
+         AND abort_recovery_claim_token IS ?
+         AND (abort_recovery_claim_expires_at IS NULL OR abort_recovery_claim_expires_at <= ?)`,
+      [claimToken, this.inspectionClaimExpiry(), now, sessionId, owner.abort_recovery_claim_token, now],
     )
     if (claimed.changes !== 1) return
     const check: PendingCheck = { attempt: 0, running: false, claimToken }
     this.pending.set(sessionId, check)
     return check
+  }
+
+  private claimDistinctAbort(sessionId: string, member: AbortMember, eventId: string): void {
+    const claimToken = generateId("abort")
+    const claimed = this.db.run(
+      `UPDATE team_member SET abort_recovery_event_id = ?, abort_recovery_claim_token = ?,
+          abort_recovery_claim_expires_at = ?, time_updated = ?
+       WHERE team_id = ? AND name = ? AND session_id = ? AND abort_recovery_state = 'checking'
+         AND abort_recovery_event_id = ? AND abort_recovery_claim_token IS ?
+         AND status IN ('ready', 'busy')
+         AND execution_status IN ('idle', 'starting', 'running')`,
+      [eventId, claimToken, this.inspectionClaimExpiry(), Date.now(), member.team_id, member.name, sessionId,
+        member.abort_recovery_event_id, member.abort_recovery_claim_token],
+    )
+    if (claimed.changes !== 1) return
+
+    const previous = this.pending.get(sessionId)
+    if (previous?.timer) clearTimeout(previous.timer)
+    this.pending.set(sessionId, { attempt: 0, running: false, claimToken })
+    this.failClosed(sessionId, claimToken, "a distinct abort arrived while recovery inspection was already active")
   }
 
   private lookupEligibleMember(sessionId: string): AbortMember | undefined {
