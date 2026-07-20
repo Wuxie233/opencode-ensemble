@@ -395,6 +395,89 @@ describe("team_cleanup", () => {
     expect((deps.db.query("SELECT status FROM team WHERE id = 't1'").get() as { status: string }).status).toBe("active")
   })
 
+  test("force cleanup refreshes a legacy preserved branch from its live worktree before aborting", async () => {
+    insertMember(deps.db, "t1", "alice", "sess-alice", "busy", "running")
+    const preservedBranch = "ensemble/preserved/test-project/my-team#t1/alice"
+    deps.db.run(
+      "UPDATE team_member SET worktree_dir = ?, worktree_branch = ? WHERE name = 'alice'",
+      ["/tmp/wt-alice", preservedBranch],
+    )
+
+    const calls: string[] = []
+    const preserve = async (source: string, target: string) => {
+      calls.push(`preserve:${source}:${target}`)
+      return true
+    }
+    deps.client.session.abort = async () => {
+      calls.push("abort")
+      return {}
+    }
+
+    const result = await executeTeamCleanup(
+      deps,
+      { force: true },
+      "lead-sess",
+      undefined,
+      noopMerge,
+      noopDelete,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      preserve,
+      async worktreeDir => {
+        expect(worktreeDir).toBe("/tmp/wt-alice")
+        return "ensemble-my-team-alice"
+      },
+    )
+
+    expect(result).toContain("cleaned up")
+    expect(calls).toEqual([
+      `preserve:ensemble-my-team-alice:${preservedBranch}`,
+      "abort",
+    ])
+  })
+
+  test("force cleanup blocks abort and retains ownership when a legacy live branch cannot be resolved", async () => {
+    insertMember(deps.db, "t1", "alice", "sess-alice", "busy", "running")
+    const preservedBranch = "ensemble/preserved/test-project/my-team#t1/alice"
+    deps.db.run(
+      "UPDATE team_member SET worktree_dir = ?, worktree_branch = ? WHERE name = 'alice'",
+      ["/tmp/wt-alice", preservedBranch],
+    )
+
+    await expect(executeTeamCleanup(
+      deps,
+      { force: true },
+      "lead-sess",
+      undefined,
+      noopMerge,
+      noopDelete,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      async () => true,
+      async () => null,
+    )).rejects.toThrow("failed to resolve the live branch")
+
+    expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
+    const member = deps.db.query("SELECT status, execution_status, worktree_branch FROM team_member WHERE name = 'alice'")
+      .get() as { status: string; execution_status: string; worktree_branch: string }
+    expect(member).toEqual({ status: "busy", execution_status: "running", worktree_branch: preservedBranch })
+    expect((deps.db.query("SELECT status FROM team WHERE id = 't1'").get() as { status: string }).status).toBe("active")
+
+    const alert = deps.db.query(
+      "SELECT content, delivered FROM team_message WHERE team_id = 't1' AND from_name = 'system' AND to_name = 'lead'",
+    ).get() as { content: string; delivered: number }
+    expect(alert.delivered).toBe(0)
+    expect(alert.content).toContain("live source branch could not be resolved")
+    expect(alert.content).toContain("/tmp/wt-alice")
+    expect(alert.content).toContain("No sessions were aborted")
+  })
+
   test("rejects if caller is not the lead", async () => {
     insertMember(deps.db, "t1", "alice", "sess-alice", "shutdown", "idle")
     deps.registry.register("t1", "alice", "sess-alice")

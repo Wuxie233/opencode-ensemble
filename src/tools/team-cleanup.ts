@@ -2,8 +2,8 @@ import type { ToolDeps } from "../types"
 import { requireLead, requireCanPurgeArchivedTeams, checkWorktreeDirty } from "./shared"
 import type { IsDirtyFn } from "./shared"
 import { spawnFailures } from "./team-spawn"
-import { getTeamResourceParts, mergeBranch, deleteBranch, preserveBranch, preservedBranchName, getOverlappingFiles, teamResourceSegment } from "./merge-helper"
-import type { MergeBranchFn, DeleteBranchFn, PreserveBranchFn, OverlapCheckFn } from "./merge-helper"
+import { getTeamResourceParts, mergeBranch, deleteBranch, preserveBranch, preservedBranchName, getOverlappingFiles, resolveWorktreeBranch, teamResourceSegment } from "./merge-helper"
+import type { MergeBranchFn, DeleteBranchFn, PreserveBranchFn, ResolveWorktreeBranchFn, OverlapCheckFn } from "./merge-helper"
 import { log } from "../log"
 import { runCommand } from "../process"
 import { sendLeadAlert } from "../messaging"
@@ -417,6 +417,7 @@ export async function executeTeamCleanup(
   _listBranches?: ListBranchesFn,
   _branchExists?: BranchExistsFn,
   preserve: PreserveBranchFn = preserveBranch,
+  resolveBranch: ResolveWorktreeBranchFn = resolveWorktreeBranch,
 ): Promise<string> {
   if (args.purge && args.purge.length > 0) {
     requireCanPurgeArchivedTeams(deps, sessionId)
@@ -489,17 +490,35 @@ export async function executeTeamCleanup(
   if (args.force) {
     const preserved = new Map<string, string>()
     for (const member of abortable) {
-      if (!member.worktree_branch || member.worktree_branch.startsWith("ensemble/preserved/")) continue
+      if (!member.worktree_branch) continue
+      let sourceBranch = member.worktree_branch
+      if (sourceBranch.startsWith("ensemble/preserved/")) {
+        if (!member.worktree_dir) continue
+        try {
+          sourceBranch = await resolveBranch(member.worktree_dir) ?? ""
+        } catch (error) {
+          log(`cleanup:branch:resolve-failed name=${member.name} err=${error instanceof Error ? error.message : String(error)}`)
+          sourceBranch = ""
+        }
+        if (!sourceBranch || sourceBranch.startsWith("ensemble/preserved/")) {
+          sendLeadAlert(deps.db, deps.client, {
+            teamId: teamInfo.teamId,
+            content: `Force cleanup for team "${teamInfo.teamName}" was blocked because ${member.name}'s live source branch could not be resolved from worktree ${member.worktree_dir}. No sessions were aborted and the team remains active. Inspect the worktree and retry force cleanup.`,
+            wakeText: `[System: Force cleanup for ${teamInfo.teamName} could not resolve ${member.name}'s live worktree branch; guidance is available in team messages]`,
+          })
+          throw new Error(`Cannot clean up team "${teamInfo.teamName}": failed to resolve the live branch for ${member.name} from ${member.worktree_dir}. No sessions were aborted; retry after resolving the worktree branch.`)
+        }
+      }
       const resource = getTeamResourceParts(deps.db, teamInfo.teamId)
       const safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, member.name)
-      const ok = await preserve(member.worktree_branch, safeBranch, deps.directory)
+      const ok = await preserve(sourceBranch, safeBranch, deps.directory)
       if (!ok) {
         sendLeadAlert(deps.db, deps.client, {
           teamId: teamInfo.teamId,
-          content: `Force cleanup for team "${teamInfo.teamName}" was blocked because ${member.name}'s branch ${member.worktree_branch} could not be preserved. No sessions were aborted and the team remains active.`,
+          content: `Force cleanup for team "${teamInfo.teamName}" was blocked because ${member.name}'s branch ${sourceBranch} could not be preserved. No sessions were aborted and the team remains active.`,
           wakeText: `[System: Force cleanup for ${teamInfo.teamName} was blocked by branch preservation failure; guidance is available in team messages]`,
         })
-        throw new Error(`Cannot clean up team "${teamInfo.teamName}": failed to preserve ${member.name}'s branch ${member.worktree_branch}. No sessions were aborted; retry after resolving the branch.`)
+        throw new Error(`Cannot clean up team "${teamInfo.teamName}": failed to preserve ${member.name}'s branch ${sourceBranch}. No sessions were aborted; retry after resolving the branch.`)
       }
       preserved.set(member.name, safeBranch)
     }
