@@ -113,6 +113,11 @@ export interface StatusTransition {
   to: string
 }
 
+/** Return whether shutdown is terminal enough to discard liveness tracking. */
+export function shouldReleaseShutdownTracking(status: string): boolean {
+  return status === "shutdown"
+}
+
 /**
  * Handle a session.status event. Updates member status and execution_status
  * in SQLite based on the new session status.
@@ -140,7 +145,8 @@ export function handleSessionStatusEvent(
   if (status === "idle" && member.abort_recovery_state === "checking") return undefined
 
   if (status === "idle") {
-    const newStatus = member.status === "shutdown_requested" ? "shutdown" : "ready"
+    if (member.status === "shutdown_requested") return undefined
+    const newStatus = "ready"
     if (member.status === newStatus) return undefined
     db.run(
       "UPDATE team_member SET status = ?, execution_status = 'idle', time_updated = ? WHERE team_id = ? AND name = ?",

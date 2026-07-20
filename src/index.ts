@@ -8,7 +8,7 @@ import { wrapThrowingClient } from "./client"
 import { recoverStaleMembers, recoverUndeliveredMessages, recoverOrphanedWorktrees, recoverOrphanedBranches, rehydrateRegistry } from "./recovery"
 import { MemberRegistry, DescendantTracker, PendingPurgeApprovals } from "./state"
 import { isWorktreeInstance } from "./util"
-import { handleSessionStatusEvent, handleSessionCreatedEvent, checkToolIsolation, shouldNudgeIdleMember, handleSessionErrorEvent, RetryTracker } from "./hooks"
+import { handleSessionStatusEvent, handleSessionCreatedEvent, checkToolIsolation, shouldNudgeIdleMember, handleSessionErrorEvent, RetryTracker, shouldReleaseShutdownTracking } from "./hooks"
 import { notifyTeamEvent, notifyWorkingProgress } from "./notify"
 import { sendLeadAlert, hasReportedCompletion, flushPendingPeerMessage, releasePendingPeerDelivery } from "./messaging"
 import { buildLeadSystemPrompt, buildTeammateSystemPrompt, buildTeamCompactionContext } from "./system-prompt"
@@ -533,9 +533,8 @@ const plugin: Plugin = async (input) => {
         },
         async execute(args, ctx) {
           const result = await executeTeamShutdown(deps, args, ctx.sessionID)
-          // Clean up progress tracking for the shut-down member
-          const member = deps.db.query("SELECT session_id FROM team_member WHERE name = ? AND status IN ('shutdown', 'shutdown_requested')").get(args.member) as { session_id: string } | null
-          if (member) {
+          const member = deps.db.query("SELECT session_id, status FROM team_member WHERE name = ?").get(args.member) as { session_id: string; status: string } | null
+          if (member && shouldReleaseShutdownTracking(member.status)) {
             progressTracker.remove(member.session_id)
             activityBuffer.remove(member.session_id)
           }

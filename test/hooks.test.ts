@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach } from "bun:test"
 import { Database } from "bun:sqlite"
 import { applyMigrations } from "../src/schema"
 import { MemberRegistry, DescendantTracker } from "../src/state"
-import { handleSessionStatusEvent, handleSessionCreatedEvent, checkToolIsolation, shouldNudgeIdleMember, handleSessionErrorEvent, RetryTracker } from "../src/hooks"
+import { handleSessionStatusEvent, handleSessionCreatedEvent, checkToolIsolation, shouldNudgeIdleMember, handleSessionErrorEvent, RetryTracker, shouldReleaseShutdownTracking } from "../src/hooks"
 import { buildLeadSystemPrompt, buildTeammateSystemPrompt, buildTeamCompactionContext } from "../src/system-prompt"
 import { findTeamBySession } from "../src/types"
 import { sendMessage } from "../src/messaging"
@@ -50,16 +50,17 @@ describe("handleSessionStatusEvent", () => {
     expect(row.execution_status).toBe("idle")
   })
 
-  test("transitions shutdown_requested member to shutdown when session becomes idle", () => {
+  test("keeps shutdown_requested member nonterminal when session becomes idle", () => {
     insertTeam(db, "t1", "my-team", "lead-sess")
     insertMember(db, "t1", "alice", "sess-1", "shutdown_requested", "running")
     registry.register("t1", "alice", "sess-1")
 
-    handleSessionStatusEvent(db, registry, "sess-1", "idle")
+    const result = handleSessionStatusEvent(db, registry, "sess-1", "idle")
 
     const row = db.query("SELECT status, execution_status FROM team_member WHERE session_id = ?").get("sess-1") as Record<string, string>
-    expect(row.status).toBe("shutdown")
-    expect(row.execution_status).toBe("idle")
+    expect(row.status).toBe("shutdown_requested")
+    expect(row.execution_status).toBe("running")
+    expect(result).toBeUndefined()
   })
 
   test("transitions ready member to busy when session becomes busy", () => {
@@ -219,19 +220,14 @@ describe("handleSessionStatusEvent", () => {
     })
   })
 
-  test("returns StatusTransition with shutdown on idle when shutdown_requested", () => {
+  test("does not report shutdown transition from an idle event alone", () => {
     insertTeam(db, "t1", "my-team", "lead-sess")
     insertMember(db, "t1", "alice", "sess-1", "shutdown_requested", "running")
     registry.register("t1", "alice", "sess-1")
 
     const result = handleSessionStatusEvent(db, registry, "sess-1", "idle")
 
-    expect(result).toEqual({
-      memberName: "alice",
-      teamId: "t1",
-      from: "shutdown_requested",
-      to: "shutdown",
-    })
+    expect(result).toBeUndefined()
   })
 
   test("returns undefined for unknown sessions", () => {
@@ -246,6 +242,15 @@ describe("handleSessionStatusEvent", () => {
 
     const result = handleSessionStatusEvent(db, registry, "sess-1", "idle")
     expect(result).toBeUndefined()
+  })
+})
+
+describe("shouldReleaseShutdownTracking", () => {
+  test("releases tracking only after shutdown is terminal", () => {
+    expect(shouldReleaseShutdownTracking("shutdown")).toBe(true)
+    expect(shouldReleaseShutdownTracking("shutdown_requested")).toBe(false)
+    expect(shouldReleaseShutdownTracking("busy")).toBe(false)
+    expect(shouldReleaseShutdownTracking("error")).toBe(false)
   })
 })
 
