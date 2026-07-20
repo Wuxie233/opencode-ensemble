@@ -156,7 +156,10 @@ The only terminal-error recovery exception is a one-shot unexpected
 `MessageAbortedError` whose exact persisted assistant turn has zero tool parts.
 Require an active, incomplete teammate with no completion report, keep the
 member/task active, and send one silent recovery prompt that first inspects
-actual state. Persist the recovery claim across plugin instances. A second
+actual state. Persist an owner-token lease for both inspection and asynchronous
+prompt delivery across plugin instances; only the current owner may prompt or
+fail closed, disposal must settle locally owned claims, and an unsettled prompt
+must expire into normal terminal handling. A second
 abort, ambiguous history, any tool part, shutdown/completion race, inspection
 failure, or recovery-prompt failure must fail closed through the normal Lead
 alert and task-release path.

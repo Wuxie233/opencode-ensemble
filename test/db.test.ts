@@ -44,6 +44,8 @@ describe("schema migrations", () => {
     expect(columns.some(column => column.name === "abort_recovery_message_id")).toBe(true)
     expect(columns.some(column => column.name === "abort_recovery_event_id")).toBe(true)
     expect(columns.some(column => column.name === "abort_recovery_started_at")).toBe(true)
+    expect(columns.some(column => column.name === "abort_recovery_claim_token")).toBe(true)
+    expect(columns.some(column => column.name === "abort_recovery_claim_expires_at")).toBe(true)
   })
 
   test("creates team_task table", () => {

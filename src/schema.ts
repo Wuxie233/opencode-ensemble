@@ -191,9 +191,12 @@ export const MIGRATIONS: string[] = [
   // Migration 10: Durable cross-instance state for one-shot unexpected abort recovery.
   `ALTER TABLE team_member ADD COLUMN abort_recovery_state TEXT NOT NULL DEFAULT 'none'
      CHECK(abort_recovery_state IN ('none', 'checking', 'prompted', 'consumed'));
-   ALTER TABLE team_member ADD COLUMN abort_recovery_message_id TEXT;
-   ALTER TABLE team_member ADD COLUMN abort_recovery_event_id TEXT;
-   ALTER TABLE team_member ADD COLUMN abort_recovery_started_at INTEGER;`,
+    ALTER TABLE team_member ADD COLUMN abort_recovery_message_id TEXT;
+    ALTER TABLE team_member ADD COLUMN abort_recovery_event_id TEXT;
+    ALTER TABLE team_member ADD COLUMN abort_recovery_started_at INTEGER;`,
+  // Migration 11: Identify the instance that owns an abort inspection or prompt lease.
+  `ALTER TABLE team_member ADD COLUMN abort_recovery_claim_token TEXT;
+   ALTER TABLE team_member ADD COLUMN abort_recovery_claim_expires_at INTEGER;`,
 ]
 
 /**

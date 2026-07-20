@@ -79,6 +79,21 @@ describe("SafeAbortRecovery", () => {
     expect(client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(1)
   })
 
+  test("treats concurrent abort events without SDK event IDs as the same recoverable turn", async () => {
+    client.session.messages = async () => ({ data: [abortedMessage()] })
+    const first = coordinator()
+    const second = coordinator()
+
+    expect(first.handleSessionError("scout-sess", ABORT_ERROR)).toBe(true)
+    expect(second.handleSessionError("scout-sess", ABORT_ERROR)).toBe(true)
+    await settle()
+
+    expect(client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(1)
+    expect(terminalAlerts).toEqual([])
+    expect(db.query("SELECT status, execution_status, abort_recovery_state FROM team_member WHERE session_id = ?").get("scout-sess"))
+      .toEqual({ status: "busy", execution_status: "running", abort_recovery_state: "prompted" })
+  })
+
   test("ignores a duplicate event for the same failed message without consuming another recovery", async () => {
     client.session.messages = async () => ({ data: [abortedMessage()] })
     const recovery = coordinator()
@@ -262,6 +277,28 @@ describe("SafeAbortRecovery", () => {
     expect(client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(1)
   })
 
+  test("does not let a stale inspector fail closed a row another instance already prompted", async () => {
+    let rejectOwner: ((reason: Error) => void) | undefined
+    const ownerClient = mockClient()
+    ownerClient.session.messages = () => new Promise((_resolve, reject) => { rejectOwner = reject })
+    const observerClient = mockClient()
+    observerClient.session.messages = async () => ({ data: [abortedMessage()] })
+    const owner = new SafeAbortRecovery({ db, registry, client: ownerClient, retryDelaysMs: [1000], onTerminal: alert => terminalAlerts.push(alert) })
+    const observer = new SafeAbortRecovery({ db, registry, client: observerClient, retryDelaysMs: [0], onTerminal: alert => terminalAlerts.push(alert) })
+    owner.handleSessionError("scout-sess", ABORT_ERROR)
+    await Bun.sleep(2)
+
+    observer.observeMessage("scout-sess")
+    await settle()
+    rejectOwner?.(new Error("stale transport failed"))
+    await settle()
+
+    expect(observerClient.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(1)
+    expect(terminalAlerts).toEqual([])
+    expect(db.query("SELECT status, execution_status, abort_recovery_state FROM team_member WHERE session_id = ?").get("scout-sess"))
+      .toEqual({ status: "busy", execution_status: "running", abort_recovery_state: "prompted" })
+  })
+
   test("dispose clears retries and prevents late prompt delivery", async () => {
     let resolveMessages: ((value: { data: ReturnType<typeof abortedMessage>[] }) => void) | undefined
     client.session.messages = () => new Promise(resolve => { resolveMessages = resolve })
@@ -273,9 +310,63 @@ describe("SafeAbortRecovery", () => {
 
     expect(client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(0)
   })
+
+  test("dispose fails closed a locally owned checking claim instead of stranding it", async () => {
+    client.session.messages = () => new Promise(() => {})
+    const recovery = coordinator()
+    recovery.handleSessionError("scout-sess", ABORT_ERROR)
+
+    recovery.dispose()
+    await settle()
+
+    expect(terminalAlerts).toEqual([{ leadSessionId: "lead-sess", memberName: "scout" }])
+    expect(db.query("SELECT status, execution_status, abort_recovery_state FROM team_member WHERE session_id = ?").get("scout-sess"))
+      .toEqual({ status: "error", execution_status: "failed", abort_recovery_state: "consumed" })
+  })
+
+  test("fails closed durably when fire-and-forget recovery prompting never settles", async () => {
+    client.session.messages = async () => ({ data: [abortedMessage()] })
+    client.session.promptAsync = options => {
+      client.calls.push({ method: "session.promptAsync", args: [options] })
+      return new Promise(() => {})
+    }
+    const recovery = new SafeAbortRecovery({
+      db,
+      registry,
+      client,
+      retryDelaysMs: [0],
+      apiTimeoutMs: 2,
+      promptTimeoutMs: 2,
+      onTerminal: alert => terminalAlerts.push(alert),
+    })
+
+    recovery.handleSessionError("scout-sess", ABORT_ERROR)
+    await settle()
+
+    expect(client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(1)
+    expect(terminalAlerts).toEqual([{ leadSessionId: "lead-sess", memberName: "scout" }])
+    expect(db.query("SELECT status, execution_status, abort_recovery_state, abort_recovery_started_at FROM team_member WHERE session_id = ?").get("scout-sess"))
+      .toEqual({ status: "error", execution_status: "failed", abort_recovery_state: "consumed", abort_recovery_started_at: null })
+  })
 })
 
 describe("recoverStaleAbortChecks", () => {
+  test("does not consume an unexpired claim owned by another live instance", () => {
+    const db = setupDb()
+    const registry = new MemberRegistry()
+    insertTeam(db, "t1", "smoke", "lead-sess")
+    insertMember(db, "t1", "scout", "scout-sess", "busy", "running")
+    db.run(
+      `UPDATE team_member SET abort_recovery_state = 'prompted', abort_recovery_claim_token = ?,
+         abort_recovery_claim_expires_at = ? WHERE session_id = ?`,
+      ["live-owner", Date.now() + 60_000, "scout-sess"],
+    )
+
+    expect(recoverStaleAbortChecks(db, registry)).toEqual([])
+    expect(db.query("SELECT status, abort_recovery_state FROM team_member WHERE session_id = ?").get("scout-sess"))
+      .toEqual({ status: "busy", abort_recovery_state: "prompted" })
+  })
+
   test("fails closed a checking claim left behind by a crashed instance", () => {
     const db = setupDb()
     const registry = new MemberRegistry()
@@ -287,6 +378,22 @@ describe("recoverStaleAbortChecks", () => {
 
     expect(alerts).toEqual([{ leadSessionId: "lead-sess", memberName: "scout" }])
     expect((db.query("SELECT status, abort_recovery_state FROM team_member WHERE session_id = ?").get("scout-sess")))
+      .toEqual({ status: "error", abort_recovery_state: "consumed" })
+  })
+
+  test("fails closed an expired prompted delivery lease", () => {
+    const db = setupDb()
+    const registry = new MemberRegistry()
+    insertTeam(db, "t1", "smoke", "lead-sess")
+    insertMember(db, "t1", "scout", "scout-sess", "busy", "running")
+    db.run(
+      `UPDATE team_member SET abort_recovery_state = 'prompted', abort_recovery_claim_token = ?,
+         abort_recovery_claim_expires_at = ? WHERE session_id = ?`,
+      ["expired-owner", Date.now() - 1, "scout-sess"],
+    )
+
+    expect(recoverStaleAbortChecks(db, registry)).toEqual([{ leadSessionId: "lead-sess", memberName: "scout" }])
+    expect(db.query("SELECT status, abort_recovery_state FROM team_member WHERE session_id = ?").get("scout-sess"))
       .toEqual({ status: "error", abort_recovery_state: "consumed" })
   })
 })

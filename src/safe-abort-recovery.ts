@@ -3,10 +3,12 @@ import { handleSessionErrorEvent, type SessionErrorAlert, type SessionErrorPaylo
 import { log } from "./log"
 import type { MemberRegistry } from "./state"
 import type { PluginClient } from "./types"
+import { generateId } from "./util"
 
 const ABORT_ERROR_NAME = "MessageAbortedError"
 const DEFAULT_RETRY_DELAYS_MS = [50, 150, 350]
 const DEFAULT_API_TIMEOUT_MS = 1_000
+const DEFAULT_PROMPT_TIMEOUT_MS = 5_000
 const RECOVERY_PROMPT = "[System: Your previous turn was unexpectedly aborted before any tool call. inspect the actual repository, task board, team messages, and current state before continuing. avoid repeating completed actions. Continue only the remaining work, then report the result to the lead via team_message.]"
 
 interface AbortMember {
@@ -18,6 +20,7 @@ interface AbortMember {
   abort_recovery_state: "none" | "checking" | "prompted" | "consumed"
   abort_recovery_message_id: string | null
   abort_recovery_event_id: string | null
+  abort_recovery_claim_token: string | null
 }
 
 interface MessageInfo {
@@ -38,12 +41,14 @@ interface SafeAbortRecoveryOptions {
   client: PluginClient
   retryDelaysMs?: number[]
   apiTimeoutMs?: number
+  promptTimeoutMs?: number
   onTerminal?: (alert: SessionErrorAlert) => void
 }
 
 interface PendingCheck {
   attempt: number
   running: boolean
+  claimToken: string
   timer?: ReturnType<typeof setTimeout>
 }
 
@@ -54,6 +59,7 @@ export class SafeAbortRecovery {
   private readonly client: PluginClient
   private readonly retryDelaysMs: number[]
   private readonly apiTimeoutMs: number
+  private readonly promptTimeoutMs: number
   private readonly onTerminal: (alert: SessionErrorAlert) => void
   private readonly pending = new Map<string, PendingCheck>()
   private disposed = false
@@ -64,6 +70,7 @@ export class SafeAbortRecovery {
     this.client = options.client
     this.retryDelaysMs = options.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS
     this.apiTimeoutMs = options.apiTimeoutMs ?? DEFAULT_API_TIMEOUT_MS
+    this.promptTimeoutMs = options.promptTimeoutMs ?? DEFAULT_PROMPT_TIMEOUT_MS
     this.onTerminal = options.onTerminal ?? (() => {})
   }
 
@@ -76,22 +83,27 @@ export class SafeAbortRecovery {
     if (member.abort_recovery_state === "consumed") return false
     if (eventId && member.abort_recovery_event_id === eventId) return true
     if (member.abort_recovery_state === "checking") {
-      this.failClosed(sessionId, "a distinct abort arrived while recovery inspection was already active")
+      const check = this.pending.get(sessionId)
+      if (eventId && member.abort_recovery_event_id && eventId !== member.abort_recovery_event_id && check) {
+        this.failClosed(sessionId, check.claimToken, "a distinct abort arrived while recovery inspection was already active")
+      }
       return true
     }
     if (member.abort_recovery_state === "prompted" && !eventId) return false
 
+    const claimToken = generateId("abort")
     const claimed = this.db.run(
       `UPDATE team_member
-       SET abort_recovery_state = 'checking', abort_recovery_event_id = ?, abort_recovery_started_at = ?, time_updated = ?
+       SET abort_recovery_state = 'checking', abort_recovery_event_id = ?, abort_recovery_started_at = ?,
+           abort_recovery_claim_token = ?, abort_recovery_claim_expires_at = ?, time_updated = ?
        WHERE team_id = ? AND name = ? AND session_id = ? AND abort_recovery_state = ?
           AND status IN ('ready', 'busy')
           AND execution_status IN ('idle', 'starting', 'running')`,
-      [eventId ?? null, Date.now(), Date.now(), member.team_id, member.name, sessionId, member.abort_recovery_state],
+      [eventId ?? null, Date.now(), claimToken, this.inspectionClaimExpiry(), Date.now(), member.team_id, member.name, sessionId, member.abort_recovery_state],
     )
     if (claimed.changes !== 1) return true
 
-    this.pending.set(sessionId, { attempt: 0, running: false })
+    this.pending.set(sessionId, { attempt: 0, running: false, claimToken })
     void this.inspect(sessionId)
     return true
   }
@@ -116,19 +128,23 @@ export class SafeAbortRecovery {
   /** Stop task-owned timers and prevent in-flight checks from prompting after plugin disposal. */
   dispose(): void {
     if (this.disposed) return
-    this.disposed = true
-    for (const check of this.pending.values()) {
+    for (const [sessionId, check] of this.pending) {
       if (check.timer) clearTimeout(check.timer)
+      this.failClosed(sessionId, check.claimToken, "the recovery owner was disposed before recovery completed")
     }
+    this.disposed = true
     this.pending.clear()
   }
 
   private resumeDurableCheck(sessionId: string): PendingCheck | undefined {
-    const row = this.db.query(
-      "SELECT 1 AS found FROM team_member WHERE session_id = ? AND abort_recovery_state = 'checking'",
-    ).get(sessionId)
-    if (!row) return
-    const check: PendingCheck = { attempt: 0, running: false }
+    const claimToken = generateId("abort")
+    const claimed = this.db.run(
+      `UPDATE team_member SET abort_recovery_claim_token = ?, abort_recovery_claim_expires_at = ?, time_updated = ?
+       WHERE session_id = ? AND abort_recovery_state = 'checking'`,
+      [claimToken, this.inspectionClaimExpiry(), Date.now(), sessionId],
+    )
+    if (claimed.changes !== 1) return
+    const check: PendingCheck = { attempt: 0, running: false, claimToken }
     this.pending.set(sessionId, check)
     return check
   }
@@ -136,7 +152,8 @@ export class SafeAbortRecovery {
   private lookupEligibleMember(sessionId: string): AbortMember | undefined {
     const member = this.db.query(
       `SELECT tm.team_id, tm.name, tm.status, tm.execution_status, tm.reported_to_lead,
-              tm.abort_recovery_state, tm.abort_recovery_message_id, tm.abort_recovery_event_id
+               tm.abort_recovery_state, tm.abort_recovery_message_id, tm.abort_recovery_event_id,
+               tm.abort_recovery_claim_token
        FROM team_member tm
        JOIN team t ON t.id = tm.team_id
        WHERE tm.session_id = ? AND t.status = 'active'
@@ -165,8 +182,9 @@ export class SafeAbortRecovery {
       const response = await this.withTimeout(this.client.session.messages({ sessionID: sessionId, limit: 20 }))
       if (this.disposed) return
       const memberState = this.db.query(
-        "SELECT abort_recovery_message_id FROM team_member WHERE session_id = ? AND abort_recovery_state = 'checking'",
-      ).get(sessionId) as { abort_recovery_message_id: string | null } | null
+        `SELECT abort_recovery_message_id FROM team_member
+         WHERE session_id = ? AND abort_recovery_state = 'checking' AND abort_recovery_claim_token = ?`,
+      ).get(sessionId, check.claimToken) as { abort_recovery_message_id: string | null } | null
       if (!memberState) {
         this.pending.delete(sessionId)
         return
@@ -177,19 +195,20 @@ export class SafeAbortRecovery {
         return
       }
       if (inspected.kind === "unsafe") {
-        this.failClosed(sessionId, inspected.reason)
+        this.failClosed(sessionId, check.claimToken, inspected.reason)
         return
       }
 
       if (memberState.abort_recovery_message_id) {
-        this.failClosed(sessionId, "a distinct second aborted turn was observed")
+        this.failClosed(sessionId, check.claimToken, "a distinct second aborted turn was observed")
         return
       }
 
       const prompted = this.db.run(
         `UPDATE team_member SET abort_recovery_state = 'prompted', abort_recovery_message_id = ?,
-           abort_recovery_started_at = NULL, time_updated = ?
+            abort_recovery_started_at = ?, abort_recovery_claim_expires_at = ?, time_updated = ?
          WHERE session_id = ? AND abort_recovery_state = 'checking' AND abort_recovery_message_id IS NULL
+            AND abort_recovery_claim_token = ?
            AND status IN ('ready', 'busy')
            AND execution_status IN ('idle', 'starting', 'running')
            AND reported_to_lead = 0
@@ -204,26 +223,26 @@ export class SafeAbortRecovery {
              WHERE task.team_id = team_member.team_id AND task.assignee = team_member.name
                AND task.status = 'completed'
            )`,
-        [inspected.messageId, Date.now(), sessionId],
+        [inspected.messageId, Date.now(), Date.now() + this.promptTimeoutMs, Date.now(), sessionId, check.claimToken],
       )
       if (prompted.changes !== 1) {
-        this.db.run(
-          "UPDATE team_member SET abort_recovery_state = 'consumed', abort_recovery_started_at = NULL WHERE session_id = ? AND abort_recovery_state = 'checking'",
-          [sessionId],
-        )
         this.pending.delete(sessionId)
         return
       }
-      this.pending.delete(sessionId)
       if (this.disposed) return
+      check.timer = setTimeout(() => {
+        check.timer = undefined
+        this.failClosed(sessionId, check.claimToken, "recovery prompt delivery timed out")
+      }, this.promptTimeoutMs)
       this.client.session.promptAsync({
         sessionID: sessionId,
         parts: [{ type: "text", text: RECOVERY_PROMPT }],
-      }).catch(error => {
-        this.failClosed(sessionId, `recovery prompt failed: ${error instanceof Error ? error.message : String(error)}`)
-      })
+      }).then(
+        () => this.finishPrompt(sessionId, check.claimToken),
+        error => this.failClosed(sessionId, check.claimToken, `recovery prompt failed: ${error instanceof Error ? error.message : String(error)}`),
+      )
     } catch (error) {
-      this.failClosed(sessionId, `message inspection failed: ${error instanceof Error ? error.message : String(error)}`)
+      this.failClosed(sessionId, check.claimToken, `message inspection failed: ${error instanceof Error ? error.message : String(error)}`)
     } finally {
       const current = this.pending.get(sessionId)
       if (current) current.running = false
@@ -233,7 +252,7 @@ export class SafeAbortRecovery {
   private retry(sessionId: string, check: PendingCheck): void {
     const delay = this.retryDelaysMs[check.attempt]
     if (delay === undefined) {
-      this.failClosed(sessionId, "the aborted assistant turn could not be identified before inspection timed out")
+      this.failClosed(sessionId, check.claimToken, "the aborted assistant turn could not be identified before inspection timed out")
       return
     }
     check.attempt += 1
@@ -244,21 +263,42 @@ export class SafeAbortRecovery {
     }, delay)
   }
 
-  private failClosed(sessionId: string, reason: string): void {
+  private finishPrompt(sessionId: string, claimToken: string): void {
     if (this.disposed) return
     const check = this.pending.get(sessionId)
     if (check?.timer) clearTimeout(check.timer)
     this.pending.delete(sessionId)
     this.db.run(
-      "UPDATE team_member SET abort_recovery_state = 'consumed', abort_recovery_started_at = NULL WHERE session_id = ?",
-      [sessionId],
+      `UPDATE team_member SET abort_recovery_started_at = NULL, abort_recovery_claim_token = NULL,
+          abort_recovery_claim_expires_at = NULL, time_updated = ?
+       WHERE session_id = ? AND abort_recovery_state = 'prompted' AND abort_recovery_claim_token = ?`,
+      [Date.now(), sessionId, claimToken],
     )
+  }
+
+  private failClosed(sessionId: string, claimToken: string, reason: string): void {
+    if (this.disposed) return
+    const check = this.pending.get(sessionId)
+    if (check?.timer) clearTimeout(check.timer)
+    this.pending.delete(sessionId)
+    const claimed = this.db.run(
+      `UPDATE team_member SET abort_recovery_state = 'consumed', abort_recovery_started_at = NULL,
+          abort_recovery_claim_token = NULL, abort_recovery_claim_expires_at = NULL, time_updated = ?
+       WHERE session_id = ? AND abort_recovery_state IN ('checking', 'prompted') AND abort_recovery_claim_token = ?`,
+      [Date.now(), sessionId, claimToken],
+    )
+    if (claimed.changes !== 1) return
     log(`safe-abort:fail-closed session=${sessionId} reason=${reason}`)
     const alert = handleSessionErrorEvent(this.db, this.registry, sessionId, {
       name: ABORT_ERROR_NAME,
       data: { message: `Aborted; automatic recovery was not safe: ${reason}` },
     })
     if (alert) this.onTerminal(alert)
+  }
+
+  private inspectionClaimExpiry(): number {
+    const retryWindow = this.retryDelaysMs.reduce((total, delay) => total + delay + this.apiTimeoutMs, this.apiTimeoutMs)
+    return Date.now() + retryWindow
   }
 
   private async withTimeout<T>(promise: Promise<T>): Promise<T> {
@@ -313,15 +353,22 @@ function inspectNewestTerminalTurn(messages: SessionMessage[] | undefined, previ
 
 /** Fail closed any abort inspection claims left behind by a crashed plugin instance. */
 export function recoverStaleAbortChecks(db: Database, registry: MemberRegistry): SessionErrorAlert[] {
+  const now = Date.now()
   const rows = db.query(
-    `SELECT session_id FROM team_member tm
+    `SELECT session_id, abort_recovery_claim_token FROM team_member tm
      JOIN team t ON t.id = tm.team_id
-     WHERE t.status = 'active' AND tm.status IN ('ready', 'busy') AND tm.abort_recovery_state = 'checking'`,
-  ).all() as Array<{ session_id: string }>
+     WHERE t.status = 'active' AND tm.status IN ('ready', 'busy')
+       AND tm.abort_recovery_state IN ('checking', 'prompted')
+       AND (tm.abort_recovery_claim_expires_at IS NULL OR tm.abort_recovery_claim_expires_at <= ?)`,
+  ).all(now) as Array<{ session_id: string; abort_recovery_claim_token: string | null }>
   return rows.flatMap(row => {
     const claimed = db.run(
-      "UPDATE team_member SET abort_recovery_state = 'consumed', abort_recovery_started_at = NULL WHERE session_id = ? AND abort_recovery_state = 'checking'",
-      [row.session_id],
+      `UPDATE team_member SET abort_recovery_state = 'consumed', abort_recovery_started_at = NULL,
+          abort_recovery_claim_token = NULL, abort_recovery_claim_expires_at = NULL
+       WHERE session_id = ? AND abort_recovery_state IN ('checking', 'prompted')
+         AND abort_recovery_claim_token IS ?
+         AND (abort_recovery_claim_expires_at IS NULL OR abort_recovery_claim_expires_at <= ?)`,
+      [row.session_id, row.abort_recovery_claim_token, now],
     )
     if (claimed.changes !== 1) return []
     const alert = handleSessionErrorEvent(db, registry, row.session_id, {
