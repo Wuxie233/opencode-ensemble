@@ -493,7 +493,14 @@ export async function executeTeamCleanup(
       if (!member.worktree_branch) continue
       let sourceBranch = member.worktree_branch
       if (sourceBranch.startsWith("ensemble/preserved/")) {
-        if (!member.worktree_dir) continue
+        if (!member.worktree_dir) {
+          sendLeadAlert(deps.db, deps.client, {
+            teamId: teamInfo.teamId,
+            content: `Force cleanup for team "${teamInfo.teamName}" was blocked because ${member.name}'s live branch cannot be verified without a worktree path. No sessions were aborted and the team remains active. Inspect the session resources and retry force cleanup.`,
+            wakeText: `[System: Force cleanup for ${teamInfo.teamName} could not verify ${member.name}'s live branch; guidance is available in team messages]`,
+          })
+          throw new Error(`Cannot clean up team "${teamInfo.teamName}": ${member.name} references a preserved branch but has no live worktree path. No sessions were aborted; recover the live branch before retrying.`)
+        }
         try {
           sourceBranch = await resolveBranch(member.worktree_dir) ?? ""
         } catch (error) {
@@ -552,6 +559,11 @@ export async function executeTeamCleanup(
       )
       member.status = "shutdown"
       if (safeBranch) member.worktree_branch = safeBranch
+      deps.db.run(
+        `UPDATE team_task SET status = 'pending', assignee = NULL, time_updated = ?
+         WHERE team_id = ? AND assignee = ? AND status = 'in_progress'`,
+        [Date.now(), teamInfo.teamId, member.name],
+      )
     }
   }
 

@@ -478,6 +478,33 @@ describe("team_cleanup", () => {
     expect(alert.content).toContain("No sessions were aborted")
   })
 
+  test("force cleanup blocks a legacy preserved record without a live worktree path", async () => {
+    insertMember(deps.db, "t1", "alice", "sess-alice", "busy", "running")
+    const preservedBranch = "ensemble/preserved/test-project/my-team#t1/alice"
+    deps.db.run("UPDATE team_member SET worktree_branch = ? WHERE name = 'alice'", [preservedBranch])
+
+    await expect(executeTeamCleanup(
+      deps,
+      { force: true },
+      "lead-sess",
+      undefined,
+      noopMerge,
+      noopDelete,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      noopPreserve,
+    )).rejects.toThrow("live branch")
+
+    expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
+    expect((deps.db.query("SELECT status, worktree_branch FROM team_member WHERE name = 'alice'").get() as {
+      status: string
+      worktree_branch: string
+    })).toEqual({ status: "busy", worktree_branch: preservedBranch })
+  })
+
   test("rejects if caller is not the lead", async () => {
     insertMember(deps.db, "t1", "alice", "sess-alice", "shutdown", "idle")
     deps.registry.register("t1", "alice", "sess-alice")
@@ -602,6 +629,10 @@ describe("team_cleanup", () => {
       "UPDATE team_member SET worktree_dir = ?, worktree_branch = ? WHERE name = 'bob'",
       ["/tmp/wt-bob", "ensemble-my-team-bob"],
     )
+    insertTask(deps.db, "t1", "task-alice")
+    insertTask(deps.db, "t1", "task-bob")
+    deps.db.run("UPDATE team_task SET status = 'in_progress', assignee = 'alice' WHERE id = 'task-alice'")
+    deps.db.run("UPDATE team_task SET status = 'in_progress', assignee = 'bob' WHERE id = 'task-bob'")
     let mergeCalls = 0
     const merge: MergeBranchFn = async () => {
       mergeCalls += 1
@@ -634,6 +665,10 @@ describe("team_cleanup", () => {
     const bob = deps.db.query("SELECT status, worktree_branch FROM team_member WHERE name = 'bob'")
       .get() as { status: string; worktree_branch: string }
     expect(bob).toEqual({ status: "shutdown_requested", worktree_branch: "ensemble-my-team-bob" })
+    expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-alice'").get())
+      .toEqual({ status: "pending", assignee: null })
+    expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-bob'").get())
+      .toEqual({ status: "in_progress", assignee: "bob" })
   })
 
   test("treats error members as inactive (cleanup succeeds without force)", async () => {
