@@ -1,11 +1,14 @@
 import { describe, test, expect, beforeEach } from "bun:test"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import path from "node:path"
 import { setupDeps, insertTeam, insertMember } from "./helpers"
 import { executeTeamShutdown } from "../src/tools/team-shutdown"
 import { executeTeamMerge } from "../src/tools/team-merge"
 import { executeTeamCleanup } from "../src/tools/team-cleanup"
 import { executeTeamSpawn } from "../src/tools/team-spawn"
 import { executeTeamCreate } from "../src/tools/team-create"
-import { getTeamResourceParts, preservedBranchName } from "../src/tools/merge-helper"
+import { getTeamResourceParts, preserveBranch, preservedBranchName } from "../src/tools/merge-helper"
 import type { MergeBranchFn, DeleteBranchFn, PreserveBranchFn, OverlapCheckFn } from "../src/tools/merge-helper"
 import { spawnFailures } from "../src/tools/team-spawn"
 
@@ -16,6 +19,23 @@ const noopMerge: MergeBranchFn = async () => ({ ok: true })
 const noopDelete: DeleteBranchFn = async () => true
 const noopOverlap: OverlapCheckFn = async () => []
 const failMerge: MergeBranchFn = async () => ({ ok: false, error: "CONFLICT in file.ts" })
+
+async function git(cwd: string, args: string[]): Promise<string> {
+  const process = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" })
+  const [exitCode, stdout, stderr] = await Promise.all([
+    process.exited,
+    new Response(process.stdout).text(),
+    new Response(process.stderr).text(),
+  ])
+  if (exitCode !== 0) throw new Error(stderr.trim() || `git ${args.join(" ")} failed`)
+  return stdout.trim()
+}
+
+async function commitFile(repo: string, name: string, content: string): Promise<void> {
+  await writeFile(path.join(repo, name), content)
+  await git(repo, ["add", name])
+  await git(repo, ["-c", "user.name=Ensemble Test", "-c", "user.email=ensemble@example.com", "commit", "-m", content])
+}
 
 function teamId(deps: Deps, name: string): string {
   return (deps.db.query("SELECT id FROM team WHERE name = ?").get(name) as { id: string }).id
@@ -73,20 +93,22 @@ describe("branch preservation", () => {
     expect(after.status).toBe("shutdown")
   })
 
-  test("shutdown still completes if preserve fails", async () => {
+  test("shutdown does not abort or change the member when preserve fails", async () => {
     await executeTeamCreate(deps, { name: "fail-preserve" }, lead)
     await executeTeamSpawn(deps, { name: "bob", agent: "build", prompt: "task" }, lead)
 
     const failPreserve: PreserveBranchFn = async () => false
 
-    // Should not throw — preserve failure is logged but shutdown continues
-    const result = await executeTeamShutdown(deps, { member: "bob" }, lead, undefined, failPreserve)
-    expect(result).toContain("shut down")
+    const before = deps.db.query("SELECT status, worktree_branch FROM team_member WHERE name = 'bob'")
+      .get() as { status: string; worktree_branch: string }
 
-    // Member is shutdown but branch was NOT updated (preserve failed)
-    const after = deps.db.query("SELECT status FROM team_member WHERE name = 'bob'")
-      .get() as { status: string }
-    expect(after.status).toBe("shutdown")
+    await expect(executeTeamShutdown(deps, { member: "bob" }, lead, undefined, failPreserve))
+      .rejects.toThrow("preserve")
+
+    expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
+    const after = deps.db.query("SELECT status, worktree_branch FROM team_member WHERE name = 'bob'")
+      .get() as { status: string; worktree_branch: string }
+    expect(after).toEqual(before)
   })
 
   test("shutdown without worktree branch skips preservation", async () => {
@@ -142,9 +164,72 @@ describe("branch preservation", () => {
     expect(preserveCalled).toBe(true)
   })
 
+  test("force shutdown refreshes the original branch after graceful shutdown", async () => {
+    await executeTeamCreate(deps, { name: "refresh-test" }, lead)
+    await executeTeamSpawn(deps, { name: "alice", agent: "build", prompt: "task" }, lead)
+    deps.client.session.status = async () => ({ data: { [(deps.db.query("SELECT session_id FROM team_member WHERE name = 'alice'").get() as { session_id: string }).session_id]: { type: "busy" } } })
+
+    const original = (deps.db.query("SELECT worktree_branch FROM team_member WHERE name = 'alice'").get() as { worktree_branch: string }).worktree_branch
+    const preserved = preservedFor(deps, "refresh-test", "alice")
+    const snapshots: Array<{ source: string; target: string }> = []
+    const trackPreserve: PreserveBranchFn = async (source, target) => {
+      snapshots.push({ source, target })
+      return true
+    }
+
+    await executeTeamShutdown(deps, { member: "alice" }, lead, undefined, trackPreserve)
+    expect((deps.db.query("SELECT worktree_branch FROM team_member WHERE name = 'alice'").get() as { worktree_branch: string }).worktree_branch).toBe(original)
+
+    await executeTeamShutdown(deps, { member: "alice", force: true }, lead, undefined, trackPreserve)
+    expect(snapshots).toEqual([
+      { source: original, target: preserved },
+      { source: original, target: preserved },
+    ])
+    expect((deps.db.query("SELECT worktree_branch FROM team_member WHERE name = 'alice'").get() as { worktree_branch: string }).worktree_branch).toBe(preserved)
+  })
+
   test("preservedBranchName generates correct format", () => {
     expect(preservedBranchName("silver-river", "my-team", "team_abc123", "alice")).toBe("ensemble/preserved/silver-river/my-team#abc123/alice")
     expect(preservedBranchName("copper-orbit", "refactor", "t1", "bob")).toBe("ensemble/preserved/copper-orbit/refactor#t1/bob")
+  })
+})
+
+describe("preserveBranch", () => {
+  test("refreshes an existing preserved ref to include a later commit", async () => {
+    const repo = await mkdtemp(path.join(tmpdir(), "ensemble-preserve-"))
+    try {
+      await git(repo, ["init", "-b", "main"])
+      await commitFile(repo, "work.txt", "base")
+      await git(repo, ["branch", "agent-work"])
+      expect(await preserveBranch("agent-work", "ensemble/preserved/project/team/member", repo)).toBe(true)
+
+      await git(repo, ["checkout", "agent-work"])
+      await commitFile(repo, "work.txt", "later")
+      expect(await preserveBranch("agent-work", "ensemble/preserved/project/team/member", repo)).toBe(true)
+
+      expect(await git(repo, ["rev-parse", "agent-work"])).toBe(await git(repo, ["rev-parse", "ensemble/preserved/project/team/member"]))
+    } finally {
+      await rm(repo, { recursive: true, force: true })
+    }
+  })
+
+  test("does not overwrite a divergent ref in the preserved namespace", async () => {
+    const repo = await mkdtemp(path.join(tmpdir(), "ensemble-preserve-diverged-"))
+    try {
+      await git(repo, ["init", "-b", "main"])
+      await commitFile(repo, "base.txt", "base")
+      await git(repo, ["checkout", "-b", "agent-work"])
+      await commitFile(repo, "agent.txt", "agent")
+      await git(repo, ["checkout", "main"])
+      await git(repo, ["checkout", "-b", "ensemble/preserved/project/team/member"])
+      await commitFile(repo, "other.txt", "other")
+      const before = await git(repo, ["rev-parse", "ensemble/preserved/project/team/member"])
+
+      expect(await preserveBranch("agent-work", "ensemble/preserved/project/team/member", repo)).toBe(false)
+      expect(await git(repo, ["rev-parse", "ensemble/preserved/project/team/member"])).toBe(before)
+    } finally {
+      await rm(repo, { recursive: true, force: true })
+    }
   })
 })
 
@@ -368,7 +453,9 @@ describe("cleanup safety net for unmerged branches", () => {
     await executeTeamShutdown(deps, { member: "alice" }, lead, undefined, noopPreserve)
 
     const result = await executeTeamCleanup(deps, { force: false }, lead, undefined, failMerge, noopDelete, true, noopOverlap)
-    expect(result).toContain("Could not auto-merge")
+    expect(result).toContain("not cleaned up")
+    expect(result).toContain("Merge manually")
+    expect((deps.db.query("SELECT status FROM team WHERE name = 'conflict-safety'").get() as { status: string }).status).toBe("active")
   })
 
   test("cleanup with mergeOnCleanup=false skips safety-net merge", async () => {

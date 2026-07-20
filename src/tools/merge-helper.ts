@@ -69,7 +69,27 @@ export function teamWorktreeName(projectName: string, teamName: string, teamId: 
  * Returns true if the branch was successfully copied.
  */
 export async function preserveBranch(sourceBranch: string, targetBranch: string, cwd: string): Promise<boolean> {
-  const result = await runCommand(["git", "branch", targetBranch, sourceBranch], { cwd })
+  const source = await runCommand(["git", "rev-parse", "--verify", `refs/heads/${sourceBranch}`], { cwd })
+  if (source.exitCode !== 0) {
+    log(`merge-helper:preserve:failed src=${sourceBranch} target=${targetBranch} err=${source.stderr.trim()}`)
+    return false
+  }
+
+  const sourceOid = source.stdout.trim()
+  const targetRef = `refs/heads/${targetBranch}`
+  const target = await runCommand(["git", "rev-parse", "--verify", targetRef], { cwd })
+  const expectedTarget = target.exitCode === 0 ? target.stdout.trim() : ""
+  if (expectedTarget) {
+    const ancestor = await runCommand(["git", "merge-base", "--is-ancestor", expectedTarget, sourceOid], { cwd })
+    if (ancestor.exitCode !== 0) {
+      log(`merge-helper:preserve:diverged src=${sourceBranch} target=${targetBranch}`)
+      return false
+    }
+  }
+
+  // update-ref compares the old OID atomically, so a concurrent writer cannot
+  // move the preserved ref between the ancestry check and the update.
+  const result = await runCommand(["git", "update-ref", targetRef, sourceOid, expectedTarget], { cwd })
   if (result.exitCode !== 0) {
     log(`merge-helper:preserve:failed src=${sourceBranch} target=${targetBranch} err=${result.stderr.trim()}`)
     return false

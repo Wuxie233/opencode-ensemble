@@ -196,7 +196,12 @@ describe("integration: spawn rollback notifies lead on failure", () => {
     deps.client.session.promptAsync = async () => { throw new Error("delivery failed") }
 
     // Spawn returns successfully (fire-and-forget)
-    const result = await executeTeamSpawn(deps, { name: "ghost", agent: "build", prompt: "task" }, leadSession)
+    const result = await executeTeamSpawn(
+      deps,
+      { name: "ghost", agent: "build", prompt: "task" },
+      leadSession,
+      async () => true,
+    )
     expect(result).toContain("ghost")
     expect(result).toContain("spawned")
 

@@ -5,6 +5,7 @@ import { sendLeadAlert } from "../messaging"
 import { log } from "../log"
 import type { EnsembleConfig } from "../config"
 import { getTeamResourceParts, preserveBranch, preservedBranchName, teamWorktreeName } from "./merge-helper"
+import type { PreserveBranchFn } from "./merge-helper"
 
 /** Tracks consecutive spawn failures per team for circuit breaker. */
 export const spawnFailures = new Map<string, { count: number; lastError: string }>()
@@ -116,6 +117,7 @@ export async function executeTeamSpawn(
   deps: ToolDeps,
   args: SpawnArgs,
   sessionId: string,
+  preserve: PreserveBranchFn = preserveBranch,
 ): Promise<string> {
   const nameError = validateMemberName(args.name)
   if (nameError) throw new Error(nameError)
@@ -128,7 +130,7 @@ export async function executeTeamSpawn(
   spawnsInFlight.add(spawnKey)
 
   try {
-    return await executeTeamSpawnLocked(deps, args, sessionId, teamInfo)
+    return await executeTeamSpawnLocked(deps, args, sessionId, teamInfo, preserve)
   } finally {
     spawnsInFlight.delete(spawnKey)
   }
@@ -139,6 +141,7 @@ async function executeTeamSpawnLocked(
   args: SpawnArgs,
   sessionId: string,
   teamInfo: ReturnType<typeof requireLead>,
+  preserve: PreserveBranchFn,
 ): Promise<string> {
   // Circuit breaker — stop retrying after 3 consecutive failures
   const failures = spawnFailures.get(teamInfo.teamId)
@@ -305,7 +308,15 @@ async function executeTeamSpawnLocked(
     if (worktreeBranch) {
       const resource = getTeamResourceParts(deps.db, teamInfo.teamId)
       const safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, args.name)
-      await preserveBranch(worktreeBranch, safeBranch, deps.directory)
+      const ok = await preserve(worktreeBranch, safeBranch, deps.directory)
+      if (!ok) {
+        sendLeadAlert(deps.db, deps.client, {
+          teamId: teamInfo.teamId,
+          content: `Teammate "${args.name}" could not be registered and branch ${worktreeBranch} could not be preserved. Its session and worktree remain intact for manual recovery. Error: ${err instanceof Error ? err.message : String(err)}.`,
+          wakeText: `[System: Teammate ${args.name} registration and branch preservation failed; recovery guidance is available in team messages]`,
+        })
+        throw new Error(`${err instanceof Error ? err.message : String(err)}. Cleanup stopped because branch ${worktreeBranch} could not be preserved; the session and worktree were left intact for retry.`)
+      }
     }
     await deps.client.session.abort({ sessionID: childSessionId }).catch(() => { /* best effort */ })
     if (workspaceId) {
@@ -470,18 +481,54 @@ async function executeTeamSpawnLocked(
     const errMsg = err instanceof Error ? err.message : String(err)
     log(`spawn:promptAsync:failed name=${args.name} err=${errMsg} — rolling back`)
     try {
-      deps.db.run("DELETE FROM team_member WHERE team_id = ? AND session_id = ?", [teamInfo.teamId, childSessionId])
       rollbackSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name)
-      deps.registry.unregister(childSessionId)
       const preserveThenAbort = async () => {
         if (worktreeBranch) {
           const resource = getTeamResourceParts(deps.db, teamInfo.teamId)
           const safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, args.name)
-          await preserveBranch(worktreeBranch, safeBranch, deps.directory)
+          const ok = await preserve(worktreeBranch, safeBranch, deps.directory)
+          if (!ok) {
+            deps.db.run(
+              "UPDATE team_member SET status = 'error', execution_status = 'failed', time_updated = ? WHERE team_id = ? AND session_id = ?",
+              [Date.now(), teamInfo.teamId, childSessionId],
+            )
+            sendLeadAlert(deps.db, deps.client, {
+              teamId: teamInfo.teamId,
+              content: `Teammate "${args.name}" failed to start and branch preservation also failed. Its session and worktree were left intact at ${worktreeBranch} so the work remains retryable. Error: ${errMsg}.`,
+              wakeText: `[System: Teammate ${args.name} failed to start and branch preservation failed; recovery guidance is available in team messages]`,
+            })
+            deps.registry.unregister(childSessionId)
+            return
+          }
+          deps.db.run("UPDATE team_member SET worktree_branch = ? WHERE team_id = ? AND session_id = ?",
+            [safeBranch, teamInfo.teamId, childSessionId])
         }
-        await deps.client.session.abort({ sessionID: childSessionId })
+        deps.db.run(
+          "UPDATE team_member SET status = 'shutdown_requested', time_updated = ? WHERE team_id = ? AND session_id = ?",
+          [Date.now(), teamInfo.teamId, childSessionId],
+        )
+        try {
+          await deps.client.session.abort({ sessionID: childSessionId })
+        } catch (abortError) {
+          const message = abortError instanceof Error ? abortError.message : String(abortError)
+          sendLeadAlert(deps.db, deps.client, {
+            teamId: teamInfo.teamId,
+            content: `Teammate "${args.name}" failed to start and its branch was preserved, but abort failed. Its member record remains shutdown_requested for retry. Error: ${message}.`,
+            wakeText: `[System: Teammate ${args.name} failed to start and could not be aborted; recovery guidance is available in team messages]`,
+          })
+          deps.registry.unregister(childSessionId)
+          return
+        }
         if (workspaceId) await deps.client.workspace.remove({ id: workspaceId })
         if (worktreeDir) await deps.client.worktree.remove({ worktreeRemoveInput: { directory: worktreeDir } })
+        deps.db.run("DELETE FROM team_member WHERE team_id = ? AND session_id = ?", [teamInfo.teamId, childSessionId])
+        deps.registry.unregister(childSessionId)
+        const modelInfo = resolvedModel ? ` (model: ${resolvedModel})` : ""
+        sendLeadAlert(deps.db, deps.client, {
+          teamId: teamInfo.teamId,
+          content: `Teammate "${args.name}" failed to start and was removed${modelInfo}. Error: ${errMsg}. You may retry the spawn.`,
+          wakeText: `[System: Teammate ${args.name} failed to start; guidance is available in team messages]`,
+        })
       }
       preserveThenAbort().catch(() => { /* best effort */ })
       const modelInfo = resolvedModel ? ` (model: ${resolvedModel})` : ""
@@ -491,11 +538,6 @@ async function executeTeamSpawnLocked(
         variant: "error",
         duration: 8000,
       }).catch(() => { /* TUI may not be available */ })
-      sendLeadAlert(deps.db, deps.client, {
-        teamId: teamInfo.teamId,
-        content: `Teammate "${args.name}" failed to start and was removed${modelInfo}. Error: ${errMsg}. You may retry the spawn.`,
-        wakeText: `[System: Teammate ${args.name} failed to start; guidance is available in team messages]`,
-      })
     } catch { /* rollback failed — watchdog will clean up stale member */ }
   })
 

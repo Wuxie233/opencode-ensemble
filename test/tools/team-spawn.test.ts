@@ -350,7 +350,7 @@ describe("team_spawn", () => {
       agent: "explore",
       prompt: "Fix the tests",
       claim_task: "task-123",
-    }, "lead-sess")).rejects.toThrow("registration failed")
+    }, "lead-sess", async () => true)).rejects.toThrow("registration failed")
 
     const task = deps.db.query("SELECT status, assignee FROM team_task WHERE id = ?").get("task-123") as {
       status: string
@@ -358,6 +358,23 @@ describe("team_spawn", () => {
     }
     expect(task).toEqual({ status: "pending", assignee: null })
     expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(1)
+  })
+
+  test("keeps the original worktree retryable when registration rollback cannot preserve it", async () => {
+    const originalRun = deps.db.run.bind(deps.db)
+    deps.db.run = (sql, ...params) => {
+      if (sql.startsWith("INSERT INTO team_member")) throw new Error("registration failed")
+      return originalRun(sql, ...params)
+    }
+
+    await expect(executeTeamSpawn(deps, {
+      name: "alice",
+      agent: "build",
+      prompt: "Fix the tests",
+    }, "lead-sess")).rejects.toThrow("registration failed")
+
+    expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
+    expect(deps.client.calls.filter(call => call.method === "worktree.remove")).toHaveLength(0)
   })
 
   test("rolls back claim_task when prompt dispatch fails asynchronously", async () => {
@@ -416,7 +433,7 @@ describe("team_spawn", () => {
       name: "alice",
       agent: "build",
       prompt: "Fix the tests",
-    }, "lead-sess")
+    }, "lead-sess", async () => true)
 
     expect(result).toContain("alice")
 
@@ -436,6 +453,25 @@ describe("team_spawn", () => {
     expect(abortCalls).toHaveLength(1)
   })
 
+  test("retains failed member resources when prompt rollback cannot preserve the branch", async () => {
+    deps.client.session.promptAsync = async () => { throw new Error("promptAsync failed") }
+
+    await executeTeamSpawn(deps, {
+      name: "alice",
+      agent: "build",
+      prompt: "Fix the tests",
+    }, "lead-sess")
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
+    expect(deps.client.calls.filter(call => call.method === "worktree.remove")).toHaveLength(0)
+    const member = deps.db.query("SELECT status, execution_status, worktree_branch FROM team_member WHERE name = 'alice'")
+      .get() as { status: string; execution_status: string; worktree_branch: string }
+    expect(member.status).toBe("error")
+    expect(member.execution_status).toBe("failed")
+    expect(member.worktree_branch).toStartWith("ensemble-")
+  })
+
   test("response is clean without LLM instructions", async () => {
     const result = await executeTeamSpawn(deps, {
       name: "alice",
@@ -448,7 +484,7 @@ describe("team_spawn", () => {
     expect(result).not.toContain("STOP")
   })
 
-  test("rolls back cleanly even if session.abort fails during promptAsync rollback", async () => {
+  test("retains preserved ownership if session.abort fails during promptAsync rollback", async () => {
     deps.client.session.promptAsync = async () => { throw new Error("promptAsync failed") }
     deps.client.session.abort = async () => { throw new Error("abort also failed") }
 
@@ -457,16 +493,19 @@ describe("team_spawn", () => {
       name: "alice",
       agent: "build",
       prompt: "Fix the tests",
-    }, "lead-sess")
+    }, "lead-sess", async () => true)
 
     expect(result).toContain("alice")
 
     // Give the microtask queue time to process the async .catch() rollback
     await new Promise(resolve => setTimeout(resolve, 10))
 
-    // DB and registry should still be cleaned up
-    const row = deps.db.query("SELECT * FROM team_member WHERE name = 'alice'").get()
-    expect(row).toBeNull()
+    const row = deps.db.query("SELECT status, worktree_branch FROM team_member WHERE name = 'alice'").get() as {
+      status: string
+      worktree_branch: string
+    }
+    expect(row.status).toBe("shutdown_requested")
+    expect(row.worktree_branch).toStartWith("ensemble/preserved/")
     expect(deps.registry.listByTeam("t1")).toHaveLength(0)
   })
 
@@ -484,7 +523,7 @@ describe("team_spawn", () => {
   test("read-only agent gets shorter tool list without write tools", async () => {
     await executeTeamSpawn(deps, {
       name: "alice", agent: "explore", prompt: "Research",
-    }, "lead-sess")
+    }, "lead-sess", async () => true)
     const promptCall = deps.client.calls.find(c => c.method === "session.promptAsync")
     const text = (promptCall!.args[0] as { parts: Array<{ text: string }> }).parts[0]!.text
     expect(text).toContain("team_message")
@@ -500,7 +539,7 @@ describe("team_spawn", () => {
       name: "researcher",
       agent: "explore",
       prompt: "Search the codebase",
-    }, "lead-sess")
+    }, "lead-sess", async () => true)
 
     // No worktree.create call — read-only agents don't need file isolation
     const wtCalls = deps.client.calls.filter(c => c.method === "worktree.create")
@@ -520,7 +559,7 @@ describe("team_spawn", () => {
       name: "planner",
       agent: "plan",
       prompt: "Plan the architecture",
-    }, "lead-sess")
+    }, "lead-sess", async () => true)
 
     const wtCalls = deps.client.calls.filter(c => c.method === "worktree.create")
     expect(wtCalls).toHaveLength(0)
@@ -537,7 +576,7 @@ describe("team_spawn", () => {
     deps.directory = "/home/user/.local/share/opencode/worktree/abc123/some-worktree"
     const result = await executeTeamSpawn(deps, {
       name: "alice", agent: "build", prompt: "Fix tests",
-    }, "lead-sess")
+    }, "lead-sess", async () => true)
     const wtCalls = deps.client.calls.filter(c => c.method === "worktree.create")
     expect(wtCalls).toHaveLength(0)
     expect(result).toContain("alice")
@@ -549,7 +588,7 @@ describe("team_spawn", () => {
       name: "alice",
       agent: "build",
       prompt: "Fix the tests",
-    }, "lead-sess")
+    }, "lead-sess", async () => true)
 
     // Worktree.create should have been called
     const wtCalls = deps.client.calls.filter(c => c.method === "worktree.create")
@@ -636,7 +675,7 @@ describe("team_spawn", () => {
       name: "alice",
       agent: "build",
       prompt: "Fix the tests",
-    }, "lead-sess")
+    }, "lead-sess", async () => true)
 
     expect(result).toContain("alice")
     expect(result).toContain("spawned")
@@ -812,7 +851,7 @@ describe("team_spawn", () => {
       name: "alice",
       agent: "build",
       prompt: "Fix tests",
-    }, "lead-sess")
+    }, "lead-sess", async () => true)
 
     // Give microtask queue time to process .catch() rollback
     await new Promise(resolve => setTimeout(resolve, 10))
@@ -1044,7 +1083,7 @@ describe("team_spawn — fire-and-forget promptAsync", () => {
       name: "bob",
       agent: "build",
       prompt: "Fix tests",
-    }, "lead-sess")
+    }, "lead-sess", async () => true)
 
     expect(result).toContain("bob")
 

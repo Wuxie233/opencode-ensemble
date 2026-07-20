@@ -313,6 +313,34 @@ describe("team_cleanup", () => {
     expect(statusAtAbort).toBe("shutdown_requested")
   })
 
+  test("force cleanup does not abort or archive when branch preservation fails", async () => {
+    insertMember(deps.db, "t1", "alice", "sess-alice", "busy", "running")
+    deps.db.run("UPDATE team_member SET worktree_branch = ? WHERE name = 'alice'", ["ensemble-my-team-alice"])
+    deps.registry.register("t1", "alice", "sess-alice")
+
+    await expect(executeTeamCleanup(
+      deps,
+      { force: true },
+      "lead-sess",
+      undefined,
+      noopMerge,
+      noopDelete,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      async () => false,
+    ))
+      .rejects.toThrow("preserve")
+
+    expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
+    const member = deps.db.query("SELECT status, worktree_branch FROM team_member WHERE name = 'alice'")
+      .get() as { status: string; worktree_branch: string }
+    expect(member).toEqual({ status: "busy", worktree_branch: "ensemble-my-team-alice" })
+    expect((deps.db.query("SELECT status FROM team WHERE id = 't1'").get() as { status: string }).status).toBe("active")
+  })
+
   test("rejects if caller is not the lead", async () => {
     insertMember(deps.db, "t1", "alice", "sess-alice", "shutdown", "idle")
     deps.registry.register("t1", "alice", "sess-alice")

@@ -4,6 +4,7 @@ import type { IsDirtyFn, CommitCountFn } from "./shared"
 import { getTeamResourceParts, preserveBranch, preservedBranchName } from "./merge-helper"
 import type { PreserveBranchFn } from "./merge-helper"
 import { log } from "../log"
+import { sendLeadAlert } from "../messaging"
 
 /**
  * Execute the team_shutdown tool. Requests a teammate to shut down.
@@ -58,13 +59,17 @@ export async function executeTeamShutdown(
     const resource = getTeamResourceParts(deps.db, teamInfo.teamId)
     const safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, args.member)
     const ok = await preserve(member.worktree_branch, safeBranch, deps.directory)
-    if (ok) {
-      deps.db.run(
-        "UPDATE team_member SET worktree_branch = ? WHERE team_id = ? AND name = ?",
-        [safeBranch, teamInfo.teamId, args.member],
-      )
-      log(`shutdown:branch:preserved-graceful src=${member.worktree_branch} target=${safeBranch}`)
+    if (!ok) {
+      sendLeadAlert(deps.db, deps.client, {
+        teamId: teamInfo.teamId,
+        content: `Shutdown for "${args.member}" was not requested because branch ${member.worktree_branch} could not be preserved. The session remains running; resolve the branch and retry.`,
+        wakeText: `[System: Shutdown for ${args.member} was blocked by branch preservation failure; guidance is available in team messages]`,
+      })
+      throw new Error(`Cannot request shutdown for "${args.member}": failed to preserve branch ${member.worktree_branch}. The session was left running so you can retry.`)
     }
+    // Keep the original branch in the DB while the teammate finishes. A later
+    // force abort must refresh the preserved ref with commits made after this snapshot.
+    log(`shutdown:branch:preserved-graceful src=${member.worktree_branch} target=${safeBranch}`)
   }
 
   try {
@@ -100,13 +105,6 @@ async function preserveAndAbort(
   worktreeBranch: string | null,
   preserve: PreserveBranchFn,
 ): Promise<void> {
-  // Record shutdown intent before abort can emit MessageAbortedError.
-  deps.db.run(
-    `UPDATE team_member SET status = 'shutdown_requested', time_updated = ?
-     WHERE team_id = ? AND name = ? AND status NOT IN ('shutdown', 'error')`,
-    [Date.now(), teamId, memberName],
-  )
-
   // Preserve the branch BEFORE aborting — session.abort() may delete the worktree + branch
   if (worktreeBranch && !worktreeBranch.startsWith("ensemble/preserved/")) {
     const resource = getTeamResourceParts(deps.db, teamId)
@@ -120,8 +118,22 @@ async function preserveAndAbort(
       log(`shutdown:branch:preserved src=${worktreeBranch} target=${safeBranch}`)
     } else {
       log(`shutdown:branch:preserve-failed src=${worktreeBranch} target=${safeBranch}`)
+      sendLeadAlert(deps.db, deps.client, {
+        teamId,
+        content: `Shutdown for "${memberName}" was blocked because branch ${worktreeBranch} could not be preserved. No abort was attempted; resolve the branch and retry.`,
+        wakeText: `[System: Shutdown for ${memberName} was blocked by branch preservation failure; guidance is available in team messages]`,
+      })
+      throw new Error(`Cannot shut down "${memberName}": failed to preserve branch ${worktreeBranch}. The session was left running so you can retry.`)
     }
   }
+
+  // Record shutdown intent only after preservation succeeds, but before abort
+  // can emit MessageAbortedError.
+  deps.db.run(
+    `UPDATE team_member SET status = 'shutdown_requested', time_updated = ?
+     WHERE team_id = ? AND name = ? AND status NOT IN ('shutdown', 'error')`,
+    [Date.now(), teamId, memberName],
+  )
 
   // Now safe to abort — the branch is preserved
   try {

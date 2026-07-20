@@ -6,6 +6,7 @@ import { getTeamResourceParts, mergeBranch, deleteBranch, preserveBranch, preser
 import type { MergeBranchFn, DeleteBranchFn, PreserveBranchFn, OverlapCheckFn } from "./merge-helper"
 import { log } from "../log"
 import { runCommand } from "../process"
+import { sendLeadAlert } from "../messaging"
 
 type PurgeApprovalFn = (preview: string) => Promise<void>
 type ListBranchesFn = (namespace: string, cwd: string) => Promise<string[]>
@@ -415,6 +416,7 @@ export async function executeTeamCleanup(
   _approvePurge?: PurgeApprovalFn,
   _listBranches?: ListBranchesFn,
   _branchExists?: BranchExistsFn,
+  preserve: PreserveBranchFn = preserveBranch,
 ): Promise<string> {
   if (args.purge && args.purge.length > 0) {
     requireCanPurgeArchivedTeams(deps, sessionId)
@@ -456,6 +458,7 @@ export async function executeTeamCleanup(
     .all(teamInfo.teamId) as Array<{ name: string; session_id: string; status: string; worktree_dir: string | null; worktree_branch: string | null; workspace_id: string | null }>
 
   const active = members.filter(m => m.status !== "shutdown" && m.status !== "shutdown_requested" && m.status !== "error")
+  const abortable = members.filter(m => m.status !== "shutdown" && m.status !== "error")
 
   if (active.length > 0 && !args.force) {
     const names = active.map(m => m.name).join(", ")
@@ -484,28 +487,49 @@ export async function executeTeamCleanup(
 
   // Force-abort active members — preserve branches BEFORE aborting
   if (args.force) {
-    if (active.length > 0) {
+    const preserved = new Map<string, string>()
+    for (const member of abortable) {
+      if (!member.worktree_branch || member.worktree_branch.startsWith("ensemble/preserved/")) continue
+      const resource = getTeamResourceParts(deps.db, teamInfo.teamId)
+      const safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, member.name)
+      const ok = await preserve(member.worktree_branch, safeBranch, deps.directory)
+      if (!ok) {
+        sendLeadAlert(deps.db, deps.client, {
+          teamId: teamInfo.teamId,
+          content: `Force cleanup for team "${teamInfo.teamName}" was blocked because ${member.name}'s branch ${member.worktree_branch} could not be preserved. No sessions were aborted and the team remains active.`,
+          wakeText: `[System: Force cleanup for ${teamInfo.teamName} was blocked by branch preservation failure; guidance is available in team messages]`,
+        })
+        throw new Error(`Cannot clean up team "${teamInfo.teamName}": failed to preserve ${member.name}'s branch ${member.worktree_branch}. No sessions were aborted; retry after resolving the branch.`)
+      }
+      preserved.set(member.name, safeBranch)
+    }
+
+    preserved.forEach((safeBranch, memberName) => {
+      deps.db.run("UPDATE team_member SET worktree_branch = ? WHERE team_id = ? AND name = ?",
+        [safeBranch, teamInfo.teamId, memberName])
+      const member = members.find(candidate => candidate.name === memberName)
+      if (member) member.worktree_branch = safeBranch
+    })
+
+    if (abortable.length > 0) {
       deps.db.run(
         `UPDATE team_member SET status = 'shutdown_requested', time_updated = ?
          WHERE team_id = ? AND status NOT IN ('shutdown', 'shutdown_requested', 'error')`,
         [Date.now(), teamInfo.teamId],
       )
     }
-    for (const member of active) {
-      // Preserve branch before abort — session.abort() may destroy the worktree + branch
-      if (member.worktree_branch && !member.worktree_branch.startsWith("ensemble/preserved/")) {
-        const resource = getTeamResourceParts(deps.db, teamInfo.teamId)
-        const safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, member.name)
-        const ok = await preserveBranch(member.worktree_branch, safeBranch, deps.directory)
-        if (ok) {
-          deps.db.run("UPDATE team_member SET worktree_branch = ? WHERE team_id = ? AND name = ?",
-            [safeBranch, teamInfo.teamId, member.name])
-          member.worktree_branch = safeBranch
-        }
-      }
+    for (const member of abortable) {
       try {
         await deps.client.session.abort({ sessionID: member.session_id })
-      } catch { /* best effort */ }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        sendLeadAlert(deps.db, deps.client, {
+          teamId: teamInfo.teamId,
+          content: `Force cleanup for team "${teamInfo.teamName}" could not abort ${member.name}. The team remains active and its branch is preserved. Error: ${message}.`,
+          wakeText: `[System: Force cleanup for ${teamInfo.teamName} could not abort ${member.name}; guidance is available in team messages]`,
+        })
+        throw new Error(`Cannot clean up team "${teamInfo.teamName}": failed to abort ${member.name}. The team remains active and the branch is preserved. Error: ${message}`)
+      }
     }
   }
 
@@ -535,6 +559,15 @@ export async function executeTeamCleanup(
         conflicted.push(`${member.name} (${branch})`)
       }
     }
+  }
+
+  if (conflicted.length > 0) {
+    const parts = [`Team "${teamInfo.teamName}" was not cleaned up. The team remains active.`]
+    if (merged.length > 0) {
+      parts.push(`Safety-net merged ${merged.length} unmerged branch(es): ${merged.join(", ")}. Review with: git diff`)
+    }
+    parts.push(`Could not auto-merge: ${conflicted.join(", ")}. Merge manually, then retry cleanup.`)
+    return parts.join("\n")
   }
 
   // Remove workspaces and worktrees
@@ -568,9 +601,6 @@ export async function executeTeamCleanup(
   const parts: string[] = [`Team "${teamInfo.teamName}" cleaned up.`]
   if (merged.length > 0) {
     parts.push(`Safety-net merged ${merged.length} unmerged branch(es): ${merged.join(", ")}. Review with: git diff`)
-  }
-  if (conflicted.length > 0) {
-    parts.push(`Could not auto-merge: ${conflicted.join(", ")}. Merge manually.`)
   }
   if (overlapWarnings.length > 0) {
     parts.push(`Warning: safety-net merge overwrote local changes to overlapping files:\n${overlapWarnings.map(w => `  - ${w}`).join("\n")}\nReview with: git diff`)
