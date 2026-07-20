@@ -457,7 +457,7 @@ export async function executeTeamCleanup(
   const members = deps.db.query("SELECT name, session_id, status, worktree_dir, worktree_branch, workspace_id FROM team_member WHERE team_id = ?")
     .all(teamInfo.teamId) as Array<{ name: string; session_id: string; status: string; worktree_dir: string | null; worktree_branch: string | null; workspace_id: string | null }>
 
-  const active = members.filter(m => m.status !== "shutdown" && m.status !== "shutdown_requested" && m.status !== "error")
+  const active = members.filter(m => m.status !== "shutdown" && m.status !== "error")
   const abortable = members.filter(m => m.status !== "shutdown" && m.status !== "error")
 
   if (active.length > 0 && !args.force) {
@@ -504,13 +504,6 @@ export async function executeTeamCleanup(
       preserved.set(member.name, safeBranch)
     }
 
-    preserved.forEach((safeBranch, memberName) => {
-      deps.db.run("UPDATE team_member SET worktree_branch = ? WHERE team_id = ? AND name = ?",
-        [safeBranch, teamInfo.teamId, memberName])
-      const member = members.find(candidate => candidate.name === memberName)
-      if (member) member.worktree_branch = safeBranch
-    })
-
     if (abortable.length > 0) {
       deps.db.run(
         `UPDATE team_member SET status = 'shutdown_requested', time_updated = ?
@@ -525,11 +518,21 @@ export async function executeTeamCleanup(
         const message = err instanceof Error ? err.message : String(err)
         sendLeadAlert(deps.db, deps.client, {
           teamId: teamInfo.teamId,
-          content: `Force cleanup for team "${teamInfo.teamName}" could not abort ${member.name}. The team remains active and its branch is preserved. Error: ${message}.`,
+          content: `Force cleanup for team "${teamInfo.teamName}" could not abort ${member.name}. The team remains active; no branches were merged and no worktrees or workspaces were removed. The live source branch ${member.worktree_branch ?? "(none)"} remains assigned to ${member.name}, and its latest preserved snapshot is ${preserved.get(member.name) ?? "(none)"}. Resolve the abort failure, then retry force cleanup. Error: ${message}.`,
           wakeText: `[System: Force cleanup for ${teamInfo.teamName} could not abort ${member.name}; guidance is available in team messages]`,
         })
-        throw new Error(`Cannot clean up team "${teamInfo.teamName}": failed to abort ${member.name}. The team remains active and the branch is preserved. Error: ${message}`)
+        throw new Error(`Cannot clean up team "${teamInfo.teamName}": failed to abort ${member.name}. The team remains active and its live source branch is retained; retry force cleanup after resolving the abort failure. Error: ${message}`)
       }
+
+      const safeBranch = preserved.get(member.name)
+      deps.db.run(
+        `UPDATE team_member
+         SET status = 'shutdown', execution_status = 'idle', worktree_branch = COALESCE(?, worktree_branch), time_updated = ?
+         WHERE team_id = ? AND name = ?`,
+        [safeBranch ?? null, Date.now(), teamInfo.teamId, member.name],
+      )
+      member.status = "shutdown"
+      if (safeBranch) member.worktree_branch = safeBranch
     }
   }
 

@@ -416,15 +416,141 @@ describe("team_cleanup", () => {
     expect(team.status).toBe("archived")
   })
 
-  test("treats shutdown_requested members as inactive (cleanup succeeds without force)", async () => {
+  test("rejects shutdown_requested members without force because they can still be live", async () => {
     insertMember(deps.db, "t1", "alice", "sess-alice", "shutdown_requested", "idle")
     deps.registry.register("t1", "alice", "sess-alice")
 
-    const result = await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete, false)
-    expect(result).toContain("cleaned up")
+    await expect(executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete, false))
+      .rejects.toThrow("still active")
 
     const team = deps.db.query("SELECT status FROM team WHERE id = ?").get("t1") as Record<string, string>
-    expect(team.status).toBe("archived")
+    expect(team.status).toBe("active")
+  })
+
+  test("force cleanup refreshes the live source branch after abort failure and retains resources until retry succeeds", async () => {
+    insertMember(deps.db, "t1", "alice", "sess-alice", "busy", "running")
+    deps.db.run(
+      "UPDATE team_member SET worktree_dir = ?, worktree_branch = ?, workspace_id = ? WHERE name = 'alice'",
+      ["/tmp/wt-alice", "ensemble-my-team-alice", "ws-alice"],
+    )
+    deps.registry.register("t1", "alice", "sess-alice")
+
+    const preserveCalls: Array<{ source: string; target: string }> = []
+    const preserve = async (source: string, target: string) => {
+      preserveCalls.push({ source, target })
+      return true
+    }
+    let abortAttempts = 0
+    deps.client.session.abort = async () => {
+      abortAttempts += 1
+      if (abortAttempts === 1) throw new Error("transport unavailable")
+      return {}
+    }
+
+    await expect(executeTeamCleanup(
+      deps,
+      { force: true },
+      "lead-sess",
+      undefined,
+      noopMerge,
+      noopDelete,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      preserve,
+    )).rejects.toThrow("failed to abort alice")
+
+    const failedMember = deps.db.query(
+      "SELECT status, worktree_branch, worktree_dir, workspace_id FROM team_member WHERE name = 'alice'",
+    ).get() as { status: string; worktree_branch: string; worktree_dir: string; workspace_id: string }
+    expect(failedMember).toEqual({
+      status: "shutdown_requested",
+      worktree_branch: "ensemble-my-team-alice",
+      worktree_dir: "/tmp/wt-alice",
+      workspace_id: "ws-alice",
+    })
+    expect((deps.db.query("SELECT status FROM team WHERE id = 't1'").get() as { status: string }).status).toBe("active")
+    expect(deps.client.calls.filter(call => call.method === "worktree.remove")).toHaveLength(0)
+    expect(deps.client.calls.filter(call => call.method === "workspace.remove")).toHaveLength(0)
+
+    const alert = deps.db.query(
+      "SELECT content, delivered FROM team_message WHERE team_id = 't1' AND from_name = 'system' AND to_name = 'lead'",
+    ).get() as { content: string; delivered: number }
+    expect(alert.delivered).toBe(0)
+    expect(alert.content).toContain("transport unavailable")
+    expect(alert.content).toContain("retry force cleanup")
+    expect(alert.content).toContain("ensemble-my-team-alice")
+
+    const result = await executeTeamCleanup(
+      deps,
+      { force: true },
+      "lead-sess",
+      undefined,
+      noopMerge,
+      noopDelete,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      preserve,
+    )
+
+    expect(result).toContain("cleaned up")
+    expect(preserveCalls).toHaveLength(2)
+    expect(preserveCalls[0]?.source).toBe("ensemble-my-team-alice")
+    expect(preserveCalls[1]?.source).toBe("ensemble-my-team-alice")
+    expect(preserveCalls[1]?.target).toBe(preserveCalls[0]?.target)
+    expect((deps.db.query("SELECT status FROM team WHERE id = 't1'").get() as { status: string }).status).toBe("archived")
+    expect(deps.client.calls.filter(call => call.method === "worktree.remove")).toHaveLength(1)
+    expect(deps.client.calls.filter(call => call.method === "workspace.remove")).toHaveLength(1)
+  })
+
+  test("force cleanup does not remove resources or archive when a later member abort fails", async () => {
+    insertMember(deps.db, "t1", "alice", "sess-alice", "busy", "running")
+    insertMember(deps.db, "t1", "bob", "sess-bob", "busy", "running")
+    deps.db.run(
+      "UPDATE team_member SET worktree_dir = ?, worktree_branch = ? WHERE name = 'alice'",
+      ["/tmp/wt-alice", "ensemble-my-team-alice"],
+    )
+    deps.db.run(
+      "UPDATE team_member SET worktree_dir = ?, worktree_branch = ? WHERE name = 'bob'",
+      ["/tmp/wt-bob", "ensemble-my-team-bob"],
+    )
+    let mergeCalls = 0
+    const merge: MergeBranchFn = async () => {
+      mergeCalls += 1
+      return { ok: true }
+    }
+    deps.client.session.abort = async ({ sessionID }: { sessionID: string }) => {
+      if (sessionID === "sess-bob") throw new Error("bob still live")
+      return {}
+    }
+
+    await expect(executeTeamCleanup(
+      deps,
+      { force: true },
+      "lead-sess",
+      undefined,
+      merge,
+      noopDelete,
+      true,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      noopPreserve,
+    )).rejects.toThrow("failed to abort bob")
+
+    expect(mergeCalls).toBe(0)
+    expect(deps.client.calls.filter(call => call.method === "worktree.remove")).toHaveLength(0)
+    expect((deps.db.query("SELECT status FROM team WHERE id = 't1'").get() as { status: string }).status).toBe("active")
+    expect((deps.db.query("SELECT status FROM team_member WHERE name = 'alice'").get() as { status: string }).status).toBe("shutdown")
+    const bob = deps.db.query("SELECT status, worktree_branch FROM team_member WHERE name = 'bob'")
+      .get() as { status: string; worktree_branch: string }
+    expect(bob).toEqual({ status: "shutdown_requested", worktree_branch: "ensemble-my-team-bob" })
   })
 
   test("treats error members as inactive (cleanup succeeds without force)", async () => {
