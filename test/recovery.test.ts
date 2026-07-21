@@ -144,6 +144,34 @@ describe("recoverStaleMembers", () => {
     expect(client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
   })
 
+  test("restores a live retry-breaker claim after restart", async () => {
+    insertTeam(db, "t1", "my-team", "lead-sess")
+    insertMember(db, "t1", "alice", "sess-1", "shutdown_requested", "cancelling")
+    db.run("UPDATE team_member SET retry_count = 6, retry_tripped = 1, retry_attempts = '[1,2,3,4,5,6]' WHERE name = 'alice'")
+    client.session.status = async () => ({ data: { "sess-1": { type: "busy" } } })
+
+    expect((await recoverStaleMembers(db, client)).interrupted).toBe(0)
+    expect(db.query("SELECT status, execution_status, retry_tripped FROM team_member WHERE name = 'alice'").get())
+      .toEqual({ status: "busy", execution_status: "cancel_requested", retry_tripped: 0 })
+    expect(client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
+  })
+
+  test("settles an orphaned retry-breaker claim after restart", async () => {
+    insertTeam(db, "t1", "my-team", "lead-sess")
+    insertMember(db, "t1", "alice", "sess-1", "shutdown_requested", "cancelling")
+    db.run("UPDATE team_member SET retry_count = 6, retry_tripped = 1, retry_attempts = '[1,2,3,4,5,6]' WHERE name = 'alice'")
+    db.run(
+      "INSERT INTO team_task (id, team_id, content, status, priority, assignee, time_created, time_updated) VALUES ('task-a', 't1', 'work', 'in_progress', 'high', 'alice', ?, ?)",
+      [Date.now(), Date.now()],
+    )
+
+    expect((await recoverStaleMembers(db, client)).interrupted).toBe(1)
+    expect(db.query("SELECT status, execution_status FROM team_member WHERE name = 'alice'").get())
+      .toEqual({ status: "error", execution_status: "idle" })
+    expect(db.query("SELECT status, assignee FROM team_task WHERE id = 'task-a'").get())
+      .toEqual({ status: "pending", assignee: null })
+  })
+
   test("fails closed when server liveness cannot be confirmed", async () => {
     insertTeam(db, "t1", "my-team", "lead-sess")
     insertMember(db, "t1", "alice", "sess-1", "busy", "running")

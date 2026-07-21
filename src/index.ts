@@ -36,6 +36,7 @@ import type { ToolDeps, } from "./types"
 import { TokenBucket } from "./rate-limit"
 import { Watchdog } from "./watchdog"
 import { recoverStaleAbortChecks, SafeAbortRecovery } from "./safe-abort-recovery"
+import { breakRetryLoop } from "./retry-breaker"
 
 const DEFAULT_RATE_LIMIT_REFILL = 2
 const DEFAULT_RATE_LIMIT_INTERVAL_MS = 1000
@@ -161,7 +162,7 @@ const plugin: Plugin = async (input) => {
           safeAbortRecovery.observeMessage(sessionID)
           return
         }
-        const retryWarning = retryTracker.observeStatus(
+        const retryExhaustion = retryTracker.observeStatus(
           db,
           registry,
           sessionID,
@@ -169,12 +170,9 @@ const plugin: Plugin = async (input) => {
           retry.message,
           retry.attempt,
         )
-        if (retryWarning) {
-          client.session.promptAsync({
-            sessionID: retryWarning.leadSessionId,
-            parts: [{ type: "text", text: `[System: Teammate ${retryWarning.memberName} reached the consecutive retry warning threshold]` }],
-          }).catch((err) => {
-            log(`retry-threshold:wake-lead:failed member=${retryWarning.memberName} err=${err instanceof Error ? err.message : String(err)}`)
+        if (retryExhaustion) {
+          void breakRetryLoop(deps, retryExhaustion).catch((err) => {
+            log(`retry-breaker:failed member=${retryExhaustion.memberName} err=${err instanceof Error ? err.message : String(err)}`)
           })
         }
         if (statusType !== "idle") releasePendingPeerDelivery(sessionID)
@@ -292,7 +290,7 @@ const plugin: Plugin = async (input) => {
       if (event.type === "session.error") {
         const props = event.properties as { sessionID?: string; error?: { name?: string; data?: { message?: string } } }
         const eventId = (event as unknown as { id?: string }).id
-        retryTracker.observeSessionError(props.sessionID)
+        retryTracker.observeSessionError(db, props.sessionID)
         if (!safeAbortRecovery.handleSessionError(props.sessionID, props.error, eventId)) {
           const alert = handleSessionErrorEvent(db, registry, props.sessionID, props.error)
           if (alert) wakeFailedMemberLead(alert)
@@ -310,7 +308,7 @@ const plugin: Plugin = async (input) => {
       // Track per-step output tokens for stall detection
       if (event.type === "message.part.updated") {
         const part = (event.properties as { part?: { type?: string; sessionID?: string; tokens?: { output?: number } } }).part
-        if (part?.sessionID) retryTracker.observeOutput(part.sessionID, part)
+        if (part?.sessionID) retryTracker.observeOutput(db, part.sessionID, part)
         if (part?.type === "step-finish" && part.sessionID && part.tokens?.output !== undefined) {
           if (registry.getBySession(part.sessionID)) {
             progressTracker.recordStep(part.sessionID, part.tokens.output)
@@ -396,7 +394,7 @@ const plugin: Plugin = async (input) => {
         description: "Create a new agent team. You become the team lead. Use this before spawning teammates.",
         args: {
           name: tool.schema.string().describe("Team name (lowercase alphanumeric with hyphens, 1-64 chars)"),
-          project_name: tool.schema.string().optional().describe("Project display name for first use of this working directory. If omitted, a short random name is generated."),
+          project_name: tool.schema.string().optional().describe("Project display name for first use of this working directory. Unicode and spaces are allowed; an internal resource slug is generated separately."),
         },
         async execute(args, ctx) {
           const result = await executeTeamCreate(deps, args, ctx.sessionID)
@@ -476,7 +474,9 @@ const plugin: Plugin = async (input) => {
           tasks: tool.schema.array(tool.schema.object({
             content: tool.schema.string().describe("Task description"),
             priority: tool.schema.enum(["high", "medium", "low"]).default("medium").describe("Task priority"),
-            depends_on: tool.schema.array(tool.schema.string()).optional().describe("Task IDs this depends on"),
+            key: tool.schema.string().optional().describe("Optional batch-local task key used by depends_on in the same call"),
+            depends_on: tool.schema.array(tool.schema.string()).optional().describe("Existing same-Team task IDs or batch-local keys this task depends on"),
+            phase: tool.schema.string().optional().describe("Optional workflow phase; the latest supplied phase becomes the Team's current phase"),
           })).describe("Tasks to add"),
         },
         async execute(args, ctx) {
@@ -516,6 +516,7 @@ const plugin: Plugin = async (input) => {
         description: "Retrieve full message content from teammates. Returns unread messages and marks them as read. Use this after receiving a truncated message notification.",
         args: {
           from: tool.schema.string().optional().describe("Filter messages by sender name (optional, returns all if omitted)"),
+          message_id: tool.schema.string().optional().describe("Retrieve one specific unread message addressed to the caller"),
         },
         async execute(args, ctx) {
           const result = await executeTeamResults(deps, args, ctx.sessionID)
@@ -592,7 +593,7 @@ const plugin: Plugin = async (input) => {
 
       team_merge: tool({
         description: "Merge a shutdown teammate's branch into the working directory as unstaged changes. " +
-          "Use this after team_shutdown to review and integrate a teammate's work. " +
+          "Use this after team_shutdown to review and integrate a teammate's work. Repeated calls and read-only teammates are safe no-ops. " +
           "The teammate must be shut down first.",
         args: {
           member: tool.schema.string().describe("Teammate name whose branch to merge"),
@@ -607,7 +608,7 @@ const plugin: Plugin = async (input) => {
 
       team_status: tool({
         description: "View team members with their current status and agent type. Team leads also see session IDs. " +
-          "Use this to check who is working, idle, or shut down. Includes a task summary.",
+          "Use this for a user-requested snapshot or concrete stall/recovery check, not as a polling loop. Includes a task summary.",
         args: {},
         async execute(_args, ctx) {
           const result = await executeTeamStatus(deps, ctx.sessionID)

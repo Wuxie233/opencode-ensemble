@@ -21,6 +21,19 @@ export interface Database {
   close(): void
 }
 
+/** Run a synchronous operation under a SQLite immediate write transaction. */
+export function immediateTransaction<TResult>(db: Database, operation: () => TResult): TResult {
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    const result = operation()
+    db.exec("COMMIT")
+    return result
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
+}
+
 interface BunSqliteModule {
   Database: new (filename: string) => Database
 }

@@ -27,15 +27,17 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
   // Find stale members with branch info so we can preserve before aborting
   const stale = db.query(
     `SELECT tm.session_id, tm.worktree_branch, tm.worktree_dir, tm.name, tm.team_id,
-            t.name as team_name, p.name as project_name
+             t.name as team_name, COALESCE(p.slug, p.name) as project_name
       FROM team_member tm
       JOIN team t ON tm.team_id = t.id
       JOIN project p ON t.project_id = p.id
-      WHERE tm.status = 'busy'
-        AND tm.execution_status IN ('idle', 'starting', 'running', 'cancel_requested')
+       WHERE (
+         (tm.status = 'busy' AND tm.execution_status IN ('idle', 'starting', 'running', 'cancel_requested'))
+         OR (tm.status = 'shutdown_requested' AND tm.execution_status = 'cancelling' AND tm.retry_tripped = 1)
+       )
         AND t.status = 'active'
         AND (? IS NULL OR t.project_id = ? OR t.project_id = 'default')`
-  ).all(cwd ?? null, cwd ?? null) as Array<{ session_id: string; worktree_branch: string | null; worktree_dir: string | null; name: string; team_id: string; team_name: string; project_name: string }>
+   ).all(cwd ?? null, cwd ?? null) as Array<{ session_id: string; worktree_branch: string | null; worktree_dir: string | null; name: string; team_id: string; team_name: string; project_name: string }>
 
   let liveSessions: Record<string, { type: string }> = {}
   if (client) {
@@ -52,7 +54,19 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
   // Preserve branches then abort orphaned sessions
   let interrupted = 0
   for (const member of stale) {
-    if (liveSessions[member.session_id]) continue
+    const retryClaim = db.query(
+      "SELECT retry_tripped FROM team_member WHERE team_id = ? AND name = ? AND status = 'shutdown_requested' AND execution_status = 'cancelling'",
+    ).get(member.team_id, member.name) as { retry_tripped: number } | null
+    if (liveSessions[member.session_id]) {
+      if (retryClaim?.retry_tripped === 1) {
+        db.run(
+          `UPDATE team_member SET status = 'busy', execution_status = 'cancel_requested', retry_tripped = 0, time_updated = ?
+           WHERE team_id = ? AND name = ? AND status = 'shutdown_requested' AND execution_status = 'cancelling' AND retry_tripped = 1`,
+          [Date.now(), member.team_id, member.name],
+        )
+      }
+      continue
+    }
     // Preserve branch BEFORE abort — session.abort() may destroy the worktree + branch
     let preservedBranch: string | null = null
     let sourceBranch = member.worktree_branch
@@ -82,12 +96,18 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
       log(`recovery:branch:preserved src=${sourceBranch} target=${safeBranch}`)
     }
 
-    const claimed = db.run(
-      `UPDATE team_member SET execution_status = 'cancelling', time_updated = ?
-       WHERE team_id = ? AND name = ? AND status = 'busy'
-         AND execution_status IN ('idle', 'starting', 'running', 'cancel_requested')`,
-      [Date.now(), member.team_id, member.name],
-    ).changes === 1
+    const claimed = retryClaim?.retry_tripped === 1
+      ? db.run(
+          `UPDATE team_member SET time_updated = ? WHERE team_id = ? AND name = ?
+           AND status = 'shutdown_requested' AND execution_status = 'cancelling' AND retry_tripped = 1`,
+          [Date.now(), member.team_id, member.name],
+        ).changes === 1
+      : db.run(
+          `UPDATE team_member SET execution_status = 'cancelling', time_updated = ?
+           WHERE team_id = ? AND name = ? AND status = 'busy'
+             AND execution_status IN ('idle', 'starting', 'running', 'cancel_requested')`,
+          [Date.now(), member.team_id, member.name],
+        ).changes === 1
     if (!claimed) continue
 
     try {
@@ -95,10 +115,11 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       db.run(
-        `UPDATE team_member SET status = 'busy', execution_status = 'cancel_requested', time_updated = ?
+        `UPDATE team_member SET status = 'busy', execution_status = 'cancel_requested', retry_tripped = 0, time_updated = ?
          WHERE team_id = ? AND name = ?
            AND (
-             (status = 'busy' AND execution_status = 'cancelling')
+              (status = 'busy' AND execution_status = 'cancelling')
+              OR (status = 'shutdown_requested' AND execution_status = 'cancelling' AND retry_tripped = 1)
              OR (status = 'ready' AND execution_status = 'idle' AND reported_to_lead = 0
                AND EXISTS (
                  SELECT 1 FROM team_task
@@ -124,9 +145,10 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
 
     const transitioned = db.transaction(() => {
       const result = db.run(
-        `UPDATE team_member SET status = 'error', execution_status = 'idle', time_updated = ?
-         WHERE team_id = ? AND name = ?
-           AND (status = 'ready' OR (status = 'busy' AND execution_status = 'cancelling'))`,
+         `UPDATE team_member SET status = 'error', execution_status = 'idle', time_updated = ?
+          WHERE team_id = ? AND name = ?
+            AND (status = 'ready' OR (status = 'busy' AND execution_status = 'cancelling')
+              OR (status = 'shutdown_requested' AND execution_status = 'cancelling' AND retry_tripped = 1))`,
         [Date.now(), member.team_id, member.name],
       )
       if (result.changes !== 1) return false
@@ -289,7 +311,7 @@ export async function recoverOrphanedBranches(db: Database, cwd: string): Promis
   // Get archived team namespaces for this project that have NO active members.
   // The team id namespace is current; team names are kept for legacy preserved branches.
   const archivedTeams = db.query(
-    `SELECT t.id, t.name, p.name as project_name FROM team t
+    `SELECT t.id, t.name, COALESCE(p.slug, p.name) as project_name FROM team t
      JOIN project p ON t.project_id = p.id
      WHERE t.status = 'archived'
       AND t.project_id = ?

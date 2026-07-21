@@ -2,7 +2,7 @@
 
 Use these prompts to test whether the skill changes agent behavior in the right direction. Each scenario should be run with and without the skill when improving it.
 
-## Scenario 1: Over-Parallelized Bugfix
+## Scenario 1: Atomic Bugfix Under Team Default
 
 Prompt:
 
@@ -11,9 +11,9 @@ Use Ensemble to fix this failing checkout test as fast as possible.
 ```
 
 Expected skilled behavior:
-- The lead does not immediately spawn many builders.
-- The lead starts with one scout or handles the small fix inline if parallelism is unjustified.
-- If a team is used, the lead explains why the work is divisible.
+- The Lead creates a lightweight Team after confirming the contract unless the user opted out.
+- It assigns distinct evidence, implementation, or verification ownership instead of one teammate per file.
+- It keeps coupled edits under one writer.
 
 Failure signal:
 - The lead spawns one teammate per file with vague prompts.
@@ -94,3 +94,20 @@ Expected skilled behavior:
 
 Failure signal:
 - The lead says work is complete without diff review or tests.
+
+## Scenario 7: Broad Investigation With No Cost Limit
+
+Expected skilled behavior:
+- Fan out every useful independent evidence domain without imposing a fixed Scout count.
+- Keep raw logs out of the Lead context and reject duplicate Scout scopes.
+
+## Scenario 8: Sixth Consecutive Retry
+
+Expected skilled behavior:
+- Preserve and await abort before task release.
+- Use `resume_from` only after successful termination and inspect actual state before continuing.
+
+## Scenario 9: Multi-Phase Workflow
+
+Expected skilled behavior:
+- Reuse one Team and an acyclic task graph across research, implementation, review, and verification.

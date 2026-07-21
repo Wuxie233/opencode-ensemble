@@ -1,27 +1,23 @@
 import type { Database } from "./db"
 import type { MemberRegistry, DescendantTracker } from "./state"
-import { sendMessage } from "./messaging"
 import { findTeamBySession } from "./types"
+import { sendMessage } from "./messaging"
 
 const TEAM_TOOL_PREFIX = "team_"
-const EMPTY_RESPONSE_MESSAGE = "Provider returned an empty response"
 const RETRY_WARNING_THRESHOLD = 6
 
-interface RetrySequence {
-  count: number
-  attempts: Set<number>
-  notified: boolean
-}
-
-/** Lead wake target returned when a retry sequence first crosses the threshold. */
-export interface RetryWarning {
+/** Durable request returned when a teammate exhausts its retry allowance. */
+export interface RetryExhaustion {
   leadSessionId: string
   memberName: string
+  sessionId: string
+  teamId: string
+  reason: string
+  attempts: number
 }
 
 /** Tracks and reports consecutive retries for teammate sessions. */
 export class RetryTracker {
-  private readonly sequences = new Map<string, RetrySequence>()
   private readonly assistantMessages = new Map<string, Set<string>>()
 
   /** Observe a session status without treating retry-attempt busy transitions as progress. */
@@ -32,44 +28,56 @@ export class RetryTracker {
     status: "idle" | "busy" | "retry",
     message?: string,
     attempt?: number,
-  ): RetryWarning | undefined {
+  ): RetryExhaustion | undefined {
     if (status === "busy") return
     if (status === "idle") {
-      this.sequences.delete(sessionId)
+      resetRetrySequence(db, sessionId)
       this.assistantMessages.delete(sessionId)
       return
     }
 
     const teamInfo = findTeamBySession(db, registry, sessionId)
     if (!teamInfo || teamInfo.role !== "member" || !teamInfo.memberName) return
+    const memberName = teamInfo.memberName
     if (attempt === undefined) return
 
-    const current = this.sequences.get(sessionId) ?? { count: 0, attempts: new Set<number>(), notified: false }
-    if (current.attempts.has(attempt)) return
-
-    const next = {
-      count: current.count + 1,
-      attempts: new Set(current.attempts).add(attempt),
-      notified: current.notified,
-    }
-    this.sequences.set(sessionId, next)
-    if (next.count !== RETRY_WARNING_THRESHOLD || next.notified) return
-
-    const team = db.query("SELECT lead_session_id FROM team WHERE id = ? AND status = 'active'")
-      .get(teamInfo.teamId) as { lead_session_id: string } | null
-    if (!team) return
-
-    const content = message === EMPTY_RESPONSE_MESSAGE
-      ? `Teammate "${teamInfo.memberName}" (session ${sessionId}) returned an empty provider response ${RETRY_WARNING_THRESHOLD} consecutive times and may be bugged/unusable. Spawn a replacement with resume_from: "${teamInfo.memberName}" to continue with its context. The existing teammate was left running and unchanged.`
-      : `Teammate "${teamInfo.memberName}" (session ${sessionId}) retried ${RETRY_WARNING_THRESHOLD} consecutive times. Latest retry reason: ${message?.trim() || "unspecified retry reason"}. The session may be stuck. Inspect the provider/model availability; if retries continue, spawn a replacement with resume_from: "${teamInfo.memberName}" to continue with its context. The existing teammate was left running and unchanged.`
-    sendMessage(db, {
-      teamId: teamInfo.teamId,
-      from: "system",
-      to: "lead",
-      content,
-    })
-    next.notified = true
-    return { leadSessionId: team.lead_session_id, memberName: teamInfo.memberName }
+    return db.transaction((): RetryExhaustion | undefined => {
+      const row = db.query(
+        `SELECT tm.retry_attempts, tm.retry_count, tm.retry_tripped, t.lead_session_id
+         FROM team_member tm
+         JOIN team t ON t.id = tm.team_id
+         WHERE tm.team_id = ? AND tm.name = ? AND tm.session_id = ?
+           AND t.status = 'active' AND tm.status IN ('ready', 'busy')
+           AND tm.execution_status IN ('idle', 'starting', 'running', 'cancel_requested')`,
+      ).get(teamInfo.teamId, memberName, sessionId) as {
+        retry_attempts: string | null
+        retry_count: number
+        retry_tripped: number
+        lead_session_id: string
+      } | null
+      if (!row || row.retry_tripped === 1) return
+      const attempts = parseRetryAttempts(row.retry_attempts)
+      if (attempts.has(attempt)) return
+      attempts.add(attempt)
+      const count = row.retry_count + 1
+      const tripped = count >= RETRY_WARNING_THRESHOLD ? 1 : 0
+      const updated = db.run(
+        `UPDATE team_member SET retry_attempts = ?, retry_count = ?, retry_tripped = ?, time_updated = ?
+         WHERE team_id = ? AND name = ? AND session_id = ? AND retry_tripped = 0
+           AND status IN ('ready', 'busy')
+           AND execution_status IN ('idle', 'starting', 'running', 'cancel_requested')`,
+        [JSON.stringify([...attempts]), count, tripped, Date.now(), teamInfo.teamId, memberName, sessionId],
+      )
+      if (updated.changes !== 1 || tripped === 0) return
+      return {
+        leadSessionId: row.lead_session_id,
+        memberName,
+        sessionId,
+        teamId: teamInfo.teamId,
+        reason: message?.trim() || "unspecified retry reason",
+        attempts: count,
+      }
+    })()
   }
 
   /** Record message ownership so only assistant output resets a retry sequence. */
@@ -81,20 +89,38 @@ export class RetryTracker {
   }
 
   /** Reset a session's retry sequence after meaningful model output. */
-  observeOutput(sessionId: string, part: unknown): void {
+  observeOutput(db: Database, sessionId: string, part: unknown): void {
     if (!part || typeof part !== "object") return
     const messageId = (part as { messageID?: string }).messageID
     if (!messageId || !this.assistantMessages.get(sessionId)?.has(messageId)) return
     if (!isMeaningfulOutputPart(part)) return
-    this.sequences.delete(sessionId)
+    resetRetrySequence(db, sessionId)
   }
 
   /** Reset a session's retry sequence after a terminal session error. */
-  observeSessionError(sessionId: string | undefined): void {
+  observeSessionError(db: Database, sessionId: string | undefined): void {
     if (!sessionId) return
-    this.sequences.delete(sessionId)
+    resetRetrySequence(db, sessionId)
     this.assistantMessages.delete(sessionId)
   }
+}
+
+function parseRetryAttempts(value: string | null): Set<number> {
+  if (!value) return new Set<number>()
+  try {
+    const parsed: unknown = JSON.parse(value)
+    return new Set(Array.isArray(parsed) ? parsed.filter((item): item is number => typeof item === "number") : [])
+  } catch {
+    return new Set<number>()
+  }
+}
+
+function resetRetrySequence(db: Database, sessionId: string, includeCancelling = false): void {
+  db.run(
+    `UPDATE team_member SET retry_attempts = NULL, retry_count = 0, retry_tripped = 0
+     WHERE session_id = ?${includeCancelling ? "" : " AND execution_status != 'cancelling'"}`,
+    [sessionId],
+  )
 }
 
 function isMeaningfulOutputPart(part: unknown): boolean {
@@ -143,6 +169,7 @@ export function handleSessionStatusEvent(
 
   if (member.status === "error" || member.status === "shutdown") return undefined
   if (status === "idle" && member.abort_recovery_state === "checking") return undefined
+  if (status === "idle" && member.execution_status === "cancelling") return undefined
 
   if (status === "idle") {
     if (member.status === "shutdown_requested") return undefined
@@ -185,6 +212,7 @@ export function handleSessionStatusEvent(
     }
     // Session went busy while shutdown was requested — signal for re-abort
     if (member.status === "shutdown_requested") {
+      if (member.execution_status === "cancelling") return undefined
       return { memberName: entry.memberName, teamId: entry.teamId, from: "shutdown_requested", to: "busy_while_shutdown" }
     }
   }
@@ -314,7 +342,8 @@ export function handleSessionErrorEvent(
     const claimed = db.run(
       `UPDATE team_member
        SET status = 'error', execution_status = 'failed', time_updated = ?
-       WHERE team_id = ? AND name = ? AND session_id = ? AND status IN ('ready', 'busy')`,
+       WHERE team_id = ? AND name = ? AND session_id = ? AND status IN ('ready', 'busy')
+         AND execution_status IN ('idle', 'starting', 'running', 'cancel_requested')`,
       [Date.now(), member.team_id, member.name, sessionId],
     )
     if (claimed.changes !== 1) return undefined
@@ -338,6 +367,6 @@ export function handleSessionErrorEvent(
     return { leadSessionId: member.lead_session_id, memberName: member.name }
   })()
 
-  if (alert) registry.register(member.team_id, member.name, sessionId)
+  if (alert) registry.unregister(sessionId)
   return alert
 }

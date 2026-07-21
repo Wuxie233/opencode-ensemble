@@ -1,6 +1,6 @@
 # OpenCode Ensemble Skill
 
-Guidance for using OpenCode Ensemble to coordinate multiple AI coding agents safely and effectively.
+Guidance for using OpenCode Ensemble as the default development orchestrator, maximizing useful parallelism while keeping the Lead context concise.
 
 Install from this repository:
 
@@ -8,7 +8,7 @@ Install from this repository:
 npx skills@latest add hueyexe/opencode-ensemble --skill opencode-ensemble
 ```
 
-Use this skill when you want your agent to decide whether a team is worthwhile, split work into independent slices, choose `explore` vs `build` teammates, select model strategy, write teammate prompts, review results, and clean up safely.
+Use this skill to split work into independent evidence and delivery slices, create task DAGs, isolate raw evidence from the Lead, recover failed sessions, review results, and clean up safely. It does not impose a teammate or Scout limit; each teammate must own a distinct useful boundary.
 
 ## Structure
 

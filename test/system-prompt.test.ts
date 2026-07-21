@@ -31,6 +31,8 @@ describe("buildLeadSystemPrompt", () => {
     expect(result).toContain("1 in progress")
     expect(result).toContain("1 pending")
     expect(result).toContain("wait for messages")
+    expect(result).toContain("Reuse this Team")
+    expect(result).toContain("resume_from")
   })
 
   test("handles empty team with no members and no tasks", () => {
@@ -121,6 +123,58 @@ describe("buildLeadSystemPrompt", () => {
     const result = buildLeadSystemPrompt(db, "t7")
 
     expect(result).not.toContain("Team Messages")
+  })
+
+  test("persists a bounded rolling Lead Brief and injects it into prompt and compaction", () => {
+    const db = setupDb()
+    insertTeam(db, "brief-team", "brief-team", "lead-sess")
+    insertMember(db, "brief-team", "alice", "sess-a", "busy")
+    db.run("UPDATE team SET current_phase = 'implementation' WHERE id = 'brief-team'")
+    insertTask(db, "brief-team", "task-active", "in_progress")
+    db.run(
+      "INSERT INTO team_message (id, team_id, from_name, to_name, content, delivered, read, time_created) VALUES (?, ?, ?, ?, ?, 1, 0, ?)",
+      ["brief-msg", "brief-team", "alice", "lead", "<task-result><kind>progress</kind><task_id>task-active</task_id><status>in_progress</status><summary>API contract mapped</summary><details>" + "x".repeat(20_000) + "</details></task-result>", Date.now()],
+    )
+
+    const prompt = buildLeadSystemPrompt(db, "brief-team")
+    const stored = db.query("SELECT lead_brief FROM team WHERE id = 'brief-team'").get() as { lead_brief: string }
+    expect(stored.lead_brief).toContain("Phase: implementation")
+    expect(stored.lead_brief).toContain("API contract mapped")
+    expect(new TextEncoder().encode(stored.lead_brief).length).toBeLessThanOrEqual(8 * 1024)
+    expect(prompt).toContain("--- Lead Brief ---")
+    expect(buildTeamCompactionContext(db, "brief-team", "lead")).toContain("API contract mapped")
+  })
+
+  test("retains structured milestones after newer unstructured messages", () => {
+    const db = setupDb()
+    insertTeam(db, "brief-retain", "brief-retain", "lead-sess")
+    db.run(
+      "INSERT INTO team_message (id, team_id, from_name, to_name, content, delivered, read, time_created) VALUES (?, ?, ?, ?, ?, 1, 0, ?)",
+      ["milestone", "brief-retain", "alice", "lead", "<task-result><kind>progress</kind><task_id>task-a</task_id><status>in_progress</status><summary>Durable milestone</summary><details>evidence</details></task-result>", 1],
+    )
+    for (let index = 0; index < 20; index++) {
+      db.run(
+        "INSERT INTO team_message (id, team_id, from_name, to_name, content, delivered, read, time_created) VALUES (?, ?, ?, ?, ?, 1, 0, ?)",
+        [`plain-${index}`, "brief-retain", "alice", "lead", `plain ${index}`, index + 2],
+      )
+    }
+
+    expect(buildLeadSystemPrompt(db, "brief-retain")).toContain("Durable milestone")
+  })
+
+  test("keeps only the latest structured summary for the same task and kind", () => {
+    const db = setupDb()
+    insertTeam(db, "brief-dedupe", "brief-dedupe", "lead-sess")
+    for (const [id, summary, time] of [["old", "Old state", 1], ["new", "New state", 2]] as const) {
+      db.run(
+        "INSERT INTO team_message (id, team_id, from_name, to_name, content, delivered, read, time_created) VALUES (?, ?, ?, ?, ?, 1, 0, ?)",
+        [id, "brief-dedupe", "alice", "lead", `<task-result><kind>progress</kind><task_id>task-a</task_id><status>in_progress</status><summary>${summary}</summary><details>evidence</details></task-result>`, time],
+      )
+    }
+
+    const prompt = buildLeadSystemPrompt(db, "brief-dedupe")
+    expect(prompt).toContain("New state")
+    expect(prompt).not.toContain("Old state")
   })
 })
 

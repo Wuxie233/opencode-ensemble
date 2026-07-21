@@ -48,6 +48,39 @@ describe("schema migrations", () => {
     expect(columns.some(column => column.name === "abort_recovery_claim_expires_at")).toBe(true)
   })
 
+  test("adds durable workflow and retry state in migration 12", () => {
+    applyMigrations(db)
+    const memberColumns = db.query("PRAGMA table_info(team_member)").all() as Array<{ name: string }>
+    const teamColumns = db.query("PRAGMA table_info(team)").all() as Array<{ name: string }>
+    const taskColumns = db.query("PRAGMA table_info(team_task)").all() as Array<{ name: string }>
+    const projectColumns = db.query("PRAGMA table_info(project)").all() as Array<{ name: string }>
+
+    expect(memberColumns.map(column => column.name)).toEqual(expect.arrayContaining([
+      "retry_attempts", "retry_count", "retry_tripped", "merge_state", "merged_source_branch",
+    ]))
+    expect(teamColumns.map(column => column.name)).toEqual(expect.arrayContaining([
+      "current_phase", "lead_brief", "lead_brief_updated_at",
+    ]))
+    expect(taskColumns.map(column => column.name)).toContain("phase")
+    expect(projectColumns.map(column => column.name)).toContain("slug")
+  })
+
+  test("migration 12 backfills a resource-safe fallback for non-ASCII project names", () => {
+    for (let i = 0; i < 11; i++) {
+      db.exec(MIGRATIONS[i]!)
+      db.exec(`PRAGMA user_version = ${i + 1}`)
+    }
+    db.run(
+      "INSERT INTO project (id, name, path, status, time_created, time_updated) VALUES (?, ?, ?, 'active', 1, 1)",
+      ["/tmp/chinese-project", "银色河流项目", "/tmp/chinese-project"],
+    )
+
+    applyMigrations(db)
+
+    expect(db.query("SELECT slug FROM project WHERE id = ?").get("/tmp/chinese-project"))
+      .toEqual({ slug: "project" })
+  })
+
   test("creates team_task table", () => {
     applyMigrations(db)
     const row = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='team_task'").get()
@@ -138,8 +171,9 @@ describe("schema migrations", () => {
 
     const version = db.query("PRAGMA user_version").get() as { user_version: number }
     expect(version.user_version).toBe(MIGRATIONS.length)
-    const project = db.query("SELECT id, name FROM project WHERE id = 'default'").get() as { id: string; name: string }
+    const project = db.query("SELECT id, name, slug FROM project WHERE id = 'default'").get() as { id: string; name: string; slug: string }
     expect(project.name).toBe("Default Project")
+    expect(project.slug).toBe("project")
     const team = db.query("SELECT name, project_id, lead_agent FROM team WHERE id = 't1'").get() as { name: string; project_id: string; lead_agent: string }
     expect(team).toEqual({ name: "legacy-team", project_id: "default", lead_agent: "build" })
     const member = db.query("SELECT prompt, workspace_id, reported_to_lead FROM team_member WHERE team_id = 't1' AND name = 'alice'").get() as { prompt: string; workspace_id: string; reported_to_lead: number }

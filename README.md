@@ -37,39 +37,28 @@ duplicate orders. Add regression tests and review the final diff for risk."
 
 The lead agent:
 1. Creates a team called "checkout-idempotency".
-2. Adds independent tasks first and records the generated task IDs.
-3. Adds dependent QA and review tasks with `depends_on` using real returned IDs.
-4. Spawns a small team with explicit roles:
+2. Adds one task DAG with batch-local keys, real dependencies, and workflow phases.
+3. Records the returned key-to-ID mapping for assignment and later task batches.
+4. Spawns teammates with distinct evidence or delivery ownership:
    - scout: explore agent, worktree disabled, model openai/gpt-5.3-codex-spark
    - api-dev: build agent, own worktree, model anthropic/claude-opus-4-7, plan_approval: true
    - qa: build agent, own worktree, model anthropic/claude-sonnet-4-6
    - reviewer: explore agent, worktree disabled, model openai/gpt-5.3-codex-spark
 ```
 
-The lead uses the task board to make sequencing visible. Record the returned task IDs before creating dependent tasks:
+The lead uses the task board to make sequencing visible. A single batch can use local keys, including forward references:
 
 ```ts
 team_tasks_add({
   tasks: [
-    { content: "Map checkout webhook flow and identify idempotency risks", priority: "high" },
-    { content: "Implement duplicate-webhook idempotency guard", priority: "high" },
+    { key: "map-flow", content: "Map checkout webhook flow and identify idempotency risks", priority: "high", phase: "research" },
+    { key: "implement", content: "Implement duplicate-webhook idempotency guard", priority: "high", depends_on: ["map-flow"], phase: "implementation" },
+    { key: "regression", content: "Add regression tests for duplicate webhook delivery", priority: "high", depends_on: ["implement"], phase: "verification" },
+    { key: "review", content: "Review final diff for order, payment, and retry risks", priority: "medium", depends_on: ["implement", "regression"], phase: "review" },
   ],
 })
-// -> Added 2 tasks: task_abc123, task_def456
-
-team_tasks_add({
-  tasks: [
-    { content: "Add regression tests for duplicate webhook delivery", priority: "high", depends_on: ["task_def456"] },
-  ],
-})
-// -> Added 1 task: task_ghi789
-
-team_tasks_add({
-  tasks: [
-    { content: "Review final diff for order, payment, and retry risks", priority: "medium", depends_on: ["task_def456", "task_ghi789"] },
-  ],
-})
-// -> Added 1 task: task_jkl012
+// -> Added 4 tasks: map-flow=task_abc123, implement=task_def456,
+//    regression=task_ghi789, review=task_jkl012
 ```
 
 Then it spawns teammates one at a time:
@@ -94,16 +83,26 @@ team_spawn({
 })
 ```
 
-The same pattern assigns `qa` to regression tests and `reviewer` to final review. The reviewer stays read-only (`worktree: false`) so it can inspect merged changes without producing another branch.
+The same Team continues through implementation, verification, review, and recovery. The reviewer stays read-only (`worktree: false`) so it can inspect merged changes without producing another branch.
 
-Teammates coordinate without the lead polling:
+Teammates coordinate without the lead polling. Structured `progress`, `result`, and `blocker` summaries feed a bounded Lead Brief; raw logs stay in teammate sessions unless the lead retrieves them with `team_results`:
 
-```
-scout -> lead: "Checkout flow is src/webhooks/stripe.ts -> createOrderFromPayment(). Existing tests are in test/checkout-webhook.test.ts. Risk: retries race before order insert commits."
-api-dev -> lead: "Plan ready: add unique event_id insert before order creation, treat duplicate insert as success, add a transaction around order creation."
-lead -> api-dev: approves plan
-qa -> api-dev: "Which duplicate signal should tests assert: event_id conflict or existing order lookup?"
-api-dev -> qa: "Assert duplicate event_id returns success and creates one order. See src/webhooks/stripe.ts."
+```xml
+<task-result>
+<kind>progress</kind>
+<task_id>task_abc123</task_id>
+<status>in_progress</status>
+<summary>Mapped the checkout flow and found a pre-insert retry race</summary>
+<details>src/webhooks/stripe.ts calls createOrderFromPayment(); coverage is in test/checkout-webhook.test.ts.</details>
+</task-result>
+
+<task-result>
+<kind>result</kind>
+<task_id>task_def456</task_id>
+<status>completed</status>
+<summary>Added event-id idempotency inside the order transaction</summary>
+<details>Duplicate event inserts now return success without creating another order.</details>
+</task-result>
 ```
 
 When work is done, the lead reviews and integrates deliberately:
@@ -135,7 +134,7 @@ The skill is useful when you want the agent to decide whether parallel work is a
 Good team shapes:
 
 - **Scout, builder, reviewer**: one read-only `explore` agent maps the code, one `build` agent changes it, one read-only `explore` agent reviews the diff.
-- **Parallel slices**: two or three `build` agents own independent files or vertical slices, then one reviewer checks the combined result.
+- **Parallel slices**: multiple `build` agents own independent files or vertical slices, then a reviewer checks the combined result.
 - **Risky change**: use `plan_approval: true` on the implementing teammate, then approve or reject the plan through `team_message` before edits begin.
 
 ## Dashboard
@@ -245,10 +244,10 @@ Build with `bun run build`, then restart OpenCode to pick up changes.
 
 | Tool | What it does |
 |------|-------------|
-| `team_create` | Create a team. Caller becomes the lead. Accepts optional `project_name` to label the project. |
+| `team_create` | Create a team. Caller becomes the lead. Accepts an optional Unicode project display name while resource names use a safe internal slug. |
 | `team_spawn` | Start a new teammate with a task. Supports `plan_approval` and `resume_from` handoff. |
 | `team_shutdown` | Ask a teammate to stop. Preserves their branch before aborting. Supports `force` flag. |
-| `team_merge` | Merge a shutdown teammate's branch into working directory (unstaged). Blocks if you have local changes to overlapping files. |
+| `team_merge` | Merge a shutdown teammate's branch into working directory (unstaged). Blocks overlapping local changes and converges safely on repeated calls. |
 | `team_cleanup` | Remove the current team when done. Safety-net merges forgotten branches. With `purge`, previews archived-team deletion and returns exact approval labels plus a confirmation token. |
 | `team_status` | See all members, their status, and a task summary. Session IDs are shown only to the lead. |
 | `team_view` | Switch the TUI to a teammate's session. |
@@ -261,15 +260,15 @@ Archived-team purge is intentionally two-step. First call `team_cleanup` with `p
 |------|-------------|
 | `team_message` | Send a direct message to a teammate or the lead. Also handles plan approval/rejection. |
 | `team_broadcast` | Message everyone on the team. |
-| `team_results` | Retrieve full message content (messages to lead are truncated on delivery). |
+| `team_results` | Atomically retrieve up to 20 unread messages for the caller without consuming another member's inbox. Repeat for the next batch or pass `message_id` for one specific unread message. |
 
 **Task board** (everyone)
 
 | Tool | What it does |
 |------|-------------|
 | `team_tasks_list` | See all tasks with status and assignee. |
-| `team_tasks_add` | Add tasks to the shared board. |
-| `team_tasks_complete` | Mark a task done. Unblocks dependents. |
+| `team_tasks_add` | Add a transactional DAG using existing same-Team IDs or batch-local keys; rejects missing, cross-Team, self, and cyclic dependencies. Supports workflow phases. |
+| `team_tasks_complete` | Idempotently mark a task done, notify the Lead once, and unblock dependents. |
 | `team_claim` | Claim a pending task. Atomic, prevents double-claims. |
 
 ## What you see in the TUI
@@ -293,6 +292,7 @@ Teammate messages arrive in the lead's session as `[Team message from alice]: ..
 - **Git worktree isolation**: each teammate gets their own worktree by default, so multiple agents can edit files without conflicts. Opt out with `worktree: false` for read-only agents.
 - **System prompt injection**: the lead's system prompt includes team state (member statuses, task counts) on every LLM call. Teammates get a short role reminder.
 - **Compaction safety**: team context is preserved when OpenCode compacts long conversations
+- **Bounded Lead Brief**: structured milestone summaries, active work, blockers, and phases remain available without copying raw evidence into the Lead context
 - **Shell environment**: teammate shells get `ENSEMBLE_TEAM`, `ENSEMBLE_MEMBER`, `ENSEMBLE_ROLE`, and `ENSEMBLE_BRANCH` variables
 - **Sub-agent isolation**: teammates' sub-agents can't use team tools (parent chain tracking, max depth 10)
 - **Crash recovery**: stale busy members marked as errored on restart, orphaned sessions aborted, orphaned worktrees cleaned up, undelivered messages redelivered
@@ -303,6 +303,7 @@ Teammate messages arrive in the lead's session as `[Team message from alice]: ..
 - **Auto-merge on cleanup**: worktree branches are squash-merged into your working directory as unstaged changes for review
 - **Overlap detection**: `team_merge` blocks when you have local changes to files the agent also modified, preventing silent overwrites
 - **Spawn circuit breaker**: stops retrying after 3 consecutive spawn failures
+- **Provider retry breaker**: attempts one through five remain silent; the sixth distinct consecutive retry preserves the branch, awaits abort, releases in-progress tasks, and guides `resume_from` recovery
 - **Graceful shutdown**: busy teammates receive a shutdown message and finish their current work. Use `force: true` to abort immediately.
 - **Rate limiting**: token bucket (configurable via config file or `OPENCODE_ENSEMBLE_RATE_LIMIT`, default 10 tokens/sec)
 
@@ -426,13 +427,14 @@ STALL_THRESHOLD_MS=0
 
 ## Best practices
 
-- Start with 2-3 teammates. More agents means more coordination overhead.
+- Maximize useful parallelism across distinct evidence domains and delivery boundaries. Do not impose a fixed teammate or Scout count.
 - Give each teammate specific, self-contained tasks. Vague prompts produce vague results.
 - Spawn an explore agent first to understand the codebase, then spawn build agents with that context.
 - Use `worktree: false` for read-only agents (research, review, code analysis).
 - Use `plan_approval: true` for risky changes. The teammate sends a plan first, you review and approve before they write any code.
 - Don't micromanage. Teammates message you when done or when they're blocked.
 - Don't poll `team_status` in a loop. Wait for messages.
+- Reuse one Team across research, implementation, review, verification, and recovery.
 
 ## Known limitations
 

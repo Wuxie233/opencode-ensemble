@@ -2,16 +2,16 @@
 
 These are the coordination failures Ensemble should prevent, not amplify.
 
-## Anti-Pattern: Spawning Because The Task Feels Hard
+## Anti-Pattern: Serializing Independent Evidence
 
 What it looks like:
-- The lead creates a team before identifying independent slices.
+- The Lead performs broad searches, reads long logs, and tests unrelated hypotheses sequentially in its own context.
 
 Why it fails:
-- More agents add merge, review, and communication overhead. Parallelism helps only when the work can be separated.
+- It lengthens the critical path and fills the Lead context with raw evidence instead of decisions.
 
 Better approach:
-- Start with one scout. Spawn builders only after boundaries are clear.
+- Fan out read-only Scouts across distinct evidence domains and ask for concise decision-ready summaries.
 
 ## Anti-Pattern: Vague Delegation
 
@@ -56,6 +56,18 @@ Why it fails:
 
 Better approach:
 - Wait for teammate messages. Use status tools when the user asks for a snapshot or when a teammate appears stalled.
+
+## Anti-Pattern: One Team Per Phase
+
+- Reuse the active Team across research, implementation, review, verification, and recovery so the task graph and Lead Brief remain continuous.
+
+## Anti-Pattern: Duplicate Scouts
+
+- Do not cap Scout count, but give every Scout a distinct evidence domain, subsystem, source, or falsifiable hypothesis.
+
+## Anti-Pattern: Replacing Before Abort Completes
+
+- Preserve the branch and await abort before releasing ownership. Then use `resume_from` and require actual-state inspection.
 
 ## Anti-Pattern: Trusting A Result Without Review
 

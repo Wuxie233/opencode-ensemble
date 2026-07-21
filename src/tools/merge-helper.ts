@@ -42,7 +42,7 @@ function resourcePart(value: string): string {
 /** Load the human-readable pieces used to build team resource names. */
 export function getTeamResourceParts(db: Database, teamId: string): TeamResourceParts {
   const row = db.query(
-    `SELECT t.id as team_id, t.name as team_name, p.name as project_name
+     `SELECT t.id as team_id, t.name as team_name, COALESCE(p.slug, p.name) as project_name
      FROM team t
      JOIN project p ON t.project_id = p.id
      WHERE t.id = ?`

@@ -17,6 +17,6 @@ export async function executeTeamTasksList(
   if (tasks.length === 0) return "No tasks on the board."
 
   return tasks.map(t =>
-    `[${t.status}] ${t.content} (${t.id})${t.assignee ? ` → ${t.assignee}` : ""}${t.priority !== "medium" ? ` [${t.priority}]` : ""}`
+    `[${t.status}] ${t.content} (${t.id})${t.assignee ? ` → ${t.assignee}` : ""}${t.priority !== "medium" ? ` [${t.priority}]` : ""}${t.phase ? ` [phase: ${t.phase}]` : ""}`
   ).join("\n")
 }

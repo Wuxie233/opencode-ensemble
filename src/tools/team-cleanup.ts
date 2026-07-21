@@ -77,14 +77,14 @@ function resolvePurgeTargets(deps: ToolDeps, purge: string[]): PurgeTarget[] {
   }
 
   if (purge.includes("*")) {
-    return deps.db.query("SELECT t.id, t.name, t.project_id, p.name as project_name, t.time_updated FROM team t JOIN project p ON t.project_id = p.id WHERE t.status = 'archived' AND t.project_id = ? ORDER BY t.time_updated DESC, t.name ASC")
+    return deps.db.query("SELECT t.id, t.name, t.project_id, COALESCE(p.slug, p.name) as project_name, t.time_updated FROM team t JOIN project p ON t.project_id = p.id WHERE t.status = 'archived' AND t.project_id = ? ORDER BY t.time_updated DESC, t.name ASC")
       .all(deps.directory) as PurgeTarget[]
   }
 
   const uniqueNames = [...new Set(purge)]
   const rows = uniqueNames.map(name => ({
     name,
-    teams: deps.db.query("SELECT t.id, t.name, t.project_id, p.name as project_name, t.status, t.time_updated FROM team t JOIN project p ON t.project_id = p.id WHERE t.name = ? AND t.project_id = ? ORDER BY t.time_updated DESC")
+    teams: deps.db.query("SELECT t.id, t.name, t.project_id, COALESCE(p.slug, p.name) as project_name, t.status, t.time_updated FROM team t JOIN project p ON t.project_id = p.id WHERE t.name = ? AND t.project_id = ? ORDER BY t.time_updated DESC")
       .all(name, deps.directory) as Array<{ id: string; name: string; project_id: string; project_name: string; status: string; time_updated: number }>,
   }))
 
@@ -121,7 +121,7 @@ function deleteArchivedTeams(deps: ToolDeps, targets: PurgeTarget[]): void {
 function getPurgeMemberResources(deps: ToolDeps, targets: PurgeTarget[]): PurgeMemberResource[] {
   return targets.flatMap(target => deps.db.query(
     `SELECT t.name as team_name,
-            p.name as project_name,
+            COALESCE(p.slug, p.name) as project_name,
             tm.team_id,
             tm.name as member_name,
             tm.worktree_dir,
@@ -453,10 +453,19 @@ export async function executeTeamCleanup(
     return `Permanently deleted ${targets.length} ${noun}: ${targets.map(target => target.name).join(", ")}.`
   }
 
-  const teamInfo = requireLead(deps, sessionId)
+  let teamInfo: ReturnType<typeof requireLead>
+  try {
+    teamInfo = requireLead(deps, sessionId)
+  } catch (error) {
+    const archived = deps.db.query(
+      "SELECT name FROM team WHERE lead_session_id = ? AND project_id = ? AND status = 'archived' ORDER BY time_updated DESC LIMIT 1",
+    ).get(sessionId, deps.directory) as { name: string } | null
+    if (archived) return `Team "${archived.name}" was already cleaned up. No action was needed.`
+    throw error
+  }
 
-  const members = deps.db.query("SELECT name, session_id, status, worktree_dir, worktree_branch, workspace_id FROM team_member WHERE team_id = ?")
-    .all(teamInfo.teamId) as Array<{ name: string; session_id: string; status: string; worktree_dir: string | null; worktree_branch: string | null; workspace_id: string | null }>
+  const members = deps.db.query("SELECT name, session_id, status, worktree_dir, worktree_branch, workspace_id, merge_state FROM team_member WHERE team_id = ?")
+    .all(teamInfo.teamId) as Array<{ name: string; session_id: string; status: string; worktree_dir: string | null; worktree_branch: string | null; workspace_id: string | null; merge_state: string }>
 
   const active = members.filter(m => m.status !== "shutdown" && m.status !== "error")
   const abortable = members.filter(m => m.status !== "shutdown" && m.status !== "error")
@@ -567,8 +576,26 @@ export async function executeTeamCleanup(
     }
   }
 
-  // Safety net: merge any remaining unmerged preserved branches
-  const unmerged = members.filter(m => m.worktree_branch !== null)
+  // Safety net: merge only branches that have never entered integration.
+  const interruptedMerges = members.filter(member => member.worktree_branch !== null && member.merge_state === "merging")
+  if (interruptedMerges.length > 0) {
+    const names = interruptedMerges.map(member => `${member.name} (${member.worktree_branch})`).join(", ")
+    return `Team "${teamInfo.teamName}" was not cleaned up. Merge already started for: ${names}. Inspect git diff and the branch, then settle the merge explicitly; Ensemble will not reapply it automatically.`
+  }
+
+  const mergedWithBranch = members.filter(member => member.worktree_branch !== null && member.merge_state === "merged")
+  const residualBranches: string[] = []
+  for (const member of mergedWithBranch) {
+    const branch = member.worktree_branch!
+    if (await delBranch(branch, deps.directory)) {
+      deps.db.run("UPDATE team_member SET worktree_branch = NULL WHERE team_id = ? AND name = ?", [teamInfo.teamId, member.name])
+      member.worktree_branch = null
+    } else {
+      residualBranches.push(`${member.name} (${branch})`)
+    }
+  }
+
+  const unmerged = members.filter(member => member.worktree_branch !== null && member.merge_state === "none")
   const merged: string[] = []
   const conflicted: string[] = []
   const overlapWarnings: string[] = []
@@ -576,6 +603,14 @@ export async function executeTeamCleanup(
   if (unmerged.length > 0 && mergeOnCleanup) {
     for (const member of unmerged) {
       const branch = member.worktree_branch!
+      const claimed = deps.db.run(
+        "UPDATE team_member SET merge_state = 'merging', merged_source_branch = ? WHERE team_id = ? AND name = ? AND merge_state = 'none'",
+        [branch, teamInfo.teamId, member.name],
+      ).changes === 1
+      if (!claimed) {
+        conflicted.push(`${member.name} (${branch}; merge already being handled)`)
+        continue
+      }
       // Warn (but don't block) if lead has local changes to overlapping files
       try {
         const overlap = await overlapCheck(branch, deps.directory)
@@ -585,10 +620,16 @@ export async function executeTeamCleanup(
       } catch { /* best effort */ }
       const result = await merge(branch, deps.directory)
       if (result.ok) {
-        await delBranch(branch, deps.directory)
-        deps.db.run("UPDATE team_member SET worktree_branch = NULL WHERE team_id = ? AND name = ?", [teamInfo.teamId, member.name])
+        deps.db.run("UPDATE team_member SET merge_state = 'merged' WHERE team_id = ? AND name = ? AND merge_state = 'merging'", [teamInfo.teamId, member.name])
+        if (await delBranch(branch, deps.directory)) {
+          deps.db.run("UPDATE team_member SET worktree_branch = NULL WHERE team_id = ? AND name = ?", [teamInfo.teamId, member.name])
+          member.worktree_branch = null
+        } else {
+          residualBranches.push(`${member.name} (${branch})`)
+        }
         merged.push(`${member.name} (${branch})`)
       } else {
+        deps.db.run("UPDATE team_member SET merge_state = 'none' WHERE team_id = ? AND name = ? AND merge_state = 'merging'", [teamInfo.teamId, member.name])
         log(`cleanup:merge:conflict member=${member.name} branch=${branch} err=${result.error}`)
         conflicted.push(`${member.name} (${branch})`)
       }
@@ -638,6 +679,9 @@ export async function executeTeamCleanup(
   }
   if (overlapWarnings.length > 0) {
     parts.push(`Warning: safety-net merge overwrote local changes to overlapping files:\n${overlapWarnings.map(w => `  - ${w}`).join("\n")}\nReview with: git diff`)
+  }
+  if (residualBranches.length > 0) {
+    parts.push(`Branch cleanup failed after integration; these branches remain recorded and will not be merged twice: ${residualBranches.join(", ")}.`)
   }
   return parts.join("\n")
 }

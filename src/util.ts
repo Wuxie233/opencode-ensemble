@@ -35,9 +35,15 @@ export function generateProjectName(): string {
 
 /** Validate a project display name. Returns an error if invalid. */
 export function validateProjectName(name: string): string | undefined {
-  if (name.length < 1 || name.length > 64) return "Project name must be 1-64 characters"
-  if (!NAME_PATTERN.test(name)) return "Project name must be lowercase alphanumeric with hyphens only"
+  if (name.trim().length < 1 || name.length > 100) return "Project name must be 1-100 characters"
+  if (/\p{Cc}/u.test(name)) return "Project name cannot contain control characters"
   return undefined
+}
+
+/** Convert a display label to a stable resource-safe slug. */
+export function resourceSlug(name: string, fallback = "project"): string {
+  const slug = name.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "")
+  return slug || fallback
 }
 
 /**

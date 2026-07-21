@@ -1,5 +1,5 @@
 import type { ToolDeps } from "../types"
-import { generateId, generateProjectName, validateProjectName, validateTeamName } from "../util"
+import { generateId, generateProjectName, resourceSlug, validateProjectName, validateTeamName } from "../util"
 import { findTeamBySession } from "../types"
 
 /**
@@ -30,10 +30,10 @@ export async function executeTeamCreate(
   const now = Date.now()
   const projectName = args.project_name ?? generateProjectName()
   deps.db.run(
-    `INSERT INTO project (id, name, path, status, time_created, time_updated)
-     VALUES (?, ?, ?, 'active', ?, ?)
+    `INSERT INTO project (id, name, slug, path, status, time_created, time_updated)
+     VALUES (?, ?, ?, ?, 'active', ?, ?)
      ON CONFLICT(id) DO UPDATE SET time_updated = excluded.time_updated`,
-    [projectId, projectName, projectId, now, now]
+    [projectId, projectName, resourceSlug(projectName, "project"), projectId, now, now]
   )
   deps.db.run(
     "INSERT INTO team (id, name, project_id, lead_session_id, status, delegate, time_created, time_updated) VALUES (?, ?, ?, ?, 'active', 0, ?, ?)",

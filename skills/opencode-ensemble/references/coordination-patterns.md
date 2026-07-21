@@ -2,17 +2,17 @@
 
 Use these patterns as defaults. Adapt names and prompts to the project, but keep ownership narrow and outputs verifiable.
 
-## Pattern: Scout, Builder, Reviewer
+## Pattern: Evidence Fan-Out, Builder, Reviewer
 
 Best for unfamiliar code or risky changes.
 
 Team:
-- `scout`: `explore`, `worktree: false`, maps files, tests, risks, and recommended slice boundaries.
+- `scout-*`: any number of `explore`, `worktree: false` teammates, each assigned a distinct subsystem, evidence source, runtime question, or risk.
 - `builder`: `build`, `worktree: true`, implements one narrow change.
 - `reviewer`: `explore`, `worktree: false`, reviews the merged diff and test evidence.
 
 Why it works:
-- The scout reduces blind implementation.
+- Evidence fan-out keeps searches, raw logs, and experiments out of the Lead context while reducing blind implementation.
 - The builder has a focused edit surface.
 - The reviewer checks the integrated result instead of creating another branch.
 
@@ -20,7 +20,7 @@ Use `plan_approval: true` on the builder when the change touches payment, auth, 
 
 ## Pattern: Parallel Independent Slices
 
-Best when two or three vertical slices do not overlap.
+Best when multiple vertical slices do not overlap.
 
 Team:
 - `api-dev`: `build`, owns backend endpoint or service change.
@@ -39,14 +39,34 @@ Avoid this pattern when two builders would edit the same files or would need con
 Best for comparing options before implementation.
 
 Team:
-- Two or three `explore` teammates.
+- Any number of `explore` teammates justified by distinct evidence domains.
 - All use `worktree: false`.
 - Each investigates a different option, subsystem, or risk.
 
 Lead responsibility:
 - Give each researcher an explicit question.
 - Ask for a recommendation with tradeoffs and evidence.
+- Ask for concise milestone summaries; leave raw logs and full evidence in the teammate session.
 - Do not merge anything because no branches should be produced.
+
+## Pattern: One Team, Multiple Phases
+
+Best for work that moves from research to implementation, review, verification, or recovery.
+
+Task setup:
+- Create the Team once.
+- Add a batch DAG with local `key` values when dependencies are known together.
+- Use `phase` to record the current workflow phase.
+- Add later tasks with existing same-Team IDs rather than creating another Team.
+- Preserve continuity through structured `progress`, `result`, and `blocker` messages and the Lead Brief.
+
+## Pattern: Failed Teammate Replacement
+
+Lead flow:
+1. Confirm the failed session has stopped and its task is pending before assigning a replacement.
+2. Spawn a new teammate with `resume_from: "<failed-member>"` and the pending `claim_task`.
+3. Tell the replacement to inspect repository, task, and runtime state before acting.
+4. Do not replay commands or tool side effects merely because they appear in predecessor context.
 
 ## Pattern: QA After Implementation
 
@@ -54,8 +74,8 @@ Best when tests should reflect actual implementation details.
 
 Task setup:
 - Builder task: implement and commit the narrow change.
-- QA task: `depends_on` builder task ID.
-- Reviewer task: `depends_on` builder and QA task IDs.
+- QA task: `depends_on` the builder's local key or task ID.
+- Reviewer task: `depends_on` the builder and QA keys or IDs.
 
 Prompt QA to verify behavior from the public API or user flow, not to simply mirror implementation internals.
 

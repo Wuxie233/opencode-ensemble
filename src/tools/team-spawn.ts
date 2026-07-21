@@ -12,6 +12,7 @@ export const spawnFailures = new Map<string, { count: number; lastError: string 
 const spawnsInFlight = new Set<string>()
 /** Maximum UTF-8 bytes copied from a predecessor session into a replacement prompt. */
 export const RESUME_CONTEXT_BYTE_LIMIT = 32 * 1024
+const RESUME_SAFETY_INSTRUCTION = "Inspect actual repository, task, and runtime state before continuing. Do not replay tool side effects merely because they appear in the predecessor transcript."
 
 interface SpawnArgs {
   name: string
@@ -385,24 +386,15 @@ async function executeTeamSpawnLocked(
     )
   }
 
-  if (isReadOnly) {
-    context.push(
-      "", "Tools available to you:",
-      "- team_message: send a message to the lead or another teammate",
-      "- team_broadcast: send a message to all team members",
-      "- team_tasks_list: view the shared team task board",
-    )
-  } else {
-    context.push(
-      "", "Tools available to you:",
-      "- team_message: send a message to the lead or another teammate",
-      "- team_broadcast: send a message to all team members",
-      "- team_tasks_list: view the shared team task board",
-      "- team_tasks_add: add tasks to the shared board",
-      "- team_tasks_complete: mark a task complete on the shared board",
-      "- team_claim: claim a pending task from the shared board",
-    )
-  }
+  context.push(
+    "", "Tools available to you:",
+    "- team_message: send a message to the lead or another teammate",
+    "- team_broadcast: send a message to all team members",
+    "- team_tasks_list: view the shared team task board",
+    "- team_tasks_add: add tasks to the shared board",
+    "- team_tasks_complete: mark a task complete on the shared board",
+    "- team_claim: claim a pending task from the shared board",
+  )
 
   // Collaboration guidance for peer-to-peer communication
   if (otherMembers.length > 0) {
@@ -436,7 +428,9 @@ async function executeTeamSpawnLocked(
   }
   context.push(
     "<task-result>",
-    "<status>completed or failed</status>",
+    "<kind>progress, result, or blocker</kind>",
+    "<task_id>assigned task ID when applicable</task_id>",
+    "<status>pending, in_progress, completed, or failed</status>",
     "<summary>One-line summary of what you did</summary>",
     "<details>Full findings or changes made</details>",
   )
@@ -449,10 +443,11 @@ async function executeTeamSpawnLocked(
     `${lastStep}. STOP. Do not send follow-up confirmations, status updates, or 'standing by' messages.`,
     "",
     "If you are blocked:",
-    "- Send ONE message to the lead via team_message describing the specific blocker.",
+    "- Send ONE structured blocker message to the lead via team_message describing the specific blocker.",
     "- Do NOT attempt workarounds or make assumptions. Wait for the lead's response.",
     "",
     "Your plain text output is NOT visible to the team. You MUST use team_message to communicate.",
+    "Send concise incremental progress summaries only at meaningful milestones or phase transitions; keep raw logs and long evidence in your session unless the lead asks for them.",
   )
 
   if (resumeContext) {
@@ -460,6 +455,7 @@ async function executeTeamSpawnLocked(
       "",
       `Resumed context from teammate "${resumeContext.predecessor}" (reference only; your current task follows):`,
       resumeContext.text,
+      RESUME_SAFETY_INSTRUCTION,
     )
   }
 
@@ -583,12 +579,13 @@ async function buildResumeContext(deps: ToolDeps, teamId: string, predecessorNam
     `Original task:\n${predecessor.prompt ?? "(not recorded)"}`,
     transcript ? `Session transcript (chronological):\n${transcript}` : "Session transcript: (no readable messages)",
   ].join("\n\n")
-  if (utf8Length(fullContext) <= RESUME_CONTEXT_BYTE_LIMIT) {
+  const contextLimit = RESUME_CONTEXT_BYTE_LIMIT - utf8Length(`\n${RESUME_SAFETY_INSTRUCTION}`)
+  if (utf8Length(fullContext) <= contextLimit) {
     return { predecessor: predecessorName, text: fullContext, truncated: false }
   }
 
   const marker = "\n\n[... predecessor context truncated ...]\n\n"
-  const available = RESUME_CONTEXT_BYTE_LIMIT - utf8Length(marker)
+  const available = contextLimit - utf8Length(marker)
   const earlyLength = Math.floor(available * 0.4)
   const recentLength = available - earlyLength
   return {

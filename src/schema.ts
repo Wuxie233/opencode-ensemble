@@ -197,6 +197,27 @@ export const MIGRATIONS: string[] = [
   // Migration 11: Identify the instance that owns an abort inspection or prompt lease.
   `ALTER TABLE team_member ADD COLUMN abort_recovery_claim_token TEXT;
    ALTER TABLE team_member ADD COLUMN abort_recovery_claim_expires_at INTEGER;`,
+  // Migration 12: Durable retry exhaustion, lifecycle integration state, phases,
+  // project resource identity, and a bounded rolling Lead Brief.
+  `ALTER TABLE team_member ADD COLUMN retry_attempts TEXT;
+   ALTER TABLE team_member ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE team_member ADD COLUMN retry_tripped INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE team_member ADD COLUMN merge_state TEXT NOT NULL DEFAULT 'none'
+     CHECK(merge_state IN ('none', 'merging', 'merged'));
+   ALTER TABLE team_member ADD COLUMN merged_source_branch TEXT;
+   ALTER TABLE team ADD COLUMN current_phase TEXT;
+   ALTER TABLE team ADD COLUMN lead_brief TEXT;
+   ALTER TABLE team ADD COLUMN lead_brief_updated_at INTEGER;
+   ALTER TABLE team_task ADD COLUMN phase TEXT;
+   ALTER TABLE project ADD COLUMN slug TEXT;
+   UPDATE project SET slug = CASE
+     WHEN name != ''
+       AND name NOT GLOB '*[^a-z0-9-]*'
+       AND substr(name, 1, 1) != '-'
+       AND substr(name, -1, 1) != '-'
+       THEN name
+     ELSE 'project'
+   END WHERE slug IS NULL;`,
 ]
 
 /**

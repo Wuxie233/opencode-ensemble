@@ -549,20 +549,24 @@ describe("team_spawn", () => {
     const promptCall = deps.client.calls.find(c => c.method === "session.promptAsync")
     const text = (promptCall!.args[0] as { parts: Array<{ text: string }> }).parts[0]!.text
     expect(text).toContain("<task-result>")
-    expect(text).toContain("<status>")
+    expect(text).toContain("<kind>progress, result, or blocker</kind>")
+    expect(text).toContain("<task_id>assigned task ID when applicable</task_id>")
+    expect(text).toContain("<status>pending, in_progress, completed, or failed</status>")
     expect(text).toContain("<summary>")
   })
 
-  test("read-only agent gets shorter tool list without write tools", async () => {
+  test("read-only agent receives the same six coordination tools", async () => {
     await executeTeamSpawn(deps, {
       name: "alice", agent: "explore", prompt: "Research",
     }, "lead-sess", async () => true)
     const promptCall = deps.client.calls.find(c => c.method === "session.promptAsync")
     const text = (promptCall!.args[0] as { parts: Array<{ text: string }> }).parts[0]!.text
     expect(text).toContain("team_message")
-    expect(text).not.toContain("team_tasks_add")
-    expect(text).not.toContain("team_tasks_complete")
-    expect(text).not.toContain("team_claim")
+    expect(text).toContain("team_broadcast")
+    expect(text).toContain("team_tasks_list")
+    expect(text).toContain("team_tasks_add")
+    expect(text).toContain("team_tasks_complete")
+    expect(text).toContain("team_claim")
   })
 
   // --- Worktree tests ---

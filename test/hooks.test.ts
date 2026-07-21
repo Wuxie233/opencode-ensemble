@@ -268,7 +268,7 @@ describe("RetryTracker", () => {
     registry.register("t1", "alice", "sess-1")
   })
 
-  test("notifies the lead exactly once on the sixth consecutive retry", () => {
+  test("returns one circuit-break request on the sixth consecutive retry", () => {
     let warning: ReturnType<RetryTracker["observeStatus"]>
     for (let attempt = 1; attempt <= 8; attempt++) {
       warning = tracker.observeStatus(db, registry, "sess-1", "retry", "rate limited", attempt) ?? warning
@@ -278,13 +278,15 @@ describe("RetryTracker", () => {
     const messages = db.query(
       "SELECT content FROM team_message WHERE team_id = ? AND from_name = 'system' AND to_name = 'lead'",
     ).all("t1") as Array<{ content: string }>
-    expect(messages).toHaveLength(1)
-    expect(messages[0]!.content).toContain("alice")
-    expect(messages[0]!.content).toContain("sess-1")
-    expect(messages[0]!.content).toContain("rate limited")
-    expect(messages[0]!.content).toContain("6 consecutive times")
-    expect(messages[0]!.content).toContain("resume_from")
-    expect(warning).toEqual({ leadSessionId: "lead-sess", memberName: "alice" })
+    expect(messages).toHaveLength(0)
+    expect(warning).toEqual({
+      leadSessionId: "lead-sess",
+      memberName: "alice",
+      sessionId: "sess-1",
+      teamId: "t1",
+      reason: "rate limited",
+      attempts: 6,
+    })
     const member = db.query("SELECT status FROM team_member WHERE session_id = ?").get("sess-1") as { status: string }
     expect(member.status).toBe("busy")
   })
@@ -295,11 +297,10 @@ describe("RetryTracker", () => {
       tracker.observeStatus(db, registry, "sess-1", "busy")
     }
 
-    tracker.observeStatus(db, registry, "sess-1", "retry", "provider overloaded", 6)
-
-    const messages = db.query("SELECT content FROM team_message").all() as Array<{ content: string }>
-    expect(messages).toHaveLength(1)
-    expect(messages[0]!.content).toContain("provider overloaded")
+    expect(tracker.observeStatus(db, registry, "sess-1", "retry", "provider overloaded", 6)).toMatchObject({
+      reason: "provider overloaded",
+      attempts: 6,
+    })
   })
 
   test("resets on idle completion, meaningful assistant output, and terminal errors", () => {
@@ -308,9 +309,9 @@ describe("RetryTracker", () => {
     tracker.observeStatus(db, registry, "sess-1", "idle")
     for (let attempt = 1; attempt <= 5; attempt++) retry(attempt)
     tracker.observeMessage("sess-1", "assistant-message", "assistant")
-    tracker.observeOutput("sess-1", { type: "text", messageID: "assistant-message", text: "meaningful progress" })
+    tracker.observeOutput(db, "sess-1", { type: "text", messageID: "assistant-message", text: "meaningful progress" })
     for (let attempt = 1; attempt <= 5; attempt++) retry(attempt)
-    tracker.observeSessionError("sess-1")
+    tracker.observeSessionError(db, "sess-1")
     for (let attempt = 1; attempt <= 5; attempt++) retry(attempt)
 
     const count = (db.query("SELECT COUNT(*) AS count FROM team_message").get() as { count: number }).count
@@ -322,10 +323,9 @@ describe("RetryTracker", () => {
       tracker.observeStatus(db, registry, "sess-1", "retry", "Provider returned an empty response", index)
     }
     tracker.observeMessage("sess-1", "user-message", "user")
-    tracker.observeOutput("sess-1", { type: "text", messageID: "user-message", text: "incoming instruction" })
-    tracker.observeStatus(db, registry, "sess-1", "retry", "Provider returned an empty response", 6)
-
-    expect((db.query("SELECT COUNT(*) AS count FROM team_message").get() as { count: number }).count).toBe(1)
+    tracker.observeOutput(db, "sess-1", { type: "text", messageID: "user-message", text: "incoming instruction" })
+    expect(tracker.observeStatus(db, registry, "sess-1", "retry", "Provider returned an empty response", 6))
+      .toMatchObject({ attempts: 6 })
   })
 
   test("ignores duplicate retry events for the same attempt", () => {
@@ -335,8 +335,8 @@ describe("RetryTracker", () => {
     }
     expect((db.query("SELECT COUNT(*) AS count FROM team_message").get() as { count: number }).count).toBe(0)
 
-    tracker.observeStatus(db, registry, "sess-1", "retry", "Provider returned an empty response", 6)
-    expect((db.query("SELECT COUNT(*) AS count FROM team_message").get() as { count: number }).count).toBe(1)
+    expect(tracker.observeStatus(db, registry, "sess-1", "retry", "Provider returned an empty response", 6))
+      .toMatchObject({ attempts: 6 })
   })
 
   test("ignores non-adjacent duplicate and missing attempt identities", () => {
@@ -349,10 +349,11 @@ describe("RetryTracker", () => {
 
     expect((db.query("SELECT COUNT(*) AS count FROM team_message").get() as { count: number }).count).toBe(0)
 
-    for (const attempt of [4, 5, 6]) {
+    for (const attempt of [4, 5]) {
       tracker.observeStatus(db, registry, "sess-1", "retry", "rate limited", attempt)
     }
-    expect((db.query("SELECT COUNT(*) AS count FROM team_message").get() as { count: number }).count).toBe(1)
+    expect(tracker.observeStatus(db, registry, "sess-1", "retry", "rate limited", 6))
+      .toMatchObject({ attempts: 6 })
   })
 
   test("does not warn for a short retry burst", () => {
@@ -363,14 +364,13 @@ describe("RetryTracker", () => {
     expect((db.query("SELECT COUNT(*) AS count FROM team_message").get() as { count: number }).count).toBe(0)
   })
 
-  test("keeps the empty-response recovery guidance", () => {
+  test("keeps the empty-response reason in the circuit-break request", () => {
+    let warning: ReturnType<RetryTracker["observeStatus"]>
     for (let attempt = 1; attempt <= 6; attempt++) {
-      tracker.observeStatus(db, registry, "sess-1", "retry", "Provider returned an empty response", attempt)
+      warning = tracker.observeStatus(db, registry, "sess-1", "retry", "Provider returned an empty response", attempt) ?? warning
     }
 
-    const message = db.query("SELECT content FROM team_message").get() as { content: string }
-    expect(message.content).toContain("bugged/unusable")
-    expect(message.content).toContain("empty provider response")
+    expect(warning).toMatchObject({ reason: "Provider returned an empty response", attempts: 6 })
   })
 })
 
@@ -1100,13 +1100,13 @@ describe("handleSessionErrorEvent — SQLite fallback when registry is empty", (
     expect(msgs[0]?.content).toContain("scout")
   })
 
-  test("populates the registry cache after SQLite fallback", () => {
+  test("removes a terminal member from the registry after SQLite fallback", () => {
     insertTeam(db, "t1", "smoke", "lead-sess")
     insertMember(db, "t1", "scout", "scout-sess", "busy", "running")
 
     handleSessionErrorEvent(db, registry, "scout-sess", { name: "UnknownError", data: { message: "boom" } })
 
-    expect(registry.getBySession("scout-sess")?.memberName).toBe("scout")
+    expect(registry.getBySession("scout-sess")).toBeUndefined()
   })
 
   test("ignores shutdown teammates even if SQLite has the row", () => {

@@ -199,7 +199,7 @@ export class Watchdog {
     const cutoff = Date.now() - this.ttlMs
     const stale = this.db.query(
       `SELECT tm.team_id, tm.name, tm.session_id, tm.time_updated, tm.worktree_branch, tm.worktree_dir,
-              t.name as team_name, p.name as project_name
+               t.name as team_name, COALESCE(p.slug, p.name) as project_name
        FROM team_member tm
        JOIN team t ON tm.team_id = t.id
        JOIN project p ON t.project_id = p.id

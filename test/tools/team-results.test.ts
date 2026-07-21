@@ -64,6 +64,71 @@ describe("team_results", () => {
     expect(result).toBe("No unread messages.")
   })
 
+  test("does not consume messages addressed to another teammate", async () => {
+    sendMessage(deps.db, { teamId: "t1", from: "alice", to: "bob", content: "private for bob" })
+    sendMessage(deps.db, { teamId: "t1", from: "alice", to: "lead", content: "lead summary" })
+
+    const leadResult = await executeTeamResults(deps, {}, "lead-sess")
+    expect(leadResult).toContain("lead summary")
+    expect(leadResult).not.toContain("private for bob")
+    const bobResult = await executeTeamResults(deps, {}, "sess-bob")
+    expect(bobResult).toContain("private for bob")
+  })
+
+  test("concurrent reads return each message once", async () => {
+    sendMessage(deps.db, { teamId: "t1", from: "alice", to: "lead", content: "one delivery" })
+
+    const results = await Promise.all([
+      executeTeamResults(deps, {}, "lead-sess"),
+      executeTeamResults(deps, {}, "lead-sess"),
+    ])
+
+    expect(results.filter(result => result.includes("one delivery"))).toHaveLength(1)
+    expect(results.filter(result => result === "No unread messages.")).toHaveLength(1)
+  })
+
+  test("bounds the default batch and leaves remaining messages unread", async () => {
+    for (let index = 0; index < 25; index++) {
+      sendMessage(deps.db, { teamId: "t1", from: "alice", to: "lead", content: `message-${index}` })
+    }
+
+    const first = await executeTeamResults(deps, {}, "lead-sess")
+    expect(first).toContain("message-0")
+    expect(first).not.toContain("message-20")
+    expect(first).toContain("More unread messages remain")
+    expect((deps.db.query("SELECT COUNT(*) AS count FROM team_message WHERE read = 0").get() as { count: number }).count).toBe(5)
+
+    const second = await executeTeamResults(deps, {}, "lead-sess")
+    expect(second).toContain("message-20")
+  })
+
+  test("retrieves a specific unread message outside the default batch", async () => {
+    let id = ""
+    for (let index = 0; index < 21; index++) {
+      id = sendMessage(deps.db, { teamId: "t1", from: "alice", to: "lead", content: `specific-${index}` })
+    }
+
+    const bounded = await executeTeamResults(deps, {}, "lead-sess")
+    expect(bounded).not.toContain("specific-20")
+    const full = await executeTeamResults(deps, { message_id: id }, "lead-sess")
+    expect(full).toContain("specific-20")
+    expect((deps.db.query("SELECT read FROM team_message WHERE id = ?").get(id) as { read: number }).read).toBe(1)
+  })
+
+  test("formats incremental structured results with stable metadata", async () => {
+    sendMessage(deps.db, {
+      teamId: "t1",
+      from: "alice",
+      to: "lead",
+      content: "<task-result><kind>progress</kind><task_id>task-1</task_id><status>in_progress</status><summary>Mapped the API</summary><details>Raw findings remain here.</details></task-result>",
+    })
+
+    const result = await executeTeamResults(deps, {}, "lead-sess")
+    expect(result).toContain("Kind: progress")
+    expect(result).toContain("Task: task-1")
+    expect(result).toContain("Mapped the API")
+  })
+
   test("returns messages ordered by time_created ASC", async () => {
     // Insert with explicit time ordering
     const now = Date.now()

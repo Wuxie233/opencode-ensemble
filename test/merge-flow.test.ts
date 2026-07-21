@@ -347,6 +347,24 @@ describe("team_merge", () => {
     expect(deletedBranch).toBe(preservedFor(deps, "del-branch", "alice"))
   })
 
+  test("does not reapply a successful merge when branch deletion fails", async () => {
+    await executeTeamCreate(deps, { name: "delete-retry" }, lead)
+    await executeTeamSpawn(deps, { name: "alice", agent: "build", prompt: "task" }, lead)
+    await executeTeamShutdown(deps, { member: "alice" }, lead, undefined, noopPreserve)
+    let mergeCalls = 0
+    const mergeOnce: MergeBranchFn = async () => {
+      mergeCalls++
+      return { ok: true }
+    }
+
+    const first = await executeTeamMerge(deps, { member: "alice" }, lead, mergeOnce, async () => false, noopOverlap)
+    const second = await executeTeamMerge(deps, { member: "alice" }, lead, mergeOnce, noopDelete, noopOverlap)
+
+    expect(first).toContain("will not be merged twice")
+    expect(second).toContain("already merged")
+    expect(mergeCalls).toBe(1)
+  })
+
   test("rejects merge for active (non-shutdown) member", async () => {
     await executeTeamCreate(deps, { name: "active-merge" }, lead)
     await executeTeamSpawn(deps, { name: "alice", agent: "build", prompt: "task" }, lead)
@@ -355,16 +373,16 @@ describe("team_merge", () => {
       .rejects.toThrow("still active")
   })
 
-  test("rejects merge for member with no branch", async () => {
+  test("treats merge for member with no branch as an idempotent no-op", async () => {
     await executeTeamCreate(deps, { name: "no-branch" }, lead)
     await executeTeamSpawn(deps, { name: "alice", agent: "explore", prompt: "task", worktree: false }, lead)
     await executeTeamShutdown(deps, { member: "alice" }, lead, undefined, noopPreserve)
 
-    await expect(executeTeamMerge(deps, { member: "alice" }, lead, noopMerge, noopDelete, noopOverlap))
-      .rejects.toThrow("No branch to merge")
+    const result = await executeTeamMerge(deps, { member: "alice" }, lead, noopMerge, noopDelete, noopOverlap)
+    expect(result).toContain("No branch to merge")
   })
 
-  test("rejects merge for already-merged member", async () => {
+  test("treats merge for already-merged member as an idempotent no-op", async () => {
     await executeTeamCreate(deps, { name: "double-merge" }, lead)
     await executeTeamSpawn(deps, { name: "alice", agent: "build", prompt: "task" }, lead)
     await executeTeamShutdown(deps, { member: "alice" }, lead, undefined, noopPreserve)
@@ -372,9 +390,8 @@ describe("team_merge", () => {
     // First merge succeeds
     await executeTeamMerge(deps, { member: "alice" }, lead, noopMerge, noopDelete, noopOverlap)
 
-    // Second merge fails — branch already cleared
-    await expect(executeTeamMerge(deps, { member: "alice" }, lead, noopMerge, noopDelete, noopOverlap))
-      .rejects.toThrow("No branch to merge")
+    const result = await executeTeamMerge(deps, { member: "alice" }, lead, noopMerge, noopDelete, noopOverlap)
+    expect(result).toContain("No branch to merge")
   })
 
   test("returns conflict message on merge failure", async () => {
@@ -447,7 +464,7 @@ describe("team_merge", () => {
     expect(result).toContain("git diff")
   })
 
-  test("proceeds with merge when overlap check fails", async () => {
+  test("blocks merge when overlap check fails", async () => {
     await executeTeamCreate(deps, { name: "overlap-err" }, lead)
     await executeTeamSpawn(deps, { name: "alice", agent: "build", prompt: "task" }, lead)
     await executeTeamShutdown(deps, { member: "alice" }, lead, undefined, noopPreserve)
@@ -457,8 +474,10 @@ describe("team_merge", () => {
     const trackMerge: MergeBranchFn = async () => { mergeCalled = true; return { ok: true } }
 
     const result = await executeTeamMerge(deps, { member: "alice" }, lead, trackMerge, noopDelete, failingOverlap)
-    expect(mergeCalled).toBe(true)
-    expect(result).toContain("Merged alice's changes")
+    expect(mergeCalled).toBe(false)
+    expect(result).toContain("Cannot verify merge safety")
+    expect(deps.db.query("SELECT merge_state FROM team_member WHERE name = 'alice'").get())
+      .toEqual({ merge_state: "none" })
   })
 })
 
@@ -510,6 +529,57 @@ describe("cleanup safety net for unmerged branches", () => {
     expect(result).toContain("cleaned up")
     expect(result).not.toContain("Safety-net")
     expect(mergeCalled).toBe(false)
+  })
+
+  test("cleanup does not reapply an explicit merge when branch deletion previously failed", async () => {
+    await executeTeamCreate(deps, { name: "delete-failed" }, lead)
+    await executeTeamSpawn(deps, { name: "alice", agent: "build", prompt: "task" }, lead)
+    await executeTeamShutdown(deps, { member: "alice" }, lead, undefined, noopPreserve)
+    await executeTeamMerge(deps, { member: "alice" }, lead, noopMerge, async () => false, noopOverlap)
+    let mergeCalls = 0
+
+    const result = await executeTeamCleanup(
+      deps,
+      { force: false },
+      lead,
+      undefined,
+      async () => {
+        mergeCalls++
+        return { ok: true }
+      },
+      noopDelete,
+      true,
+      noopOverlap,
+    )
+
+    expect(result).toContain("cleaned up")
+    expect(mergeCalls).toBe(0)
+  })
+
+  test("cleanup leaves an interrupted safety-net merge for explicit inspection", async () => {
+    await executeTeamCreate(deps, { name: "merge-interrupted" }, lead)
+    await executeTeamSpawn(deps, { name: "alice", agent: "build", prompt: "task" }, lead)
+    await executeTeamShutdown(deps, { member: "alice" }, lead, undefined, noopPreserve)
+    deps.db.run("UPDATE team_member SET merge_state = 'merging' WHERE name = 'alice'")
+    let mergeCalls = 0
+
+    const result = await executeTeamCleanup(
+      deps,
+      { force: false },
+      lead,
+      undefined,
+      async () => {
+        mergeCalls++
+        return { ok: true }
+      },
+      noopDelete,
+      true,
+      noopOverlap,
+    )
+
+    expect(result).toContain("not cleaned up")
+    expect(result).toContain("already started")
+    expect(mergeCalls).toBe(0)
   })
 
   test("cleanup reports conflicts from safety-net merge", async () => {

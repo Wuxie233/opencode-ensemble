@@ -77,6 +77,44 @@ describe("team_tasks_add", () => {
     expect(taskB.status).toBe("blocked")
   })
 
+  test("resolves batch-local dependency keys atomically", async () => {
+    const result = await executeTeamTasksAdd(deps, { tasks: [
+      { key: "contract", content: "Define contract", priority: "high" },
+      { key: "backend", content: "Build backend", priority: "high", depends_on: ["contract"] },
+      { key: "integration", content: "Integrate", priority: "medium", depends_on: ["backend"] },
+    ] }, "sess-alice")
+
+    expect(result).toContain("contract=")
+    expect(result).toContain("backend=")
+    const rows = deps.db.query("SELECT id, content, status, depends_on FROM team_task WHERE team_id = ? ORDER BY time_created, id")
+      .all("t1") as Array<{ id: string; content: string; status: string; depends_on: string | null }>
+    const contract = rows.find(row => row.content === "Define contract")!
+    const backend = rows.find(row => row.content === "Build backend")!
+    const integration = rows.find(row => row.content === "Integrate")!
+    expect(contract.status).toBe("pending")
+    expect(backend.status).toBe("blocked")
+    expect(JSON.parse(backend.depends_on!)).toEqual([contract.id])
+    expect(JSON.parse(integration.depends_on!)).toEqual([backend.id])
+  })
+
+  test("rejects missing dependency IDs without inserting partial tasks", async () => {
+    await expect(executeTeamTasksAdd(deps, { tasks: [
+      { key: "valid", content: "Would otherwise insert", priority: "high" },
+      { content: "Broken", priority: "high", depends_on: ["task_missing"] },
+    ] }, "sess-alice")).rejects.toThrow("not found")
+
+    expect(deps.db.query("SELECT id FROM team_task WHERE team_id = ?").all("t1")).toHaveLength(0)
+  })
+
+  test("rejects cyclic batch dependencies without inserting tasks", async () => {
+    await expect(executeTeamTasksAdd(deps, { tasks: [
+      { key: "a", content: "A", priority: "high", depends_on: ["b"] },
+      { key: "b", content: "B", priority: "high", depends_on: ["a"] },
+    ] }, "sess-alice")).rejects.toThrow("cycle")
+
+    expect(deps.db.query("SELECT id FROM team_task WHERE team_id = ?").all("t1")).toHaveLength(0)
+  })
+
   test("rejects if not in a team", async () => {
     await expect(executeTeamTasksAdd(deps, { tasks: [{ content: "x", priority: "medium" }] }, "random-sess"))
       .rejects.toThrow("not in a team")
@@ -131,6 +169,40 @@ describe("team_tasks_complete", () => {
     expect(toasts.length).toBeGreaterThanOrEqual(1)
     const last = toasts[toasts.length - 1]!.args[0] as { message: string }
     expect(last.message).toContain("1/2 tasks complete")
+  })
+
+  test("persists and wakes one Lead event for the first completion only", async () => {
+    const addResult = await executeTeamTasksAdd(deps, { tasks: [
+      { content: "Task A", priority: "high" },
+    ] }, "sess-alice")
+    const taskId = addResult.match(/task_\S+/)![0]!
+    await executeTeamClaim(deps, { task_id: taskId }, "sess-alice")
+    deps.client.calls.length = 0
+
+    await executeTeamTasksComplete(deps, { task_id: taskId }, "sess-alice")
+    await executeTeamTasksComplete(deps, { task_id: taskId }, "sess-alice")
+
+    const events = deps.db.query(
+      "SELECT content FROM team_message WHERE team_id = 't1' AND from_name = 'system' AND to_name = 'lead'",
+    ).all() as Array<{ content: string }>
+    expect(events).toHaveLength(1)
+    expect(events[0]!.content).toContain(taskId)
+    expect(deps.client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(1)
+  })
+
+  test("tracks the current phase while reusing the same Team", async () => {
+    await executeTeamTasksAdd(deps, { tasks: [
+      { key: "research", content: "Research", priority: "high", phase: "discovery" },
+    ] }, "sess-alice")
+    await executeTeamTasksAdd(deps, { tasks: [
+      { key: "build", content: "Build", priority: "high", phase: "implementation" },
+    ] }, "sess-alice")
+
+    expect(deps.db.query("SELECT current_phase FROM team WHERE id = 't1'").get())
+      .toEqual({ current_phase: "implementation" })
+    const board = await executeTeamTasksList(deps, "sess-alice")
+    expect(board).toContain("phase: discovery")
+    expect(board).toContain("phase: implementation")
   })
 
   test("unblocks dependent tasks when completed", async () => {

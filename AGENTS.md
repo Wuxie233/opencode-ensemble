@@ -147,12 +147,23 @@ an unexpected failure. Only transition a member to `shutdown` after
 `session.abort()` resolves; preservation or abort failures must leave it
 `shutdown_requested`, persist guidance for the Lead, and remain retryable.
 
-OpenCode owns provider retry policy. Keep ordinary `session.status=retry`
-events silent, preserve the member/task as running, and warn the Lead only once
-after six distinct consecutive retry attempts. Reset that sequence on idle,
-meaningful assistant output, or terminal `session.error`; never append a new
-teammate prompt as an automatic retry for a terminal error because it starts a
-new agent turn and may repeat tool side effects.
+OpenCode owns ordinary provider retry policy. Keep attempts one through five
+silent and preserve the member/task as running. On the sixth distinct
+consecutive retry, atomically claim termination, preserve the branch, await
+`session.abort()`, then mark the member `error`/`failed`, release only its
+in-progress tasks, and alert the Lead to create a fresh session with
+`team_spawn(resume_from)`. Never release task ownership or recommend a
+replacement before abort succeeds. Preservation or abort failure must retain
+the member/task for retry. Reset the durable sequence on idle, meaningful
+assistant output, or terminal `session.error`; never append a new teammate
+prompt as an automatic retry because it may repeat tool side effects.
+
+The task graph accepts existing same-Team task IDs and batch-local keys only.
+Reject missing, cross-Team, self, and cyclic dependencies transactionally.
+Reuse one Team across research, implementation, review, verification, and
+recovery phases. Structured progress/result/blocker summaries and the bounded
+rolling Lead Brief keep raw evidence out of Lead context; full details remain
+available through `team_results` or the teammate session.
 
 The only terminal-error recovery exception is a one-shot unexpected
 `MessageAbortedError` whose exact persisted assistant turn has zero tool parts.
@@ -387,7 +398,7 @@ apply to this plugin's design:
 ## Teammate Context Message Design
 
 The prompt injected by team_spawn is the teammate's entire world.
-It must contain exactly:
+Keep it concise and include:
 
 1. Their name and role in the team
 2. The task they are working on
@@ -397,8 +408,10 @@ It must contain exactly:
 4. How to report completion (team_message to lead with findings)
 5. How to get unblocked (team_message to lead with the blocker)
 
-Nothing else. No system architecture. No team history. No lead's
-instructions beyond the task. Keep it under 500 tokens.
+Add only short task-relevant coordination, plan-approval, worktree, structured
+progress/result/blocker, and recovery guidance. No system architecture or full
+Team history. Keep the fixed context under 500 tokens, excluding bounded
+`resume_from` context and the Lead-supplied task.
 
 The lead's AGENTS.md and system prompt handle everything else.
 Teammates do not need to know how agent teams work internally.

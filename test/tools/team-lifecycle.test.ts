@@ -116,10 +116,11 @@ describe("team_shutdown", () => {
       .rejects.toThrow("not found")
   })
 
-  test("rejects if member already shutdown", async () => {
+  test("treats repeated shutdown as an idempotent no-op", async () => {
     deps.db.run("UPDATE team_member SET status = 'shutdown' WHERE name = 'alice'")
-    await expect(executeTeamShutdown(deps, { member: "alice" }, "lead-sess", undefined, noopPreserve))
-      .rejects.toThrow("already shut down")
+    const result = await executeTeamShutdown(deps, { member: "alice" }, "lead-sess", undefined, noopPreserve)
+    expect(result).toContain("already shut down")
+    expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
   })
 
   test("keeps shutdown_requested when abort fails on idle member", async () => {
@@ -190,6 +191,30 @@ describe("team_shutdown", () => {
       "SELECT content FROM team_message WHERE team_id = 't1' AND from_name = 'system' AND to_name = 'lead'",
     ).get() as { content: string }
     expect(alert.content).toContain("could not be aborted")
+  })
+
+  test("marks a shutdown_requested member shutdown only after re-abort resolves", async () => {
+    deps.db.run("UPDATE team_member SET status = 'shutdown_requested', execution_status = 'cancelling' WHERE name = 'alice'")
+    let finishAbort: (() => void) | undefined
+    deps.client.session.abort = async () => new Promise<void>(resolve => { finishAbort = resolve })
+
+    const aborting = abortShutdownRequestedMember(
+      deps,
+      "t1",
+      "alice",
+      "sess-alice",
+      null,
+      null,
+      noopPreserve,
+    )
+    await Bun.sleep(0)
+    expect(deps.db.query("SELECT status FROM team_member WHERE name = 'alice'").get())
+      .toEqual({ status: "shutdown_requested" })
+
+    finishAbort?.()
+    expect(await aborting).toBe(true)
+    expect(deps.db.query("SELECT status, execution_status FROM team_member WHERE name = 'alice'").get())
+      .toEqual({ status: "shutdown", execution_status: "idle" })
   })
 
   test("falls back to shutdown_requested when status poll fails", async () => {
@@ -326,6 +351,14 @@ describe("team_cleanup", () => {
 
     // Registry should be cleared
     expect(deps.registry.isTeamSession("sess-alice")).toBe(false)
+  })
+
+  test("treats repeated cleanup by the same Lead as already settled", async () => {
+    insertMember(deps.db, "t1", "alice", "sess-alice", "shutdown", "idle")
+    await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete, false)
+
+    const result = await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete, false)
+    expect(result).toContain("already cleaned up")
   })
 
   test("rejects if active members exist and force=false", async () => {

@@ -14,7 +14,7 @@ Trace <feature or bug area>. Report:
 4. Risks and likely edge cases
 5. The smallest safe implementation slice
 
-Do not edit files. Send one task-result message to the lead with evidence and file paths.
+Do not edit files. Keep raw search output in your session. Send concise structured progress only at meaningful milestones, then one result message to the lead with evidence and file paths.
 ```
 
 Recommended spawn:
@@ -98,11 +98,20 @@ Before spawning, the lead should be able to answer:
 
 ```text
 Team goal: <one sentence>
-Independent slices: <list>
+Independent evidence and delivery slices: <list>
 Shared files to avoid: <list or none>
 Risky work needing plan approval: <list>
+Task DAG keys and dependencies: <list>
+Current phase: <research | implementation | review | verification | recovery>
 Verification commands: <commands>
 Merge order: <order based on dependencies>
 ```
 
-If the lead cannot fill this in, start with a single scout instead of a full team.
+When evidence is missing, fan out read-only Scouts across distinct questions before assigning coupled writer work.
+
+## Recovery Prompt
+
+```text
+Continue <specific pending task> using predecessor context only as a reference.
+Inspect the actual repository, task board, branch, and runtime state before acting. Do not repeat side effects without evidence they are still required.
+```

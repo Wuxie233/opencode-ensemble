@@ -34,9 +34,10 @@ describe("team_create", () => {
     expect(project.name).toBe("silver-river")
   })
 
-  test("rejects invalid explicit project name", async () => {
-    await expect(executeTeamCreate(deps, { name: "my-team", project_name: "Silver River" }, "lead-sess"))
-      .rejects.toThrow("Project name")
+  test("accepts a localized project display name", async () => {
+    await executeTeamCreate(deps, { name: "my-team", project_name: "银色河流项目" }, "lead-sess")
+    const project = deps.db.query("SELECT name FROM project WHERE id = ?").get("/tmp/test-project") as { name: string }
+    expect(project.name).toBe("银色河流项目")
   })
 
   test("rejects duplicate team name", async () => {

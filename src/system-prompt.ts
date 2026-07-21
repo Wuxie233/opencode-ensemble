@@ -22,7 +22,7 @@ const STATUS_DISPLAY: Record<string, string> = {
  * Includes team name, member statuses, task counts, and anti-polling guidance.
  */
 export function buildLeadSystemPrompt(db: Database, teamId: string, config?: Required<EnsembleConfig>): string {
-  const team = db.query("SELECT name FROM team WHERE id = ?").get(teamId) as { name: string } | null
+  const team = db.query("SELECT name, current_phase FROM team WHERE id = ?").get(teamId) as { name: string; current_phase: string | null } | null
   if (!team) return ""
 
   const members = db.query("SELECT name, status FROM team_member WHERE team_id = ?").all(teamId) as Array<{ name: string; status: string }>
@@ -57,6 +57,10 @@ export function buildLeadSystemPrompt(db: Database, teamId: string, config?: Req
     teammateLine,
     `Tasks: ${completed} completed, ${inProgress} in progress, ${pending} pending`,
   ]
+  if (team.current_phase) lines.push(`Current phase: ${team.current_phase}`)
+
+  const leadBrief = buildRollingLeadBrief(db, teamId)
+  if (leadBrief) lines.push("", "--- Lead Brief ---", leadBrief, "--- End Lead Brief ---")
 
   // Inline active and recently completed tasks
   const activeTasks = db.query(
@@ -140,6 +144,8 @@ export function buildLeadSystemPrompt(db: Database, teamId: string, config?: Req
     "",
     "Teammates work asynchronously and message you when done.",
     "Do NOT poll team_status or team_tasks_list repeatedly — wait for messages.",
+    "Reuse this Team across research, implementation, review, verification, and recovery phases. Add tasks and teammates instead of creating a new Team for each phase.",
+    "Use team_spawn with resume_from when replacing a failed teammate so the fresh session receives bounded predecessor context.",
     "After spawning all teammates, tell the user what you've set up and wait.",
     "When all teammates finish, summarize results and suggest next steps.",
     "",
@@ -270,6 +276,8 @@ export function buildTeamCompactionContext(
   }
 
   if (role === "lead") {
+    const brief = buildRollingLeadBrief(db, teamId)
+    if (brief) lines.push("Lead Brief:", brief)
     // Include recently completed tasks
     const completedTasks = db.query(
       "SELECT content, assignee FROM team_task WHERE team_id = ? AND status = 'completed' ORDER BY time_updated DESC LIMIT 5"
@@ -283,4 +291,57 @@ export function buildTeamCompactionContext(
   }
 
   return lines.join("\n")
+}
+
+/** Build and persist a bounded deterministic summary for the Team Lead. */
+export function buildRollingLeadBrief(db: Database, teamId: string): string {
+  const team = db.query("SELECT current_phase FROM team WHERE id = ?").get(teamId) as { current_phase: string | null } | null
+  if (!team) return ""
+  const lines = [`Phase: ${team.current_phase ?? "unspecified"}`]
+  const active = db.query(
+    "SELECT id, content, assignee FROM team_task WHERE team_id = ? AND status = 'in_progress' ORDER BY time_updated DESC LIMIT 8",
+  ).all(teamId) as Array<{ id: string; content: string; assignee: string | null }>
+  if (active.length > 0) {
+    lines.push("Active work:")
+    active.forEach(task => lines.push(`- ${task.id}: ${truncate(task.content, 160)}${task.assignee ? ` (${task.assignee})` : ""}`))
+  }
+  const blocked = db.query(
+    "SELECT id, content FROM team_task WHERE team_id = ? AND status = 'blocked' ORDER BY time_updated DESC LIMIT 8",
+  ).all(teamId) as Array<{ id: string; content: string }>
+  if (blocked.length > 0) {
+    lines.push("Blockers:")
+    blocked.forEach(task => lines.push(`- ${task.id}: ${truncate(task.content, 160)}`))
+  }
+  const messages = db.query(
+    "SELECT from_name, content FROM team_message WHERE team_id = ? AND to_name = 'lead' AND content LIKE '%<task-result>%' ORDER BY time_created DESC, id DESC LIMIT 100",
+  ).all(teamId) as Array<{ from_name: string; content: string }>
+  const latest = new Map<string, string>()
+  messages.forEach(message => {
+    const parsed = parseTaskResult(message.content)
+    if (!parsed) return
+    const label = parsed.kind ?? "result"
+    const key = `${parsed.taskId ?? message.from_name}:${label}`
+    if (!latest.has(key)) {
+      latest.set(key, `- [${label}] ${message.from_name}${parsed.taskId ? `/${parsed.taskId}` : ""}: ${truncate(parsed.summary, 240)}`)
+    }
+  })
+  const summaries = [...latest.values()].reverse()
+  if (summaries.length > 0) lines.push("Latest summaries:", ...summaries)
+  const brief = truncateUtf8(lines.join("\n"), 8 * 1024)
+  db.run("UPDATE team SET lead_brief = ?, lead_brief_updated_at = ? WHERE id = ?", [brief, Date.now(), teamId])
+  return brief
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  const bytes = new TextEncoder().encode(value)
+  if (bytes.length <= maxBytes) return value
+  const decoder = new TextDecoder("utf-8", { fatal: true })
+  for (let end = maxBytes - 3; end >= 0; end--) {
+    try {
+      return `${decoder.decode(bytes.slice(0, end))}...`
+    } catch {
+      // Move to the previous UTF-8 boundary.
+    }
+  }
+  return "..."
 }
