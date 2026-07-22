@@ -172,6 +172,13 @@ recovery phases. Structured progress/result/blocker summaries and the bounded
 rolling Lead Brief keep raw evidence out of Lead context; full details remain
 available through `team_results` or the teammate session.
 
+After the Lead dispatches asynchronous work and has no actionable work left,
+it ends the current turn; teammate `team_message` delivery wakes a new turn via
+`promptAsync`. Do not keep a Lead turn open with sleep or repeated status/task
+polling, and do not send information-free check-ins. `team_status` and
+`team_tasks_list` remain valid for a user-requested snapshot or a concrete
+stall/recovery check.
+
 The only terminal-error recovery exception is a one-shot unexpected
 `MessageAbortedError` whose exact persisted assistant turn has zero tool parts.
 Require an active, incomplete teammate with no completion report, keep the

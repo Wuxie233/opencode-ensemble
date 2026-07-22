@@ -11,7 +11,7 @@ function insertTask(db: Database, teamId: string, id: string, status: string, pr
 }
 
 describe("buildLeadSystemPrompt", () => {
-  test("includes team name, member names+statuses, task counts, and anti-polling guidance", () => {
+  test("includes team state and bounded asynchronous follow-up guidance", () => {
     const db = setupDb()
     insertTeam(db, "t1", "alpha", "lead-sess")
     insertMember(db, "t1", "alice", "sess-a", "busy")
@@ -30,7 +30,14 @@ describe("buildLeadSystemPrompt", () => {
     expect(result).toContain("1 completed")
     expect(result).toContain("1 in progress")
     expect(result).toContain("1 pending")
-    expect(result).toContain("wait for messages")
+    expect(result).toContain("end the current turn")
+    expect(result).toContain("user-requested snapshot")
+    expect(result).toContain("concrete stall or recovery check")
+    expect(result).toContain("new information arrives")
+    expect(result).toContain("identified blocker or stall requires recovery")
+    expect(result).not.toContain("Once all are spawned, wait for their messages")
+    expect(result).not.toContain("wait for messages")
+    expect(result).not.toContain("tell the user what you've set up and wait")
     expect(result).toContain("Reuse this Team")
     expect(result).toContain("resume_from")
   })
@@ -220,6 +227,21 @@ describe("buildTeamCompactionContext", () => {
     expect(result).toContain("1 completed")
     expect(result).toContain("1 in progress")
     expect(result).toContain("0 pending")
+  })
+
+  test("lead role preserves idle-turn semantics and explicit exceptions", () => {
+    const db = setupDb()
+    insertTeam(db, "t1", "charlie", "lead-sess")
+    insertMember(db, "t1", "alice", "sess-a", "busy")
+
+    const result = buildTeamCompactionContext(db, "t1", "lead")
+
+    expect(result).toContain("end the current turn")
+    expect(result).toContain("user-requested snapshot")
+    expect(result).toContain("concrete stall or recovery check")
+    expect(result).toContain("new information arrives")
+    expect(result).toContain("identified blocker or stall requires recovery")
+    expect(result).not.toContain("wait for messages")
   })
 
   test("member role includes 'you are a teammate'", () => {

@@ -522,7 +522,11 @@ describe("experimental.chat.system.transform logic", () => {
     expect(prompt).toContain("leading team")
     expect(prompt).toContain("my-team")
     expect(prompt).toContain("alice")
-    expect(prompt).toContain("wait for messages")
+    expect(prompt).toContain("end the current turn")
+    expect(prompt).toContain("user-requested snapshot")
+    expect(prompt).toContain("new information arrives")
+    expect(prompt).not.toContain("wait for messages")
+    expect(prompt).not.toContain("tell the user what you've set up and wait")
   })
 
   test("injects teammate system prompt for member session", () => {
@@ -567,6 +571,9 @@ describe("experimental.session.compacting logic", () => {
     expect(context).toContain("lead")
     expect(context).toContain("my-team")
     expect(context).toContain("alice")
+    expect(context).toContain("end the current turn")
+    expect(context).toContain("concrete stall or recovery check")
+    expect(context).toContain("identified blocker or stall requires recovery")
   })
 
   test("produces compaction context for teammate", () => {

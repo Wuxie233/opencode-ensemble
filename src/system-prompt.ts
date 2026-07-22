@@ -17,6 +17,12 @@ const STATUS_DISPLAY: Record<string, string> = {
   error: "error",
 }
 
+const LEAD_IDLE_TURN_GUIDANCE = [
+  "After dispatching asynchronous work, end the current turn.",
+  "Use team_status or team_tasks_list only for a user-requested snapshot or a concrete stall or recovery check.",
+  "Follow up only when new information arrives or an identified blocker or stall requires recovery.",
+]
+
 /**
  * Build the system prompt injected into the lead's session.
  * Includes team name, member statuses, task counts, and anti-polling guidance.
@@ -138,15 +144,15 @@ export function buildLeadSystemPrompt(db: Database, teamId: string, config?: Req
   lines.push(
     "",
     "Spawn teammates ONE AT A TIME. Wait for each tool result before spawning the next.",
-    "This avoids git worktree contention. Once all are spawned, wait for their messages.",
+    "This avoids git worktree contention.",
     "Read-only agents (explore, plan) automatically skip worktree creation.",
     "For other agents that only need to read, pass worktree: false to avoid unnecessary isolation.",
     "",
     "Teammates work asynchronously and message you when done.",
-    "Do NOT poll team_status or team_tasks_list repeatedly — wait for messages.",
+    ...LEAD_IDLE_TURN_GUIDANCE,
     "Reuse this Team across research, implementation, review, verification, and recovery phases. Add tasks and teammates instead of creating a new Team for each phase.",
     "Use team_spawn with resume_from when replacing a failed teammate so the fresh session receives bounded predecessor context.",
-    "After spawning all teammates, tell the user what you've set up and wait.",
+    "After spawning all teammates, tell the user what you've set up, then end the current turn.",
     "When all teammates finish, summarize results and suggest next steps.",
     "",
     "MERGE WORKFLOW:",
@@ -276,6 +282,7 @@ export function buildTeamCompactionContext(
   }
 
   if (role === "lead") {
+    lines.push(...LEAD_IDLE_TURN_GUIDANCE)
     const brief = buildRollingLeadBrief(db, teamId)
     if (brief) lines.push("Lead Brief:", brief)
     // Include recently completed tasks
