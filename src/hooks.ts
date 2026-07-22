@@ -43,19 +43,36 @@ export class RetryTracker {
 
     return db.transaction((): RetryExhaustion | undefined => {
       const row = db.query(
-        `SELECT tm.retry_attempts, tm.retry_count, tm.retry_tripped, t.lead_session_id
+        `SELECT tm.retry_attempts, tm.retry_count, tm.retry_tripped, tm.status, tm.execution_status,
+                t.lead_session_id
          FROM team_member tm
          JOIN team t ON t.id = tm.team_id
-         WHERE tm.team_id = ? AND tm.name = ? AND tm.session_id = ?
-           AND t.status = 'active' AND tm.status IN ('ready', 'busy')
-           AND tm.execution_status IN ('idle', 'starting', 'running', 'cancel_requested')`,
+          WHERE tm.team_id = ? AND tm.name = ? AND tm.session_id = ?
+            AND t.status = 'active'
+            AND ((tm.status IN ('ready', 'busy')
+                AND tm.execution_status IN ('idle', 'starting', 'running', 'cancel_requested'))
+              OR (tm.status = 'shutdown_requested' AND tm.execution_status = 'cancelling'
+                AND tm.retry_tripped = 1))`,
       ).get(teamInfo.teamId, memberName, sessionId) as {
         retry_attempts: string | null
         retry_count: number
         retry_tripped: number
+        status: string
+        execution_status: string
         lead_session_id: string
       } | null
-      if (!row || row.retry_tripped === 1) return
+      if (!row) return
+      if (row.retry_tripped === 1) {
+        if (row.status !== "shutdown_requested" || row.execution_status !== "cancelling") return
+        return {
+          leadSessionId: row.lead_session_id,
+          memberName,
+          sessionId,
+          teamId: teamInfo.teamId,
+          reason: message?.trim() || "unspecified retry reason",
+          attempts: RETRY_WARNING_THRESHOLD,
+        }
+      }
       const attempts = parseRetryAttempts(row.retry_attempts)
       if (attempts.has(attempt)) return
       attempts.add(attempt)
@@ -118,7 +135,7 @@ function parseRetryAttempts(value: string | null): Set<number> {
 function resetRetrySequence(db: Database, sessionId: string, includeCancelling = false): void {
   db.run(
     `UPDATE team_member SET retry_attempts = NULL, retry_count = 0, retry_tripped = 0
-     WHERE session_id = ?${includeCancelling ? "" : " AND execution_status != 'cancelling'"}`,
+     WHERE session_id = ? AND retry_tripped = 0${includeCancelling ? "" : " AND execution_status != 'cancelling'"}`,
     [sessionId],
   )
 }

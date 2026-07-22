@@ -1,9 +1,42 @@
 import type { ToolDeps } from "./types"
 import type { RetryExhaustion } from "./hooks"
+import type { RetryTracker } from "./hooks"
 import { getTeamResourceParts, preserveBranch, preservedBranchName, resolveWorktreeBranch } from "./tools/merge-helper"
 import type { PreserveBranchFn, ResolveWorktreeBranchFn } from "./tools/merge-helper"
 import { sendLeadAlert, sendMessage, wakeTeamLead } from "./messaging"
 import { log } from "./log"
+
+const activeTerminations = new Map<string, Promise<RetryExhaustion | undefined>>()
+
+/** Observe a retry status and synchronously finish any required breaker attempt. */
+export async function handleRetryStatus(
+  deps: ToolDeps,
+  tracker: RetryTracker,
+  sessionId: string,
+  status: "idle" | "busy" | "retry",
+  message?: string,
+  attempt?: number,
+  terminate: (deps: ToolDeps, request: RetryExhaustion) => Promise<boolean> = breakRetryLoop,
+): Promise<RetryExhaustion | undefined> {
+  const existing = activeTerminations.get(sessionId)
+  if (existing) return existing
+  const exhaustion = tracker.observeStatus(
+    deps.db,
+    deps.registry,
+    sessionId,
+    status,
+    message,
+    attempt,
+  )
+  if (!exhaustion) return
+  const termination = terminate(deps, exhaustion).then(() => exhaustion)
+  activeTerminations.set(sessionId, termination)
+  try {
+    return await termination
+  } finally {
+    if (activeTerminations.get(sessionId) === termination) activeTerminations.delete(sessionId)
+  }
+}
 
 /** Stop a teammate whose provider retry sequence has been exhausted. */
 export async function breakRetryLoop(
@@ -21,7 +54,12 @@ export async function breakRetryLoop(
   } | null
   if (!member) return false
 
-  const claimed = deps.db.run(
+  const pending = deps.db.query(
+    `SELECT 1 AS found FROM team_member
+     WHERE team_id = ? AND name = ? AND session_id = ? AND retry_tripped = 1
+       AND status = 'shutdown_requested' AND execution_status = 'cancelling'`,
+  ).get(request.teamId, request.memberName, request.sessionId)
+  const claimed = !!pending || deps.db.run(
     `UPDATE team_member SET status = 'shutdown_requested', execution_status = 'cancelling', time_updated = ?
      WHERE team_id = ? AND name = ? AND session_id = ? AND retry_tripped = 1
        AND status IN ('ready', 'busy')
@@ -150,9 +188,9 @@ export async function breakRetryLoop(
 
 function restoreRetryOwnership(deps: ToolDeps, request: RetryExhaustion): void {
   deps.db.run(
-    `UPDATE team_member SET status = 'busy', execution_status = 'cancel_requested', retry_tripped = 0, time_updated = ?
+    `UPDATE team_member SET time_updated = ?
      WHERE team_id = ? AND name = ? AND session_id = ?
-       AND status = 'shutdown_requested' AND execution_status = 'cancelling'`,
+       AND status = 'shutdown_requested' AND execution_status = 'cancelling' AND retry_tripped = 1`,
     [Date.now(), request.teamId, request.memberName, request.sessionId],
   )
 }

@@ -674,10 +674,10 @@ describe("Watchdog", () => {
       expect(removeCalls).toHaveLength(1)
       expect((removeCalls[0]!.args[0] as Record<string, unknown>).worktreeRemoveInput).toEqual({ directory: "/tmp/wt-alice" })
 
-      // DB should have worktree_dir NULLed
+      // DB should release stale resources but retain the branch for team_merge.
       const row = deps.db.query("SELECT worktree_dir, worktree_branch, workspace_id FROM team_member WHERE name = 'alice'").get() as Record<string, unknown>
       expect(row.worktree_dir).toBeNull()
-      expect(row.worktree_branch).toBeNull()
+      expect(row.worktree_branch).toBe("ensemble-alice")
     })
 
     test("does NOT clean up recently-updated shutdown members", async () => {
@@ -715,10 +715,10 @@ describe("Watchdog", () => {
       const wtRemoveCalls = deps.client.calls.filter(c => c.method === "worktree.remove")
       expect(wtRemoveCalls).toHaveLength(1)
 
-      // DB should have all three NULLed
+      // DB should release resources without erasing the preserved merge reference.
       const row = deps.db.query("SELECT worktree_dir, worktree_branch, workspace_id FROM team_member WHERE name = 'bob'").get() as Record<string, unknown>
       expect(row.worktree_dir).toBeNull()
-      expect(row.worktree_branch).toBeNull()
+      expect(row.worktree_branch).toBe("ensemble-bob")
       expect(row.workspace_id).toBeNull()
     })
 

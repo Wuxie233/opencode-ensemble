@@ -150,10 +150,10 @@ describe("recoverStaleMembers", () => {
     db.run("UPDATE team_member SET retry_count = 6, retry_tripped = 1, retry_attempts = '[1,2,3,4,5,6]' WHERE name = 'alice'")
     client.session.status = async () => ({ data: { "sess-1": { type: "busy" } } })
 
-    expect((await recoverStaleMembers(db, client)).interrupted).toBe(0)
+    expect((await recoverStaleMembers(db, client)).interrupted).toBe(1)
     expect(db.query("SELECT status, execution_status, retry_tripped FROM team_member WHERE name = 'alice'").get())
-      .toEqual({ status: "busy", execution_status: "cancel_requested", retry_tripped: 0 })
-    expect(client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
+      .toEqual({ status: "error", execution_status: "failed", retry_tripped: 1 })
+    expect(client.calls.filter(call => call.method === "session.abort")).toHaveLength(1)
   })
 
   test("settles an orphaned retry-breaker claim after restart", async () => {
@@ -167,9 +167,70 @@ describe("recoverStaleMembers", () => {
 
     expect((await recoverStaleMembers(db, client)).interrupted).toBe(1)
     expect(db.query("SELECT status, execution_status FROM team_member WHERE name = 'alice'").get())
-      .toEqual({ status: "error", execution_status: "idle" })
+      .toEqual({ status: "error", execution_status: "failed" })
     expect(db.query("SELECT status, assignee FROM team_task WHERE id = 'task-a'").get())
       .toEqual({ status: "pending", assignee: null })
+  })
+
+  test("continues an unclaimed sixth-retry termination after restart", async () => {
+    insertTeam(db, "t1", "my-team", "lead-sess")
+    insertMember(db, "t1", "alice", "sess-1", "busy", "running")
+    db.run("UPDATE team_member SET retry_count = 6, retry_tripped = 1, retry_attempts = '[1,2,3,4,5,6]' WHERE name = 'alice'")
+    client.session.status = async () => ({ data: { "sess-1": { type: "busy" } } })
+
+    expect((await recoverStaleMembers(db, client)).interrupted).toBe(1)
+    expect(db.query("SELECT status, execution_status, retry_tripped FROM team_member WHERE name = 'alice'").get())
+      .toEqual({ status: "error", execution_status: "failed", retry_tripped: 1 })
+    expect(client.calls.filter(call => call.method === "session.abort")).toHaveLength(1)
+  })
+
+  test("settles a durable watchdog cancelling claim after restart", async () => {
+    insertTeam(db, "t1", "my-team", "lead-sess")
+    insertMember(db, "t1", "alice", "sess-1", "busy", "cancelling")
+    db.run(
+      "INSERT INTO team_task (id, team_id, content, status, priority, assignee, time_created, time_updated) VALUES ('task-a', 't1', 'work', 'in_progress', 'high', 'alice', ?, ?)",
+      [Date.now(), Date.now()],
+    )
+    client.session.status = async () => ({ data: { "sess-1": { type: "busy" } } })
+
+    expect((await recoverStaleMembers(db, client)).interrupted).toBe(1)
+    expect(db.query("SELECT status, execution_status FROM team_member WHERE name = 'alice'").get())
+      .toEqual({ status: "error", execution_status: "timed_out" })
+    expect(db.query("SELECT status, assignee FROM team_task WHERE id = 'task-a'").get())
+      .toEqual({ status: "pending", assignee: null })
+  })
+
+  test.each(["idle", "starting", "running", "cancelling"])("settles durable shutdown_requested/%s after restart", async executionStatus => {
+    insertTeam(db, "t1", "my-team", "lead-sess")
+    insertMember(db, "t1", "alice", "sess-1", "shutdown_requested", executionStatus)
+    db.run(
+      "INSERT INTO team_task (id, team_id, content, status, priority, assignee, time_created, time_updated) VALUES ('task-a', 't1', 'work', 'in_progress', 'high', 'alice', ?, ?)",
+      [Date.now(), Date.now()],
+    )
+    client.session.status = async () => ({ data: { "sess-1": { type: "busy" } } })
+
+    expect((await recoverStaleMembers(db, client)).interrupted).toBe(1)
+    expect(db.query("SELECT status, execution_status FROM team_member WHERE name = 'alice'").get())
+      .toEqual({ status: "shutdown", execution_status: "idle" })
+    expect(db.query("SELECT status, assignee FROM team_task WHERE id = 'task-a'").get())
+      .toEqual({ status: "pending", assignee: null })
+  })
+
+  test("keeps a retry termination claim and task owned when restart abort fails", async () => {
+    insertTeam(db, "t1", "my-team", "lead-sess")
+    insertMember(db, "t1", "alice", "sess-1", "shutdown_requested", "cancelling")
+    db.run("UPDATE team_member SET retry_count = 6, retry_tripped = 1 WHERE name = 'alice'")
+    db.run(
+      "INSERT INTO team_task (id, team_id, content, status, priority, assignee, time_created, time_updated) VALUES ('task-a', 't1', 'work', 'in_progress', 'high', 'alice', ?, ?)",
+      [Date.now(), Date.now()],
+    )
+    client.session.abort = async () => { throw new Error("transport unavailable") }
+
+    expect((await recoverStaleMembers(db, client)).interrupted).toBe(0)
+    expect(db.query("SELECT status, execution_status, retry_tripped FROM team_member WHERE name = 'alice'").get())
+      .toEqual({ status: "shutdown_requested", execution_status: "cancelling", retry_tripped: 1 })
+    expect(db.query("SELECT status, assignee FROM team_task WHERE id = 'task-a'").get())
+      .toEqual({ status: "in_progress", assignee: "alice" })
   })
 
   test("fails closed when server liveness cannot be confirmed", async () => {
@@ -664,6 +725,32 @@ describe("recoverOrphanedBranches", () => {
 
       expect(result.removed).toBe(2)
       expect(remaining.trim()).toBe("ensemble/preserved/project-b/beta#t2/bob")
+    } finally {
+      await rm(repo, { recursive: true, force: true })
+    }
+  })
+
+  test.each(["none", "merging"])("retains an archived team's %s preserved branch for later merge", async mergeState => {
+    const repo = await mkdtemp(path.join(tmpdir(), "ensemble-branches-retained-"))
+    try {
+      await git(repo, ["init"])
+      await git(repo, ["config", "user.email", "test@example.com"])
+      await git(repo, ["config", "user.name", "Test User"])
+      await git(repo, ["commit", "--allow-empty", "-m", "init"])
+      insertTeam(db, "t1", "alpha", "lead-a")
+      db.run("INSERT OR IGNORE INTO project (id, name, path, status, time_created, time_updated) VALUES (?, 'project-a', ?, 'active', ?, ?)", [repo, repo, Date.now(), Date.now()])
+      db.run("UPDATE team SET status = 'archived', project_id = ? WHERE id = 't1'", [repo])
+      insertMember(db, "t1", "alice", "sess-a", "shutdown", "idle")
+      const branch = "ensemble/preserved/project-a/alpha#t1/alice"
+      await git(repo, ["branch", branch])
+      db.run(
+        "UPDATE team_member SET worktree_branch = ?, merge_state = ?, merged_source_branch = ? WHERE team_id = 't1' AND name = 'alice'",
+        [branch, mergeState, mergeState === "merging" ? branch : null],
+      )
+
+      const { recoverOrphanedBranches } = await import("../src/recovery")
+      expect(await recoverOrphanedBranches(db, repo)).toEqual({ removed: 0 })
+      expect((await git(repo, ["branch", "--list", branch, "--format", "%(refname:short)"])).trim()).toBe(branch)
     } finally {
       await rm(repo, { recursive: true, force: true })
     }

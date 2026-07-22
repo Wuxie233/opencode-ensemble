@@ -195,6 +195,8 @@ describe("team_shutdown", () => {
 
   test("marks a shutdown_requested member shutdown only after re-abort resolves", async () => {
     deps.db.run("UPDATE team_member SET status = 'shutdown_requested', execution_status = 'cancelling' WHERE name = 'alice'")
+    insertTask(deps.db, "t1", "task-alice")
+    deps.db.run("UPDATE team_task SET status = 'in_progress', assignee = 'alice' WHERE id = 'task-alice'")
     let finishAbort: (() => void) | undefined
     deps.client.session.abort = async () => new Promise<void>(resolve => { finishAbort = resolve })
 
@@ -215,6 +217,8 @@ describe("team_shutdown", () => {
     expect(await aborting).toBe(true)
     expect(deps.db.query("SELECT status, execution_status FROM team_member WHERE name = 'alice'").get())
       .toEqual({ status: "shutdown", execution_status: "idle" })
+    expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-alice'").get())
+      .toEqual({ status: "pending", assignee: null })
   })
 
   test("falls back to shutdown_requested when status poll fails", async () => {
@@ -233,6 +237,8 @@ describe("team_shutdown", () => {
       deps.client.calls.push({ method: "session.status", args: [] })
       return { data: { "sess-alice": { type: "busy" } } }
     }
+    insertTask(deps.db, "t1", "task-alice")
+    deps.db.run("UPDATE team_task SET status = 'in_progress', assignee = 'alice' WHERE id = 'task-alice'")
 
     const result = await executeTeamShutdown(deps, { member: "alice", force: true }, "lead-sess", undefined, noopPreserve)
     expect(result).toContain("shut down")
@@ -244,6 +250,8 @@ describe("team_shutdown", () => {
 
     const row = deps.db.query("SELECT status FROM team_member WHERE name = ?").get("alice") as Record<string, string>
     expect(row.status).toBe("shutdown")
+    expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-alice'").get())
+      .toEqual({ status: "pending", assignee: null })
   })
 
   test("force shutdown records intent before abort so abort errors do not alert the lead", async () => {

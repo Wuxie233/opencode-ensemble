@@ -35,8 +35,9 @@ import { executeTeamView } from "./tools/team-view"
 import type { ToolDeps, } from "./types"
 import { TokenBucket } from "./rate-limit"
 import { Watchdog } from "./watchdog"
-import { recoverStaleAbortChecks, SafeAbortRecovery } from "./safe-abort-recovery"
-import { breakRetryLoop } from "./retry-breaker"
+import { SafeAbortRecovery } from "./safe-abort-recovery"
+import { handleRetryStatus } from "./retry-breaker"
+import { TerminalLivenessGuard } from "./terminal-liveness"
 
 const DEFAULT_RATE_LIMIT_REFILL = 2
 const DEFAULT_RATE_LIMIT_INTERVAL_MS = 1000
@@ -89,6 +90,7 @@ const plugin: Plugin = async (input) => {
     })
   }
   const safeAbortRecovery = new SafeAbortRecovery({ db, registry, client, onTerminal: wakeFailedMemberLead })
+  const terminalLiveness = new TerminalLivenessGuard(deps)
 
   // Recovery only runs for the main project instance — NOT for teammate worktree instances.
   // Worktree instances are created during session.create. Running recovery there makes HTTP
@@ -102,7 +104,7 @@ const plugin: Plugin = async (input) => {
     // far more often than the CLI.
     const rehydrated = rehydrateRegistry(db, registry)
     if (rehydrated > 0) log(`init:registry:rehydrated members=${rehydrated}`)
-    recoverStaleAbortChecks(db, registry).forEach(wakeFailedMemberLead)
+    safeAbortRecovery.recoverAfterRestart()
     void runtime
       .recover(path.resolve(input.worktree || input.directory), async (sharedDb) => {
         log("init:recovery:start (main instance)")
@@ -158,23 +160,20 @@ const plugin: Plugin = async (input) => {
         const { sessionID, status } = event.properties
         const statusType = status.type as "idle" | "busy" | "retry"
         const retry = status as { message?: string; attempt?: number }
+        if (statusType !== "idle" && await terminalLiveness.handle(sessionID, statusType)) return
         if (statusType === "idle" && safeAbortRecovery.isChecking(sessionID)) {
           safeAbortRecovery.observeMessage(sessionID)
           return
         }
-        const retryExhaustion = retryTracker.observeStatus(
-          db,
-          registry,
+        const retryExhaustion = await handleRetryStatus(
+          deps,
+          retryTracker,
           sessionID,
           statusType,
           retry.message,
           retry.attempt,
         )
-        if (retryExhaustion) {
-          void breakRetryLoop(deps, retryExhaustion).catch((err) => {
-            log(`retry-breaker:failed member=${retryExhaustion.memberName} err=${err instanceof Error ? err.message : String(err)}`)
-          })
-        }
+        if (retryExhaustion) log(`retry-breaker:handled member=${retryExhaustion.memberName}`)
         if (statusType !== "idle") releasePendingPeerDelivery(sessionID)
         const transition = handleSessionStatusEvent(db, registry, sessionID, statusType)
 

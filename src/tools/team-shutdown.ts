@@ -148,10 +148,7 @@ export async function abortShutdownRequestedMember(
       [preservedBranch, teamId, memberName],
     )
   }
-  deps.db.run(
-    "UPDATE team_member SET status = 'shutdown', execution_status = 'idle', time_updated = ? WHERE team_id = ? AND name = ? AND status = 'shutdown_requested'",
-    [Date.now(), teamId, memberName],
-  )
+  settleShutdown(deps, teamId, memberName)
   return true
 }
 
@@ -227,10 +224,22 @@ async function preserveAndAbort(
     )
   }
 
-  deps.db.run(
-    "UPDATE team_member SET status = 'shutdown', execution_status = 'idle', time_updated = ? WHERE team_id = ? AND name = ?",
-    [Date.now(), teamId, memberName],
-  )
+  settleShutdown(deps, teamId, memberName)
+}
+
+function settleShutdown(deps: ToolDeps, teamId: string, memberName: string): void {
+  deps.db.transaction(() => {
+    const transitioned = deps.db.run(
+      "UPDATE team_member SET status = 'shutdown', execution_status = 'idle', time_updated = ? WHERE team_id = ? AND name = ? AND status = 'shutdown_requested'",
+      [Date.now(), teamId, memberName],
+    )
+    if (transitioned.changes !== 1) return
+    deps.db.run(
+      `UPDATE team_task SET status = 'pending', assignee = NULL, time_updated = ?
+       WHERE team_id = ? AND assignee = ? AND status = 'in_progress'`,
+      [Date.now(), teamId, memberName],
+    )
+  })()
 }
 
 async function resolvePreservationSource(

@@ -27,17 +27,29 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
   // Find stale members with branch info so we can preserve before aborting
   const stale = db.query(
     `SELECT tm.session_id, tm.worktree_branch, tm.worktree_dir, tm.name, tm.team_id,
+             tm.status, tm.execution_status, tm.retry_tripped,
              t.name as team_name, COALESCE(p.slug, p.name) as project_name
       FROM team_member tm
       JOIN team t ON tm.team_id = t.id
       JOIN project p ON t.project_id = p.id
        WHERE (
-         (tm.status = 'busy' AND tm.execution_status IN ('idle', 'starting', 'running', 'cancel_requested'))
-         OR (tm.status = 'shutdown_requested' AND tm.execution_status = 'cancelling' AND tm.retry_tripped = 1)
+          (tm.status = 'busy' AND tm.execution_status IN ('idle', 'starting', 'running', 'cancel_requested', 'cancelling'))
+          OR (tm.status = 'shutdown_requested' AND tm.execution_status IN ('idle', 'starting', 'running', 'cancel_requested', 'cancelling'))
        )
         AND t.status = 'active'
         AND (? IS NULL OR t.project_id = ? OR t.project_id = 'default')`
-   ).all(cwd ?? null, cwd ?? null) as Array<{ session_id: string; worktree_branch: string | null; worktree_dir: string | null; name: string; team_id: string; team_name: string; project_name: string }>
+    ).all(cwd ?? null, cwd ?? null) as Array<{
+      session_id: string
+      worktree_branch: string | null
+      worktree_dir: string | null
+      name: string
+      team_id: string
+      team_name: string
+      project_name: string
+      status: string
+      execution_status: string
+      retry_tripped: number
+    }>
 
   let liveSessions: Record<string, { type: string }> = {}
   if (client) {
@@ -54,19 +66,14 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
   // Preserve branches then abort orphaned sessions
   let interrupted = 0
   for (const member of stale) {
-    const retryClaim = db.query(
-      "SELECT retry_tripped FROM team_member WHERE team_id = ? AND name = ? AND status = 'shutdown_requested' AND execution_status = 'cancelling'",
-    ).get(member.team_id, member.name) as { retry_tripped: number } | null
-    if (liveSessions[member.session_id]) {
-      if (retryClaim?.retry_tripped === 1) {
-        db.run(
-          `UPDATE team_member SET status = 'busy', execution_status = 'cancel_requested', retry_tripped = 0, time_updated = ?
-           WHERE team_id = ? AND name = ? AND status = 'shutdown_requested' AND execution_status = 'cancelling' AND retry_tripped = 1`,
-          [Date.now(), member.team_id, member.name],
-        )
-      }
-      continue
-    }
+    const kind = member.retry_tripped === 1
+      ? "retry"
+      : member.status === "shutdown_requested"
+        ? "shutdown"
+        : member.execution_status === "cancelling"
+          ? "watchdog"
+          : "stale"
+    if (liveSessions[member.session_id] && kind === "stale") continue
     // Preserve branch BEFORE abort — session.abort() may destroy the worktree + branch
     let preservedBranch: string | null = null
     let sourceBranch = member.worktree_branch
@@ -96,38 +103,14 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
       log(`recovery:branch:preserved src=${sourceBranch} target=${safeBranch}`)
     }
 
-    const claimed = retryClaim?.retry_tripped === 1
-      ? db.run(
-          `UPDATE team_member SET time_updated = ? WHERE team_id = ? AND name = ?
-           AND status = 'shutdown_requested' AND execution_status = 'cancelling' AND retry_tripped = 1`,
-          [Date.now(), member.team_id, member.name],
-        ).changes === 1
-      : db.run(
-          `UPDATE team_member SET execution_status = 'cancelling', time_updated = ?
-           WHERE team_id = ? AND name = ? AND status = 'busy'
-             AND execution_status IN ('idle', 'starting', 'running', 'cancel_requested')`,
-          [Date.now(), member.team_id, member.name],
-        ).changes === 1
+    const claimed = claimRecoveryMember(db, member, kind)
     if (!claimed) continue
 
     try {
       await client.session.abort({ sessionID: member.session_id })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      db.run(
-        `UPDATE team_member SET status = 'busy', execution_status = 'cancel_requested', retry_tripped = 0, time_updated = ?
-         WHERE team_id = ? AND name = ?
-           AND (
-              (status = 'busy' AND execution_status = 'cancelling')
-              OR (status = 'shutdown_requested' AND execution_status = 'cancelling' AND retry_tripped = 1)
-             OR (status = 'ready' AND execution_status = 'idle' AND reported_to_lead = 0
-               AND EXISTS (
-                 SELECT 1 FROM team_task
-                 WHERE team_id = ? AND assignee = ? AND status = 'in_progress'
-               ))
-           )`,
-        [Date.now(), member.team_id, member.name, member.team_id, member.name],
-      )
+      restoreRecoveryMember(db, member, kind)
       sendLeadAlert(db, client, {
         teamId: member.team_id,
         content: `Startup recovery found orphaned teammate "${member.name}", but the session could not abort. The member and its in-progress task remain owned and retryable; retry startup recovery or use team_shutdown with force: true. Error: ${message}.`,
@@ -144,12 +127,14 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
     }
 
     const transitioned = db.transaction(() => {
+      const terminal = kind === "shutdown" ? ["shutdown", "idle"] : kind === "retry" ? ["error", "failed"] : kind === "watchdog" ? ["error", "timed_out"] : ["error", "idle"]
       const result = db.run(
-         `UPDATE team_member SET status = 'error', execution_status = 'idle', time_updated = ?
-          WHERE team_id = ? AND name = ?
-            AND (status = 'ready' OR (status = 'busy' AND execution_status = 'cancelling')
-              OR (status = 'shutdown_requested' AND execution_status = 'cancelling' AND retry_tripped = 1))`,
-        [Date.now(), member.team_id, member.name],
+         `UPDATE team_member SET status = ?, execution_status = ?, time_updated = ?
+          WHERE team_id = ? AND name = ? AND execution_status = 'cancelling'
+            AND ((? = 'shutdown' AND status = 'shutdown_requested' AND retry_tripped = 0)
+              OR (? = 'retry' AND status = 'shutdown_requested' AND retry_tripped = 1)
+              OR (? IN ('watchdog', 'stale') AND status = 'busy' AND retry_tripped = 0))`,
+        [terminal[0], terminal[1], Date.now(), member.team_id, member.name, kind, kind, kind],
       )
       if (result.changes !== 1) return false
       db.run(
@@ -161,7 +146,9 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
         teamId: member.team_id,
         from: "system",
         to: "lead",
-        content: `Teammate "${member.name}" (${member.session_id}) was interrupted by startup recovery. Inspect its session and preserved branch, then replace it with team_spawn using resume_from: "${member.name}" if the task still needs work.`,
+        content: kind === "shutdown"
+          ? `Teammate "${member.name}" (${member.session_id}) finished a durable shutdown request during startup recovery.`
+          : `Teammate "${member.name}" (${member.session_id}) was interrupted by startup recovery. Inspect its session and preserved branch, then replace it with team_spawn using resume_from: "${member.name}" if the task still needs work.`,
       })
       return true
     })()
@@ -177,6 +164,60 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
   }
 
   return { interrupted }
+}
+
+type RecoveryKind = "retry" | "shutdown" | "watchdog" | "stale"
+
+function claimRecoveryMember(
+  db: Database,
+  member: { team_id: string; name: string; status: string; execution_status: string },
+  kind: RecoveryKind,
+): boolean {
+  if (kind === "retry") {
+    return db.run(
+      `UPDATE team_member SET status = 'shutdown_requested', execution_status = 'cancelling', time_updated = ?
+       WHERE team_id = ? AND name = ? AND status = ? AND execution_status = ? AND retry_tripped = 1`,
+      [Date.now(), member.team_id, member.name, member.status, member.execution_status],
+    ).changes === 1
+  }
+  if (kind === "shutdown") {
+    return db.run(
+      `UPDATE team_member SET execution_status = 'cancelling', time_updated = ?
+       WHERE team_id = ? AND name = ? AND status = 'shutdown_requested' AND execution_status = ? AND retry_tripped = 0`,
+      [Date.now(), member.team_id, member.name, member.execution_status],
+    ).changes === 1
+  }
+  return db.run(
+    `UPDATE team_member SET execution_status = 'cancelling', time_updated = ?
+     WHERE team_id = ? AND name = ? AND status = 'busy' AND execution_status = ? AND retry_tripped = 0`,
+    [Date.now(), member.team_id, member.name, member.execution_status],
+  ).changes === 1
+}
+
+function restoreRecoveryMember(
+  db: Database,
+  member: { team_id: string; name: string },
+  kind: RecoveryKind,
+): void {
+  if (kind === "retry" || kind === "shutdown") {
+    db.run(
+      `UPDATE team_member SET time_updated = ? WHERE team_id = ? AND name = ?
+       AND status = 'shutdown_requested' AND execution_status = 'cancelling'`,
+      [Date.now(), member.team_id, member.name],
+    )
+    return
+  }
+  db.run(
+    `UPDATE team_member SET status = 'busy', execution_status = 'cancel_requested', time_updated = ?
+     WHERE team_id = ? AND name = ?
+       AND ((status = 'busy' AND execution_status = 'cancelling')
+         OR (status = 'ready' AND execution_status = 'idle' AND reported_to_lead = 0
+           AND EXISTS (
+             SELECT 1 FROM team_task
+             WHERE team_id = ? AND assignee = ? AND status = 'in_progress'
+           )))`,
+    [Date.now(), member.team_id, member.name, member.team_id, member.name],
+  )
 }
 
 /**
@@ -327,6 +368,16 @@ export async function recoverOrphanedBranches(db: Database, cwd: string): Promis
     `ensemble/preserved/${t.project_name}/${teamResourceSegment(t.name, t.id)}/`,
     `ensemble/preserved/${t.name}/`,
   ])
+  const protectedBranches = new Set(
+    (db.query(
+      `SELECT worktree_branch, merged_source_branch FROM team_member tm
+       JOIN team t ON t.id = tm.team_id
+       WHERE t.project_id = ? AND tm.merge_state IN ('none', 'merging')
+         AND (tm.worktree_branch IS NOT NULL OR tm.merged_source_branch IS NOT NULL)`,
+    ).all(cwd) as Array<{ worktree_branch: string | null; merged_source_branch: string | null }>)
+      .flatMap(row => [row.worktree_branch, row.merged_source_branch])
+      .filter((branch): branch is string => branch !== null),
+  )
 
   // List all local branches matching ensemble/preserved/*
   const result = await runCommand(["git", "branch", "--list", "ensemble/preserved/*"], { cwd })
@@ -335,6 +386,7 @@ export async function recoverOrphanedBranches(db: Database, cwd: string): Promis
 
   for (const branch of branches) {
     if (!archivedPrefixes.some(prefix => branch.startsWith(prefix))) continue
+    if (protectedBranches.has(branch)) continue
 
     try {
       const deleteResult = await runCommand(["git", "branch", "-D", branch], { cwd })

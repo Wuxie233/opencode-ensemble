@@ -93,7 +93,7 @@ export class Watchdog {
         }
         await this.client.worktree.remove({ worktreeRemoveInput: { directory: m.worktree_dir } })
         this.db.run(
-          "UPDATE team_member SET worktree_dir = NULL, worktree_branch = NULL, workspace_id = NULL WHERE team_id = ? AND name = ?",
+          "UPDATE team_member SET worktree_dir = NULL, workspace_id = NULL WHERE team_id = ? AND name = ?",
           [m.team_id, m.name]
         )
       } catch { /* best effort */ }

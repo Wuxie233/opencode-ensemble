@@ -389,6 +389,22 @@ describe("SafeAbortRecovery", () => {
 })
 
 describe("recoverStaleAbortChecks", () => {
+  test("keeps a successfully settled prompt nonterminal across restart", () => {
+    const db = setupDb()
+    const registry = new MemberRegistry()
+    insertTeam(db, "t1", "smoke", "lead-sess")
+    insertMember(db, "t1", "scout", "scout-sess", "busy", "running")
+    db.run(
+      `UPDATE team_member SET abort_recovery_state = 'prompted', abort_recovery_message_id = ?,
+         abort_recovery_claim_token = NULL, abort_recovery_claim_expires_at = NULL WHERE session_id = ?`,
+      ["msg-abort", "scout-sess"],
+    )
+
+    expect(recoverStaleAbortChecks(db, registry)).toEqual([])
+    expect(db.query("SELECT status, execution_status, abort_recovery_state FROM team_member WHERE session_id = ?").get("scout-sess"))
+      .toEqual({ status: "busy", execution_status: "running", abort_recovery_state: "prompted" })
+  })
+
   test("does not consume an unexpired claim owned by another live instance", () => {
     const db = setupDb()
     const registry = new MemberRegistry()
@@ -431,6 +447,28 @@ describe("recoverStaleAbortChecks", () => {
     )
 
     expect(recoverStaleAbortChecks(db, registry)).toEqual([{ leadSessionId: "lead-sess", memberName: "scout" }])
+    expect(db.query("SELECT status, abort_recovery_state FROM team_member WHERE session_id = ?").get("scout-sess"))
+      .toEqual({ status: "error", abort_recovery_state: "consumed" })
+  })
+
+  test("schedules an unexpired crashed-owner lease to fail closed without a new event", async () => {
+    const db = setupDb()
+    const registry = new MemberRegistry()
+    const client = mockClient()
+    const terminalAlerts: SessionErrorAlert[] = []
+    insertTeam(db, "t1", "smoke", "lead-sess")
+    insertMember(db, "t1", "scout", "scout-sess", "busy", "running")
+    db.run(
+      `UPDATE team_member SET abort_recovery_state = 'checking', abort_recovery_claim_token = ?,
+         abort_recovery_claim_expires_at = ? WHERE session_id = ?`,
+      ["crashed-owner", Date.now() + 5, "scout-sess"],
+    )
+    const recovery = new SafeAbortRecovery({ db, registry, client, onTerminal: alert => terminalAlerts.push(alert) })
+
+    recovery.recoverAfterRestart()
+    await Bun.sleep(20)
+
+    expect(terminalAlerts).toEqual([{ leadSessionId: "lead-sess", memberName: "scout" }])
     expect(db.query("SELECT status, abort_recovery_state FROM team_member WHERE session_id = ?").get("scout-sess"))
       .toEqual({ status: "error", abort_recovery_state: "consumed" })
   })

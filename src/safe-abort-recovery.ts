@@ -62,6 +62,7 @@ export class SafeAbortRecovery {
   private readonly promptTimeoutMs: number
   private readonly onTerminal: (alert: SessionErrorAlert) => void
   private readonly pending = new Map<string, PendingCheck>()
+  private readonly restartTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private disposed = false
 
   constructor(options: SafeAbortRecoveryOptions) {
@@ -124,6 +125,29 @@ export class SafeAbortRecovery {
     return row?.abort_recovery_state === "checking"
   }
 
+  /** Settle crashed-owner leases at expiry even when no later session event arrives. */
+  recoverAfterRestart(): void {
+    if (this.disposed) return
+    recoverStaleAbortChecks(this.db, this.registry).forEach(this.onTerminal)
+    const now = Date.now()
+    const leases = this.db.query(
+      `SELECT session_id, abort_recovery_claim_expires_at FROM team_member tm
+       JOIN team t ON t.id = tm.team_id
+       WHERE t.status = 'active' AND tm.status IN ('ready', 'busy')
+         AND tm.abort_recovery_state IN ('checking', 'prompted')
+         AND tm.abort_recovery_claim_token IS NOT NULL
+         AND tm.abort_recovery_claim_expires_at > ?`,
+    ).all(now) as Array<{ session_id: string; abort_recovery_claim_expires_at: number }>
+    for (const lease of leases) {
+      const timer = setTimeout(() => {
+        this.restartTimers.delete(lease.session_id)
+        if (this.disposed) return
+        recoverStaleAbortChecks(this.db, this.registry).forEach(this.onTerminal)
+      }, Math.max(0, lease.abort_recovery_claim_expires_at - now))
+      this.restartTimers.set(lease.session_id, timer)
+    }
+  }
+
   /** Stop task-owned timers and prevent in-flight checks from prompting after plugin disposal. */
   dispose(): void {
     if (this.disposed) return
@@ -131,8 +155,10 @@ export class SafeAbortRecovery {
       if (check.timer) clearTimeout(check.timer)
       this.failClosed(sessionId, check.claimToken, "the recovery owner was disposed before recovery completed")
     }
+    for (const timer of this.restartTimers.values()) clearTimeout(timer)
     this.disposed = true
     this.pending.clear()
+    this.restartTimers.clear()
   }
 
   private resumeDurableCheck(sessionId: string): PendingCheck | undefined {
@@ -386,14 +412,17 @@ export function recoverStaleAbortChecks(db: Database, registry: MemberRegistry):
     `SELECT session_id, abort_recovery_claim_token FROM team_member tm
      JOIN team t ON t.id = tm.team_id
      WHERE t.status = 'active' AND tm.status IN ('ready', 'busy')
-       AND tm.abort_recovery_state IN ('checking', 'prompted')
+       AND (tm.abort_recovery_state = 'checking'
+         OR (tm.abort_recovery_state = 'prompted' AND tm.abort_recovery_claim_token IS NOT NULL))
        AND (tm.abort_recovery_claim_expires_at IS NULL OR tm.abort_recovery_claim_expires_at <= ?)`,
   ).all(now) as Array<{ session_id: string; abort_recovery_claim_token: string | null }>
   return rows.flatMap(row => {
     const claimed = db.run(
       `UPDATE team_member SET abort_recovery_state = 'consumed', abort_recovery_started_at = NULL,
           abort_recovery_claim_token = NULL, abort_recovery_claim_expires_at = NULL
-       WHERE session_id = ? AND abort_recovery_state IN ('checking', 'prompted')
+        WHERE session_id = ?
+          AND (abort_recovery_state = 'checking'
+            OR (abort_recovery_state = 'prompted' AND abort_recovery_claim_token IS NOT NULL))
          AND abort_recovery_claim_token IS ?
          AND (abort_recovery_claim_expires_at IS NULL OR abort_recovery_claim_expires_at <= ?)`,
       [row.session_id, row.abort_recovery_claim_token, now],

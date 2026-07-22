@@ -289,6 +289,22 @@ describe("RetryTracker", () => {
     })
     const member = db.query("SELECT status FROM team_member WHERE session_id = ?").get("sess-1") as { status: string }
     expect(member.status).toBe("busy")
+    expect(db.query("SELECT retry_count, retry_tripped, retry_attempts FROM team_member WHERE session_id = ?").get("sess-1"))
+      .toEqual({ retry_count: 6, retry_tripped: 1, retry_attempts: "[1,2,3,4,5,6]" })
+  })
+
+  test("keeps a tripped sequence permanent across idle and output events", () => {
+    for (let attempt = 1; attempt <= 6; attempt++) {
+      tracker.observeStatus(db, registry, "sess-1", "retry", "rate limited", attempt)
+    }
+
+    tracker.observeStatus(db, registry, "sess-1", "idle")
+    tracker.observeMessage("sess-1", "assistant-message", "assistant")
+    tracker.observeOutput(db, "sess-1", { type: "text", messageID: "assistant-message", text: "late output" })
+    tracker.observeSessionError(db, "sess-1")
+
+    expect(db.query("SELECT retry_count, retry_tripped, retry_attempts FROM team_member WHERE session_id = ?").get("sess-1"))
+      .toEqual({ retry_count: 6, retry_tripped: 1, retry_attempts: "[1,2,3,4,5,6]" })
   })
 
   test("keeps counting across retry reasons and busy transitions", () => {
