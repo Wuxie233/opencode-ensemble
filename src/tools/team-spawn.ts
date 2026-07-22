@@ -544,6 +544,17 @@ async function executeTeamSpawnLocked(
           })
           return
         }
+        let checkpointId: string
+        try {
+          checkpointId = sendLeadAlert(deps.db, deps.client, {
+            teamId: teamInfo.teamId,
+            content: `Prompt rollback cleanup checkpoint for teammate "${args.name}". Session abort succeeded; cleanup is about to run and may be partially or fully complete when this message is read. Inspect actual state before retrying any step. The shutdown_requested member currently owns the recovery state. Preserved branch: ${safeBranch ?? "none"}. Session: ${childSessionId}. Worktree: ${worktreeDir ?? "none"}. Workspace: ${workspaceId ?? "none"}. Claimed task: ${args.claim_task ?? "none"}. Cleanup order: remove workspace, remove worktree, then atomically release the task and delete the member before unregistering the session.`,
+            wakeText: `[System: Teammate ${args.name} prompt rollback cleanup checkpoint is available in team messages]`,
+          })
+        } catch (checkpointError) {
+          log(`spawn:promptAsync:checkpoint-failed name=${args.name} sessionId=${childSessionId} safeBranch=${safeBranch ?? "none"} worktree=${worktreeDir ?? "none"} workspace=${workspaceId ?? "none"} task=${args.claim_task ?? "none"} err=${checkpointError instanceof Error ? checkpointError.message : String(checkpointError)}`)
+          return
+        }
         const alertCleanupFailure = (phase: string, cleanupError: unknown) => {
           const message = cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
           try {
@@ -582,6 +593,17 @@ async function executeTeamSpawnLocked(
             if (deleted.changes !== 1) {
               throw new Error("durable member deletion did not match the shutdown_requested owner")
             }
+            const completed = deps.db.run(
+              "UPDATE team_message SET content = ? WHERE id = ? AND team_id = ?",
+              [
+                `Prompt rollback cleanup completed for teammate "${args.name}", which failed to start. Session ${childSessionId} was aborted, workspace ${workspaceId ?? "none"} and worktree ${worktreeDir ?? "none"} were removed, member ownership was deleted, and claimed task ${args.claim_task ?? "none"} was released. Preserved branch: ${safeBranch ?? "none"}. The spawn may be retried.`,
+                checkpointId,
+                teamInfo.teamId,
+              ],
+            )
+            if (completed.changes !== 1) {
+              throw new Error("recovery checkpoint could not be marked complete")
+            }
           })()
         } catch (cleanupError) {
           alertCleanupFailure("atomic task release and member deletion", cleanupError)
@@ -589,11 +611,15 @@ async function executeTeamSpawnLocked(
         }
         deps.registry.unregister(childSessionId)
         const modelInfo = resolvedModel ? ` (model: ${resolvedModel})` : ""
-        sendLeadAlert(deps.db, deps.client, {
-          teamId: teamInfo.teamId,
-          content: `Teammate "${args.name}" failed to start and was removed${modelInfo}. Error: ${errMsg}. You may retry the spawn.`,
-          wakeText: `[System: Teammate ${args.name} failed to start; guidance is available in team messages]`,
-        })
+        try {
+          sendLeadAlert(deps.db, deps.client, {
+            teamId: teamInfo.teamId,
+            content: `Teammate "${args.name}" failed to start and was removed${modelInfo}. Error: ${errMsg}. You may retry the spawn.`,
+            wakeText: `[System: Teammate ${args.name} failed to start; guidance is available in team messages]`,
+          })
+        } catch (alertError) {
+          log(`spawn:promptAsync:success-alert-failed name=${args.name} sessionId=${childSessionId} checkpoint=${checkpointId} err=${alertError instanceof Error ? alertError.message : String(alertError)}`)
+        }
       }
       preserveThenAbort().catch(cleanupError => {
         log(`spawn:promptAsync:cleanup-failed name=${args.name} sessionId=${childSessionId} err=${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`)

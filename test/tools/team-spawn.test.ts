@@ -693,11 +693,78 @@ describe("team_spawn", () => {
     expect(deps.client.calls.filter(call => call.method === "workspace.remove")).toHaveLength(1)
     expect(deps.client.calls.filter(call => call.method === "worktree.remove")).toHaveLength(0)
     const alert = deps.db.query(
-      "SELECT content FROM team_message WHERE team_id = 't1' AND from_name = 'system' AND to_name = 'lead'",
+      "SELECT content FROM team_message WHERE team_id = 't1' AND from_name = 'system' AND to_name = 'lead' AND content LIKE '%workspace removal failed%'",
     ).get() as { content: string }
     expect(alert.content).toContain("workspace removal failed")
     expect(alert.content).toContain("manual recovery")
     expect(alert.content).toContain("ensemble/preserved/test-project/my-team#t1/alice")
+  })
+
+  test("does not start post-abort cleanup when the recovery checkpoint cannot be persisted", async () => {
+    deps.client.session.promptAsync = async () => { throw new Error("promptAsync failed") }
+    insertTask(deps, "t1", "task-123")
+    const originalRun = deps.db.run.bind(deps.db)
+    deps.db.run = (sql, ...params) => {
+      if (sql.startsWith("INSERT INTO team_message")) throw new Error("checkpoint persistence failed")
+      return originalRun(sql, ...params)
+    }
+
+    await executeTeamSpawn(deps, {
+      name: "alice",
+      agent: "build",
+      prompt: "Fix the tests",
+      claim_task: "task-123",
+    }, "lead-sess", async () => true)
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(1)
+    expect(deps.client.calls.filter(call => call.method === "workspace.remove")).toHaveLength(0)
+    expect(deps.client.calls.filter(call => call.method === "worktree.remove")).toHaveLength(0)
+    expect(deps.db.query("SELECT status, worktree_branch FROM team_member WHERE name = 'alice'").get())
+      .toEqual({ status: "shutdown_requested", worktree_branch: "ensemble/preserved/test-project/my-team#t1/alice" })
+    expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-123'").get())
+      .toEqual({ status: "in_progress", assignee: "alice" })
+    expect(deps.registry.listByTeam("t1")).toHaveLength(1)
+  })
+
+  test("keeps the recovery checkpoint when workspace cleanup and its specific alert both fail", async () => {
+    deps.client.session.promptAsync = async () => { throw new Error("promptAsync failed") }
+    deps.client.workspace.remove = async options => {
+      deps.client.calls.push({ method: "workspace.remove", args: [options] })
+      throw new Error("workspace removal failed")
+    }
+    insertTask(deps, "t1", "task-123")
+    const originalRun = deps.db.run.bind(deps.db)
+    let messageInserts = 0
+    deps.db.run = (sql, ...params) => {
+      if (sql.startsWith("INSERT INTO team_message") && ++messageInserts === 2) {
+        throw new Error("secondary alert persistence failed")
+      }
+      return originalRun(sql, ...params)
+    }
+
+    await executeTeamSpawn(deps, {
+      name: "alice",
+      agent: "build",
+      prompt: "Fix the tests",
+      claim_task: "task-123",
+    }, "lead-sess", async () => true)
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    const messages = deps.db.query(
+      "SELECT content, delivered FROM team_message WHERE team_id = 't1' AND from_name = 'system' AND to_name = 'lead'",
+    ).all() as Array<{ content: string; delivered: number }>
+    expect(messages).toHaveLength(1)
+    expect(messages[0]?.delivered).toBe(0)
+    expect(messages[0]?.content).toContain("cleanup checkpoint")
+    expect(messages[0]?.content).toContain("mock-sess-")
+    expect(messages[0]?.content).toContain("ensemble/preserved/test-project/my-team#t1/alice")
+    expect(messages[0]?.content).toContain("/tmp/worktree-")
+    expect(messages[0]?.content).toContain("ws-")
+    expect(messages[0]?.content).toContain("task-123")
+    expect(deps.db.query("SELECT status FROM team_member WHERE name = 'alice'").get()).toEqual({ status: "shutdown_requested" })
+    expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-123'").get())
+      .toEqual({ status: "in_progress", assignee: "alice" })
   })
 
   test("retains durable prompt rollback ownership when worktree removal fails", async () => {
@@ -724,10 +791,47 @@ describe("team_spawn", () => {
     expect(deps.client.calls.filter(call => call.method === "workspace.remove")).toHaveLength(1)
     expect(deps.client.calls.filter(call => call.method === "worktree.remove")).toHaveLength(1)
     const alert = deps.db.query(
-      "SELECT content FROM team_message WHERE team_id = 't1' AND from_name = 'system' AND to_name = 'lead'",
+      "SELECT content FROM team_message WHERE team_id = 't1' AND from_name = 'system' AND to_name = 'lead' AND content LIKE '%worktree removal failed%'",
     ).get() as { content: string }
     expect(alert.content).toContain("worktree removal failed")
     expect(alert.content).toContain("manual recovery")
+  })
+
+  test("keeps the recovery checkpoint when worktree cleanup and its specific alert both fail", async () => {
+    deps.client.session.promptAsync = async () => { throw new Error("promptAsync failed") }
+    deps.client.worktree.remove = async options => {
+      deps.client.calls.push({ method: "worktree.remove", args: [options] })
+      throw new Error("worktree removal failed")
+    }
+    insertTask(deps, "t1", "task-123")
+    const originalRun = deps.db.run.bind(deps.db)
+    let messageInserts = 0
+    deps.db.run = (sql, ...params) => {
+      if (sql.startsWith("INSERT INTO team_message") && ++messageInserts === 2) {
+        throw new Error("secondary alert persistence failed")
+      }
+      return originalRun(sql, ...params)
+    }
+
+    await executeTeamSpawn(deps, {
+      name: "alice",
+      agent: "build",
+      prompt: "Fix the tests",
+      claim_task: "task-123",
+    }, "lead-sess", async () => true)
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    const checkpoint = deps.db.query(
+      "SELECT content, delivered FROM team_message WHERE team_id = 't1' AND from_name = 'system' AND to_name = 'lead'",
+    ).get() as { content: string; delivered: number }
+    expect(checkpoint.delivered).toBe(0)
+    expect(checkpoint.content).toContain("cleanup checkpoint")
+    expect(checkpoint.content).toContain("mock-sess-")
+    expect(checkpoint.content).toContain("ensemble/preserved/test-project/my-team#t1/alice")
+    expect(checkpoint.content).toContain("task-123")
+    expect(deps.db.query("SELECT status FROM team_member WHERE name = 'alice'").get()).toEqual({ status: "shutdown_requested" })
+    expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-123'").get())
+      .toEqual({ status: "in_progress", assignee: "alice" })
   })
 
   test("rolls back task release when prompt rollback member deletion fails", async () => {
@@ -755,10 +859,44 @@ describe("team_spawn", () => {
     expect(deps.client.calls.filter(call => call.method === "workspace.remove")).toHaveLength(1)
     expect(deps.client.calls.filter(call => call.method === "worktree.remove")).toHaveLength(1)
     const alert = deps.db.query(
-      "SELECT content FROM team_message WHERE team_id = 't1' AND from_name = 'system' AND to_name = 'lead'",
+      "SELECT content FROM team_message WHERE team_id = 't1' AND from_name = 'system' AND to_name = 'lead' AND content LIKE '%member deletion failed%'",
     ).get() as { content: string }
     expect(alert.content).toContain("member deletion failed")
     expect(alert.content).toContain("task ownership")
+  })
+
+  test("keeps the recovery checkpoint when atomic DB cleanup and its specific alert both fail", async () => {
+    deps.client.session.promptAsync = async () => { throw new Error("promptAsync failed") }
+    insertTask(deps, "t1", "task-123")
+    const originalRun = deps.db.run.bind(deps.db)
+    let messageInserts = 0
+    deps.db.run = (sql, ...params) => {
+      if (sql.startsWith("DELETE FROM team_member")) throw new Error("member deletion failed")
+      if (sql.startsWith("INSERT INTO team_message") && ++messageInserts === 2) {
+        throw new Error("secondary alert persistence failed")
+      }
+      return originalRun(sql, ...params)
+    }
+
+    await executeTeamSpawn(deps, {
+      name: "alice",
+      agent: "build",
+      prompt: "Fix the tests",
+      claim_task: "task-123",
+    }, "lead-sess", async () => true)
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    const checkpoint = deps.db.query(
+      "SELECT content, delivered FROM team_message WHERE team_id = 't1' AND from_name = 'system' AND to_name = 'lead'",
+    ).get() as { content: string; delivered: number }
+    expect(checkpoint.delivered).toBe(0)
+    expect(checkpoint.content).toContain("cleanup checkpoint")
+    expect(checkpoint.content).toContain("mock-sess-")
+    expect(checkpoint.content).toContain("ensemble/preserved/test-project/my-team#t1/alice")
+    expect(checkpoint.content).toContain("task-123")
+    expect(deps.db.query("SELECT status FROM team_member WHERE name = 'alice'").get()).toEqual({ status: "shutdown_requested" })
+    expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-123'").get())
+      .toEqual({ status: "in_progress", assignee: "alice" })
   })
 
   test("retains member and task when prompt rollback task release fails", async () => {
@@ -784,10 +922,46 @@ describe("team_spawn", () => {
       .toEqual({ status: "in_progress", assignee: "alice" })
     expect(deps.registry.listByTeam("t1")).toHaveLength(1)
     const alert = deps.db.query(
-      "SELECT content FROM team_message WHERE team_id = 't1' AND from_name = 'system' AND to_name = 'lead'",
+      "SELECT content FROM team_message WHERE team_id = 't1' AND from_name = 'system' AND to_name = 'lead' AND content LIKE '%task release failed%'",
     ).get() as { content: string }
     expect(alert.content).toContain("task release failed")
     expect(alert.content).toContain("task ownership")
+  })
+
+  test("leaves a completed checkpoint when the final success alert cannot be persisted", async () => {
+    deps.client.session.promptAsync = async () => { throw new Error("promptAsync failed") }
+    insertTask(deps, "t1", "task-123")
+    const originalRun = deps.db.run.bind(deps.db)
+    let messageInserts = 0
+    deps.db.run = (sql, ...params) => {
+      if (sql.startsWith("INSERT INTO team_message") && ++messageInserts === 2) {
+        throw new Error("final alert persistence failed")
+      }
+      return originalRun(sql, ...params)
+    }
+
+    await executeTeamSpawn(deps, {
+      name: "alice",
+      agent: "build",
+      prompt: "Fix the tests",
+      claim_task: "task-123",
+    }, "lead-sess", async () => true)
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    expect(deps.db.query("SELECT * FROM team_member WHERE name = 'alice'").get()).toBeNull()
+    expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-123'").get())
+      .toEqual({ status: "pending", assignee: null })
+    expect(deps.registry.listByTeam("t1")).toHaveLength(0)
+    expect(deps.client.calls.filter(call => call.method === "workspace.remove")).toHaveLength(1)
+    expect(deps.client.calls.filter(call => call.method === "worktree.remove")).toHaveLength(1)
+    const checkpoint = deps.db.query(
+      "SELECT content, delivered FROM team_message WHERE team_id = 't1' AND from_name = 'system' AND to_name = 'lead'",
+    ).get() as { content: string; delivered: number }
+    expect(checkpoint.delivered).toBe(0)
+    expect(checkpoint.content).toContain("cleanup completed")
+    expect(checkpoint.content).toContain("mock-sess-")
+    expect(checkpoint.content).toContain("ensemble/preserved/test-project/my-team#t1/alice")
+    expect(checkpoint.content).toContain("task-123")
   })
 
   test("context message includes structured completion format", async () => {
