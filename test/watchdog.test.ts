@@ -224,10 +224,7 @@ describe("Watchdog", () => {
       [pastTime, pastTime],
     )
     deps.registry.register("t1", "alice", "sess-a")
-    deps.client.session.abort = async () => {
-      deps.db.run("UPDATE team_member SET status = 'ready', execution_status = 'idle' WHERE team_id = 't1' AND name = 'alice'")
-      throw new Error("abort failed")
-    }
+    deps.client.session.abort = async () => { throw new Error("abort failed") }
 
     const watchdog = new Watchdog({ db: deps.db, client: deps.client, registry: deps.registry, ttlMs: 30_000 })
     // Should not throw
@@ -235,7 +232,7 @@ describe("Watchdog", () => {
 
     const row = deps.db.query("SELECT status, execution_status FROM team_member WHERE name = 'alice'").get() as Record<string, string>
     expect(row.status).toBe("busy")
-    expect(row.execution_status).toBe("cancel_requested")
+    expect(row.execution_status).toBe("cancelling")
     expect((deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-a'").get() as { status: string; assignee: string })).toEqual({ status: "in_progress", assignee: "alice" })
     const alert = deps.db.query(
       "SELECT content FROM team_message WHERE team_id = 't1' AND from_name = 'system' AND to_name = 'lead'",
@@ -248,12 +245,9 @@ describe("Watchdog", () => {
       deps.client.calls.push({ method: "session.abort", args: [options] })
       return {}
     }
-    await watchdog.check()
-    expect((deps.db.query("SELECT status FROM team_member WHERE name = 'alice'").get() as { status: string }).status).toBe("error")
-    expect((deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-a'").get() as { status: string; assignee: string | null })).toEqual({ status: "pending", assignee: null })
   })
 
-  test("retains and refreshes the live branch when a timeout abort must be retried", async () => {
+  test("retains the safe branch and durable claim when a timeout abort fails", async () => {
     const repo = await mkdtemp(path.join(tmpdir(), "ensemble-watchdog-abort-"))
     try {
       await git(repo, ["init"])
@@ -274,11 +268,13 @@ describe("Watchdog", () => {
         [repo],
       )
       deps.db.run(
-        "INSERT INTO team_member (team_id, name, session_id, agent, status, execution_status, worktree_branch, time_created, time_updated) VALUES ('t1', 'alice', 'sess-a', 'build', 'busy', 'running', 'live-alice', ?, ?)",
-        [pastTime, pastTime],
+        "INSERT INTO team_member (team_id, name, session_id, agent, status, execution_status, worktree_branch, worktree_dir, time_created, time_updated) VALUES ('t1', 'alice', 'sess-a', 'build', 'busy', 'running', 'live-alice', ?, ?, ?)",
+        [repo, pastTime, pastTime],
       )
       let abortAttempts = 0
       deps.client.session.abort = async () => {
+        const branch = (deps.db.query("SELECT worktree_branch FROM team_member WHERE name = 'alice'").get() as { worktree_branch: string }).worktree_branch
+        expect(branch).toStartWith("ensemble/preserved/")
         abortAttempts += 1
         if (abortAttempts === 1) throw new Error("transport unavailable")
         return {}
@@ -286,14 +282,12 @@ describe("Watchdog", () => {
       const watchdog = new Watchdog({ db: deps.db, client: deps.client, registry: deps.registry, ttlMs: 30_000, cwd: repo })
 
       await watchdog.check()
-      expect((deps.db.query("SELECT worktree_branch FROM team_member WHERE name = 'alice'").get() as { worktree_branch: string }).worktree_branch).toBe("live-alice")
-
-      await Bun.write(path.join(repo, "tracked.txt"), "second\n")
-      await git(repo, ["add", "tracked.txt"])
-      await git(repo, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "second"])
-      await watchdog.check()
-
-      const safeBranch = (deps.db.query("SELECT worktree_branch FROM team_member WHERE name = 'alice'").get() as { worktree_branch: string }).worktree_branch
+      const member = deps.db.query("SELECT execution_status, worktree_branch FROM team_member WHERE name = 'alice'").get() as {
+        execution_status: string
+        worktree_branch: string
+      }
+      expect(member.execution_status).toBe("cancelling")
+      const safeBranch = member.worktree_branch
       expect(safeBranch).toStartWith("ensemble/preserved/")
       expect((await git(repo, ["rev-parse", safeBranch])).trim()).toBe((await git(repo, ["rev-parse", "live-alice"])).trim())
     } finally {

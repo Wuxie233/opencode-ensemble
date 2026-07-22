@@ -10,10 +10,10 @@ import {
   type ResolveWorktreeBranchFn,
 } from "./tools/merge-helper"
 
+const activeReaborts = new Map<string, Promise<boolean>>()
+
 /** Re-aborts late runner activity without reactivating terminal teammates. */
 export class TerminalLivenessGuard {
-  private readonly active = new Map<string, Promise<boolean>>()
-
   constructor(
     private readonly deps: ToolDeps,
     private readonly preserve: PreserveBranchFn = preserveBranch,
@@ -35,15 +35,15 @@ export class TerminalLivenessGuard {
       worktree_dir: string | null
     } | null
     if (!member) return false
-    const current = this.active.get(sessionId)
+    const current = activeReaborts.get(sessionId)
     if (current) return current
 
     const aborting = this.reabort(sessionId, status, member)
-    this.active.set(sessionId, aborting)
+    activeReaborts.set(sessionId, aborting)
     try {
       return await aborting
     } finally {
-      if (this.active.get(sessionId) === aborting) this.active.delete(sessionId)
+      if (activeReaborts.get(sessionId) === aborting) activeReaborts.delete(sessionId)
     }
   }
 
@@ -78,10 +78,11 @@ export class TerminalLivenessGuard {
         this.alertPreservationFailure(member, status, `branch ${sourceBranch} could not be preserved`)
         return true
       }
-      this.deps.db.run(
+      const recorded = this.deps.db.run(
         "UPDATE team_member SET worktree_branch = ? WHERE team_id = ? AND name = ? AND status IN ('shutdown', 'error')",
         [safeBranch, member.team_id, member.name],
       )
+      if (recorded.changes !== 1) return true
     }
     try {
       await this.deps.client.session.abort({ sessionID: sessionId })

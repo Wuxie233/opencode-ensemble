@@ -272,38 +272,29 @@ export class Watchdog {
         this.abortingSessions.delete(member.session_id)
         continue
       }
+      if (preservedBranch) {
+        const recorded = this.db.run(
+          `UPDATE team_member SET worktree_branch = ?, time_updated = ?
+           WHERE team_id = ? AND name = ? AND status = 'busy' AND execution_status = 'cancelling'`,
+          [preservedBranch, Date.now(), member.team_id, member.name],
+        )
+        if (recorded.changes !== 1) {
+          this.abortingSessions.delete(member.session_id)
+          continue
+        }
+      }
       try {
         await this.client.session.abort({ sessionID: member.session_id })
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
-        this.db.run(
-          `UPDATE team_member SET status = 'busy', execution_status = 'cancel_requested', time_updated = ?
-           WHERE team_id = ? AND name = ?
-             AND (
-               (status = 'busy' AND execution_status = 'cancelling')
-               OR (status = 'ready' AND execution_status = 'idle' AND reported_to_lead = 0
-                 AND EXISTS (
-                   SELECT 1 FROM team_task
-                   WHERE team_id = ? AND assignee = ? AND status = 'in_progress'
-                 ))
-             )`,
-          [member.time_updated, member.team_id, member.name, member.team_id, member.name],
-        )
         sendLeadAlert(this.db, this.client, {
           teamId: member.team_id,
-          content: `Teammate "${member.name}" exceeded its timeout, but the session could not abort. The member and its in-progress task remain owned and retryable; retry the watchdog or use team_shutdown with force: true. Error: ${message}.`,
+          content: `Teammate "${member.name}" exceeded its timeout, but the session could not abort. The durable cancelling claim and in-progress task remain owned; retry startup recovery or use team_shutdown with force: true. Error: ${message}.`,
           wakeText: `[System: Watchdog could not abort ${member.name}; retry guidance is available in team messages]`,
         })
         continue
       } finally {
         this.abortingSessions.delete(member.session_id)
-      }
-
-      if (preservedBranch) {
-        this.db.run(
-          "UPDATE team_member SET worktree_branch = ? WHERE team_id = ? AND name = ?",
-          [preservedBranch, member.team_id, member.name],
-        )
       }
 
       const transitioned = this.db.transaction(() => {

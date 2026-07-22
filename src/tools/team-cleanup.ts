@@ -540,11 +540,23 @@ export async function executeTeamCleanup(
     }
 
     if (abortable.length > 0) {
-      deps.db.run(
-        `UPDATE team_member SET status = 'shutdown_requested', time_updated = ?
-         WHERE team_id = ? AND status NOT IN ('shutdown', 'shutdown_requested', 'error')`,
-        [Date.now(), teamInfo.teamId],
-      )
+      deps.db.transaction(() => {
+        deps.db.run(
+          `UPDATE team_member SET status = 'shutdown_requested', time_updated = ?
+           WHERE team_id = ? AND status NOT IN ('shutdown', 'shutdown_requested', 'error')`,
+          [Date.now(), teamInfo.teamId],
+        )
+        preserved.forEach((safeBranch, memberName) => {
+          const recorded = deps.db.run(
+            `UPDATE team_member SET worktree_branch = ?, time_updated = ?
+             WHERE team_id = ? AND name = ? AND status = 'shutdown_requested'`,
+            [safeBranch, Date.now(), teamInfo.teamId, memberName],
+          )
+          if (recorded.changes !== 1) {
+            throw new Error(`Cannot clean up team "${teamInfo.teamName}": ${memberName}'s safe branch reference could not be recorded before abort.`)
+          }
+        })
+      })()
     }
     for (const member of abortable) {
       try {

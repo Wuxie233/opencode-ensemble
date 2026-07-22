@@ -133,9 +133,17 @@ describe("branch preservation", () => {
     expect((deps.db.query("SELECT status, worktree_branch FROM team_member WHERE name = 'erin'").get() as {
       status: string
       worktree_branch: string
-    })).toEqual({ status: "shutdown_requested", worktree_branch: before.worktree_branch })
+    })).toEqual({ status: "shutdown_requested", worktree_branch: preservedFor(deps, "abort-retry", "erin") })
 
-    await executeTeamShutdown(deps, { member: "erin", force: true }, lead, undefined, trackPreserve)
+    await executeTeamShutdown(
+      deps,
+      { member: "erin", force: true },
+      lead,
+      undefined,
+      trackPreserve,
+      undefined,
+      async () => before.worktree_branch,
+    )
 
     expect(preserveSources).toEqual([before.worktree_branch, before.worktree_branch])
     const after = deps.db.query("SELECT status, worktree_branch FROM team_member WHERE name = 'erin'")

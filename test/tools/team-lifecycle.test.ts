@@ -128,13 +128,19 @@ describe("team_shutdown", () => {
       deps.client.calls.push({ method: "session.status", args: [] })
       return { data: { "sess-alice": { type: "idle" } } }
     }
-    deps.client.session.abort = async () => { throw new Error("session gone") }
+    deps.db.run("UPDATE team_member SET worktree_branch = 'live-alice' WHERE name = 'alice'")
+    deps.client.session.abort = async () => {
+      expect((deps.db.query("SELECT worktree_branch FROM team_member WHERE name = 'alice'").get() as { worktree_branch: string }).worktree_branch)
+        .toStartWith("ensemble/preserved/")
+      throw new Error("session gone")
+    }
 
     await expect(executeTeamShutdown(deps, { member: "alice" }, "lead-sess", undefined, noopPreserve))
       .rejects.toThrow("failed to abort")
 
-    const row = deps.db.query("SELECT status FROM team_member WHERE name = 'alice'").get() as Record<string, string>
+    const row = deps.db.query("SELECT status, worktree_branch FROM team_member WHERE name = 'alice'").get() as Record<string, string>
     expect(row.status).toBe("shutdown_requested")
+    expect(row.worktree_branch).toStartWith("ensemble/preserved/")
     const alert = deps.db.query(
       "SELECT content FROM team_message WHERE team_id = 't1' AND from_name = 'system' AND to_name = 'lead'",
     ).get() as { content: string }
@@ -408,6 +414,31 @@ describe("team_cleanup", () => {
     expect(statusAtAbort).toBe("shutdown_requested")
   })
 
+  test("force cleanup persists the safe branch before abort and retains it on failure", async () => {
+    insertMember(deps.db, "t1", "alice", "sess-alice", "busy", "running")
+    deps.db.run("UPDATE team_member SET worktree_branch = 'live-alice' WHERE name = 'alice'")
+    deps.client.session.abort = async () => {
+      const member = deps.db.query("SELECT status, worktree_branch FROM team_member WHERE name = 'alice'")
+        .get() as { status: string; worktree_branch: string }
+      expect(member.status).toBe("shutdown_requested")
+      expect(member.worktree_branch).toStartWith("ensemble/preserved/")
+      throw new Error("transport unavailable")
+    }
+
+    await expect(executeTeamCleanup(
+      deps, { force: true }, "lead-sess", undefined, noopMerge, noopDelete, false,
+      undefined, undefined, undefined, undefined, async () => true,
+    )).rejects.toThrow("failed to abort alice")
+
+    expect((deps.db.query("SELECT status, worktree_branch FROM team_member WHERE name = 'alice'").get() as {
+      status: string
+      worktree_branch: string
+    })).toEqual({
+      status: "shutdown_requested",
+      worktree_branch: "ensemble/preserved/test-project/my-team#t1/alice",
+    })
+  })
+
   test("force cleanup does not abort or archive when branch preservation fails", async () => {
     insertMember(deps.db, "t1", "alice", "sess-alice", "busy", "running")
     deps.db.run("UPDATE team_member SET worktree_branch = ? WHERE name = 'alice'", ["ensemble-my-team-alice"])
@@ -618,7 +649,7 @@ describe("team_cleanup", () => {
     ).get() as { status: string; worktree_branch: string; worktree_dir: string; workspace_id: string }
     expect(failedMember).toEqual({
       status: "shutdown_requested",
-      worktree_branch: "ensemble-my-team-alice",
+      worktree_branch: "ensemble/preserved/test-project/my-team#t1/alice",
       worktree_dir: "/tmp/wt-alice",
       workspace_id: "ws-alice",
     })
@@ -647,6 +678,7 @@ describe("team_cleanup", () => {
       undefined,
       undefined,
       preserve,
+      async () => "ensemble-my-team-alice",
     )
 
     expect(result).toContain("cleaned up")
@@ -705,7 +737,7 @@ describe("team_cleanup", () => {
     expect((deps.db.query("SELECT status FROM team_member WHERE name = 'alice'").get() as { status: string }).status).toBe("shutdown")
     const bob = deps.db.query("SELECT status, worktree_branch FROM team_member WHERE name = 'bob'")
       .get() as { status: string; worktree_branch: string }
-    expect(bob).toEqual({ status: "shutdown_requested", worktree_branch: "ensemble-my-team-bob" })
+    expect(bob).toEqual({ status: "shutdown_requested", worktree_branch: "ensemble/preserved/test-project/my-team#t1/bob" })
     expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-alice'").get())
       .toEqual({ status: "pending", assignee: null })
     expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-bob'").get())

@@ -101,6 +101,13 @@ export async function breakRetryLoop(
         return false
       }
       preservedBranch = safeBranch
+      const recorded = deps.db.run(
+        `UPDATE team_member SET worktree_branch = ?, time_updated = ?
+         WHERE team_id = ? AND name = ? AND session_id = ?
+           AND status = 'shutdown_requested' AND execution_status = 'cancelling' AND retry_tripped = 1`,
+        [safeBranch, Date.now(), request.teamId, request.memberName, request.sessionId],
+      )
+      if (recorded.changes !== 1) return false
     }
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
@@ -121,7 +128,6 @@ export async function breakRetryLoop(
     await deps.client.session.abort({ sessionID: request.sessionId })
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
-    restoreRetryOwnership(deps, request)
     sendLeadAlert(deps.db, deps.client, {
       teamId: request.teamId,
       content: `Teammate "${request.memberName}" exhausted ${request.attempts} consecutive retries, but its session could not be aborted (${detail}). The member and in-progress task remain owned; retry force shutdown before replacing it.`,

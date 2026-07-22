@@ -105,6 +105,8 @@ describe("retry breaker", () => {
     const calls: string[] = []
     let finishAbort: (() => void) | undefined
     deps.client.session.abort = async () => {
+      const branch = (deps.db.query("SELECT worktree_branch FROM team_member WHERE name = 'alice'").get() as { worktree_branch: string }).worktree_branch
+      expect(branch).toStartWith("ensemble/preserved/")
       calls.push("abort")
       await new Promise<void>(resolve => { finishAbort = resolve })
       return {}
@@ -158,7 +160,12 @@ describe("retry breaker", () => {
 
   test("keeps member and task owned when abort fails", async () => {
     const deps = setupRetryingMember()
-    deps.client.session.abort = async () => { throw new Error("transport unavailable") }
+    deps.db.run("UPDATE team_member SET worktree_branch = 'live-alice' WHERE name = 'alice'")
+    deps.client.session.abort = async () => {
+      const branch = (deps.db.query("SELECT worktree_branch FROM team_member WHERE name = 'alice'").get() as { worktree_branch: string }).worktree_branch
+      expect(branch).toStartWith("ensemble/preserved/")
+      throw new Error("transport unavailable")
+    }
 
     expect(await breakRetryLoop(deps, requestFor(deps), async () => true)).toBe(false)
     expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-retry'").get())
@@ -167,6 +174,8 @@ describe("retry breaker", () => {
       .toEqual({ status: "shutdown_requested", execution_status: "cancelling" })
     expect(deps.db.query("SELECT retry_tripped FROM team_member WHERE name = 'alice'").get())
       .toEqual({ retry_tripped: 1 })
+    expect((deps.db.query("SELECT worktree_branch FROM team_member WHERE name = 'alice'").get() as { worktree_branch: string }).worktree_branch)
+      .toStartWith("ensemble/preserved/")
     const alert = deps.db.query("SELECT content FROM team_message WHERE team_id = 't1' AND to_name = 'lead'").get() as { content: string }
     expect(alert.content).toContain("could not be aborted")
   })
@@ -206,7 +215,12 @@ describe("terminal liveness guard", () => {
     insertMember(deps.db, "t1", "alice", "sess-alice", "error", "failed")
     deps.db.run("UPDATE team_member SET worktree_branch = 'live-alice' WHERE name = 'alice'")
     const order: string[] = []
-    deps.client.session.abort = async () => { order.push("abort"); return {} }
+    deps.client.session.abort = async () => {
+      expect((deps.db.query("SELECT worktree_branch FROM team_member WHERE name = 'alice'").get() as { worktree_branch: string }).worktree_branch)
+        .toStartWith("ensemble/preserved/")
+      order.push("abort")
+      return {}
+    }
     const guard = new TerminalLivenessGuard(deps, async (source, target) => {
       order.push(`preserve:${source}:${target}`)
       return true
@@ -281,7 +295,7 @@ describe("terminal liveness guard", () => {
       .toEqual({ status, execution_status: executionStatus, retry_count: 6, retry_tripped: 1 })
   })
 
-  test("single-flights overlapping late terminal events", async () => {
+  test("single-flights overlapping late terminal events across guard instances", async () => {
     const deps = setupDeps()
     insertTeam(deps.db, "t1", "my-team", "lead-sess")
     insertMember(deps.db, "t1", "alice", "sess-alice", "error", "failed")
@@ -290,11 +304,12 @@ describe("terminal liveness guard", () => {
       deps.client.calls.push({ method: "session.abort", args: [options] })
       return new Promise<void>(resolve => { finishAbort = resolve })
     }
-    const guard = new TerminalLivenessGuard(deps)
+    const firstGuard = new TerminalLivenessGuard(deps)
+    const secondGuard = new TerminalLivenessGuard({ ...deps })
 
     const handling = Promise.all([
-      guard.handle("sess-alice", "retry"),
-      guard.handle("sess-alice", "busy"),
+      firstGuard.handle("sess-alice", "retry"),
+      secondGuard.handle("sess-alice", "busy"),
     ])
     await Bun.sleep(0)
     expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(1)

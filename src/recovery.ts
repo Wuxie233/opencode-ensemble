@@ -35,8 +35,9 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
        WHERE (
           (tm.status = 'busy' AND tm.execution_status IN ('idle', 'starting', 'running', 'cancel_requested', 'cancelling'))
           OR (tm.status = 'shutdown_requested' AND tm.execution_status IN ('idle', 'starting', 'running', 'cancel_requested', 'cancelling'))
-       )
+        )
         AND t.status = 'active'
+        AND tm.abort_recovery_state NOT IN ('checking', 'prompted')
         AND (? IS NULL OR t.project_id = ? OR t.project_id = 'default')`
     ).all(cwd ?? null, cwd ?? null) as Array<{
       session_id: string
@@ -106,24 +107,25 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
     const claimed = claimRecoveryMember(db, member, kind)
     if (!claimed) continue
 
+    if (preservedBranch) {
+      const recorded = db.run(
+        `UPDATE team_member SET worktree_branch = ?, time_updated = ?
+         WHERE team_id = ? AND name = ? AND execution_status = 'cancelling'`,
+        [preservedBranch, Date.now(), member.team_id, member.name],
+      )
+      if (recorded.changes !== 1) continue
+    }
+
     try {
       await client.session.abort({ sessionID: member.session_id })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      restoreRecoveryMember(db, member, kind)
       sendLeadAlert(db, client, {
         teamId: member.team_id,
         content: `Startup recovery found orphaned teammate "${member.name}", but the session could not abort. The member and its in-progress task remain owned and retryable; retry startup recovery or use team_shutdown with force: true. Error: ${message}.`,
         wakeText: `[System: Startup recovery could not abort ${member.name}; retry guidance is available in team messages]`,
       })
       continue
-    }
-
-    if (preservedBranch) {
-      db.run(
-        "UPDATE team_member SET worktree_branch = ? WHERE team_id = ? AND name = ?",
-        [preservedBranch, member.team_id, member.name],
-      )
     }
 
     const transitioned = db.transaction(() => {
@@ -192,32 +194,6 @@ function claimRecoveryMember(
      WHERE team_id = ? AND name = ? AND status = 'busy' AND execution_status = ? AND retry_tripped = 0`,
     [Date.now(), member.team_id, member.name, member.execution_status],
   ).changes === 1
-}
-
-function restoreRecoveryMember(
-  db: Database,
-  member: { team_id: string; name: string },
-  kind: RecoveryKind,
-): void {
-  if (kind === "retry" || kind === "shutdown") {
-    db.run(
-      `UPDATE team_member SET time_updated = ? WHERE team_id = ? AND name = ?
-       AND status = 'shutdown_requested' AND execution_status = 'cancelling'`,
-      [Date.now(), member.team_id, member.name],
-    )
-    return
-  }
-  db.run(
-    `UPDATE team_member SET status = 'busy', execution_status = 'cancel_requested', time_updated = ?
-     WHERE team_id = ? AND name = ?
-       AND ((status = 'busy' AND execution_status = 'cancelling')
-         OR (status = 'ready' AND execution_status = 'idle' AND reported_to_lead = 0
-           AND EXISTS (
-             SELECT 1 FROM team_task
-             WHERE team_id = ? AND assignee = ? AND status = 'in_progress'
-           )))`,
-    [Date.now(), member.team_id, member.name, member.team_id, member.name],
-  )
 }
 
 /**

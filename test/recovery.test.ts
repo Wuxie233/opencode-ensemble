@@ -311,15 +311,12 @@ describe("recoverStaleMembers", () => {
       "INSERT INTO team_task (id, team_id, content, status, priority, assignee, time_created, time_updated) VALUES ('task-a', 't1', 'work', 'in_progress', 'high', 'alice', ?, ?)",
       [Date.now(), Date.now()],
     )
-    client.session.abort = async () => {
-      db.run("UPDATE team_member SET status = 'ready', execution_status = 'idle' WHERE team_id = 't1' AND name = 'alice'")
-      throw new Error("abort failed")
-    }
+    client.session.abort = async () => { throw new Error("abort failed") }
 
     const result = await recoverStaleMembers(db, client)
     expect(result.interrupted).toBe(0)
 
-    expect((db.query("SELECT status, execution_status FROM team_member WHERE name = 'alice'").get() as { status: string; execution_status: string })).toEqual({ status: "busy", execution_status: "cancel_requested" })
+    expect((db.query("SELECT status, execution_status FROM team_member WHERE name = 'alice'").get() as { status: string; execution_status: string })).toEqual({ status: "busy", execution_status: "cancelling" })
     expect((db.query("SELECT status, assignee FROM team_task WHERE id = 'task-a'").get() as { status: string; assignee: string })).toEqual({ status: "in_progress", assignee: "alice" })
     const alert = db.query(
       "SELECT content FROM team_message WHERE team_id = 't1' AND from_name = 'system' AND to_name = 'lead'",
@@ -348,16 +345,18 @@ describe("recoverStaleMembers", () => {
       await git(repo, ["checkout", "live-alice"])
       insertTeam(db, "t1", "my-team", "lead-sess")
       insertMember(db, "t1", "alice", "sess-1", "busy", "running")
-      db.run("UPDATE team_member SET worktree_branch = 'live-alice' WHERE team_id = 't1' AND name = 'alice'")
+      db.run("UPDATE team_member SET worktree_branch = 'live-alice', worktree_dir = ? WHERE team_id = 't1' AND name = 'alice'", [repo])
       let abortAttempts = 0
       client.session.abort = async () => {
+        const branch = (db.query("SELECT worktree_branch FROM team_member WHERE name = 'alice'").get() as { worktree_branch: string }).worktree_branch
+        expect(branch).toStartWith("ensemble/preserved/")
         abortAttempts += 1
         if (abortAttempts === 1) throw new Error("transport unavailable")
         return {}
       }
 
       expect((await recoverStaleMembers(db, client, repo)).interrupted).toBe(0)
-      expect((db.query("SELECT worktree_branch FROM team_member WHERE name = 'alice'").get() as { worktree_branch: string }).worktree_branch).toBe("live-alice")
+      expect((db.query("SELECT worktree_branch FROM team_member WHERE name = 'alice'").get() as { worktree_branch: string }).worktree_branch).toStartWith("ensemble/preserved/")
 
       await Bun.write(path.join(repo, "tracked.txt"), "second\n")
       await git(repo, ["add", "tracked.txt"])
@@ -370,6 +369,33 @@ describe("recoverStaleMembers", () => {
     } finally {
       await rm(repo, { recursive: true, force: true })
     }
+  })
+
+  test.each(["checking", "prompted"])("does not race active SafeAbort %s recovery during startup", async recoveryState => {
+    insertTeam(db, "t1", "my-team", "lead-sess")
+    insertMember(db, "t1", "alice", "sess-1", "busy", "running")
+    db.run(
+      `UPDATE team_member SET abort_recovery_state = ?, abort_recovery_claim_token = 'owner',
+         abort_recovery_claim_expires_at = ? WHERE name = 'alice'`,
+      [recoveryState, Date.now() + 60_000],
+    )
+
+    expect((await recoverStaleMembers(db, client)).interrupted).toBe(0)
+    expect(client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
+    expect(db.query("SELECT status, execution_status, abort_recovery_state FROM team_member WHERE name = 'alice'").get())
+      .toEqual({ status: "busy", execution_status: "running", abort_recovery_state: recoveryState })
+  })
+
+  test("keeps settled SafeAbort prompted work live during startup recovery", async () => {
+    insertTeam(db, "t1", "my-team", "lead-sess")
+    insertMember(db, "t1", "alice", "sess-1", "busy", "running")
+    db.run(
+      `UPDATE team_member SET abort_recovery_state = 'prompted', abort_recovery_claim_token = NULL,
+         abort_recovery_claim_expires_at = NULL WHERE name = 'alice'`,
+    )
+
+    expect((await recoverStaleMembers(db, client)).interrupted).toBe(0)
+    expect(client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
   })
 
   test("refreshes a legacy preserved record from its live worktree before startup abort", async () => {

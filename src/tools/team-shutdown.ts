@@ -112,7 +112,6 @@ export async function abortShutdownRequestedMember(
     worktreeDir,
     resolveBranch,
   )
-  let preservedBranch: string | null = null
   if (sourceBranch) {
     const resource = getTeamResourceParts(deps.db, teamId)
     const safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, memberName)
@@ -126,7 +125,12 @@ export async function abortShutdownRequestedMember(
       })
       return false
     }
-    preservedBranch = safeBranch
+    const recorded = deps.db.run(
+      `UPDATE team_member SET worktree_branch = ?, time_updated = ?
+       WHERE team_id = ? AND name = ? AND status = 'shutdown_requested'`,
+      [safeBranch, Date.now(), teamId, memberName],
+    )
+    if (recorded.changes !== 1) return false
     log(`busy_while_shutdown:branch:preserved src=${sourceBranch} target=${safeBranch}`)
   }
 
@@ -141,12 +145,6 @@ export async function abortShutdownRequestedMember(
       wakeText: `[System: Re-abort for ${memberName} failed; guidance is available in team messages]`,
     })
     return false
-  }
-  if (preservedBranch) {
-    deps.db.run(
-      "UPDATE team_member SET worktree_branch = ? WHERE team_id = ? AND name = ?",
-      [preservedBranch, teamId, memberName],
-    )
   }
   settleShutdown(deps, teamId, memberName)
   return true
@@ -197,11 +195,14 @@ async function preserveAndAbort(
 
   // Record shutdown intent only after preservation succeeds, but before abort
   // can emit MessageAbortedError.
-  deps.db.run(
-    `UPDATE team_member SET status = 'shutdown_requested', time_updated = ?
+  const recorded = deps.db.run(
+    `UPDATE team_member SET status = 'shutdown_requested', worktree_branch = COALESCE(?, worktree_branch), time_updated = ?
      WHERE team_id = ? AND name = ? AND status NOT IN ('shutdown', 'error')`,
-    [Date.now(), teamId, memberName],
+    [preservedBranch, Date.now(), teamId, memberName],
   )
+  if (recorded.changes !== 1) {
+    throw new Error(`Cannot shut down "${memberName}": the member state changed before abort. Retry with current state.`)
+  }
 
   // Now safe to abort — the branch is preserved
   try {
@@ -215,13 +216,6 @@ async function preserveAndAbort(
       wakeText: `[System: Shutdown abort for ${memberName} failed; guidance is available in team messages]`,
     })
     throw new Error(`Cannot shut down "${memberName}": failed to abort the session. The member remains shutdown_requested so you can retry.`)
-  }
-
-  if (preservedBranch) {
-    deps.db.run(
-      "UPDATE team_member SET worktree_branch = ? WHERE team_id = ? AND name = ?",
-      [preservedBranch, teamId, memberName],
-    )
   }
 
   settleShutdown(deps, teamId, memberName)
