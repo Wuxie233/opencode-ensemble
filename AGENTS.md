@@ -154,9 +154,16 @@ consecutive retry, atomically claim termination, preserve the branch, await
 in-progress tasks, and alert the Lead to create a fresh session with
 `team_spawn(resume_from)`. Never release task ownership or recommend a
 replacement before abort succeeds. Preservation or abort failure must retain
-the member/task for retry. Reset the durable sequence on idle, meaningful
-assistant output, or terminal `session.error`; never append a new teammate
-prompt as an automatic retry because it may repeat tool side effects.
+the member/task and the durable sixth-retry termination claim; later retry
+events retry termination without incrementing past six. OpenCode dispatches
+plugin event hooks fire-and-forget, so awaiting abort inside the hook is local
+coordination, not provider-loop backpressure. Keep one process-shared
+termination in flight per Session and use the durable claim plus a terminal
+liveness guard to re-abort any late `busy`/`retry` event, including when the
+terminal member is absent from the in-memory registry. Every such re-abort must
+refresh branch preservation first. Reset a non-tripped sequence on idle,
+meaningful assistant output, or terminal `session.error`; never append a new
+teammate prompt as an automatic retry because it may repeat tool side effects.
 
 The task graph accepts existing same-Team task IDs and batch-local keys only.
 Reject missing, cross-Team, self, and cyclic dependencies transactionally.
