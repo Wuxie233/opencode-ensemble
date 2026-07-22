@@ -439,6 +439,38 @@ describe("team_cleanup", () => {
     })
   })
 
+  test("force cleanup rolls back member settlement when task release fails", async () => {
+    insertMember(deps.db, "t1", "alice", "sess-alice", "busy", "running")
+    deps.db.run("UPDATE team_member SET worktree_branch = 'live-alice' WHERE name = 'alice'")
+    insertTask(deps.db, "t1", "task-alice")
+    deps.db.run("UPDATE team_task SET status = 'in_progress', assignee = 'alice' WHERE id = 'task-alice'")
+    const originalRun = deps.db.run.bind(deps.db)
+    deps.db.run = (sql, ...params) => {
+      if (sql.includes("UPDATE team_task SET status = 'pending'")) throw new Error("task release failed")
+      return originalRun(sql, ...params)
+    }
+
+    await expect(executeTeamCleanup(
+      deps, { force: true }, "lead-sess", undefined, noopMerge, noopDelete, false,
+      undefined, undefined, undefined, undefined, async () => true,
+    )).rejects.toThrow("task release failed")
+
+    expect((deps.db.query("SELECT status, execution_status, worktree_branch FROM team_member WHERE name = 'alice'").get() as {
+      status: string
+      execution_status: string
+      worktree_branch: string
+    })).toEqual({
+      status: "shutdown_requested",
+      execution_status: "running",
+      worktree_branch: "ensemble/preserved/test-project/my-team#t1/alice",
+    })
+    expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-alice'").get())
+      .toEqual({ status: "in_progress", assignee: "alice" })
+    expect((deps.db.query("SELECT status FROM team WHERE id = 't1'").get() as { status: string }).status).toBe("active")
+    expect(deps.client.calls.filter(call => call.method === "worktree.remove")).toHaveLength(0)
+    expect(deps.client.calls.filter(call => call.method === "workspace.remove")).toHaveLength(0)
+  })
+
   test("force cleanup does not abort or archive when branch preservation fails", async () => {
     insertMember(deps.db, "t1", "alice", "sess-alice", "busy", "running")
     deps.db.run("UPDATE team_member SET worktree_branch = ? WHERE name = 'alice'", ["ensemble-my-team-alice"])
