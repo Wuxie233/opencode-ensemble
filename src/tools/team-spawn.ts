@@ -102,10 +102,17 @@ function claimSpawnTask(deps: ToolDeps, teamId: string, taskId: string, assignee
 
 function rollbackSpawnTask(deps: ToolDeps, teamId: string, taskId: string | undefined, assignee: string): void {
   if (!taskId) return
-  deps.db.run(
+  const result = deps.db.run(
     "UPDATE team_task SET status = 'pending', assignee = NULL, time_updated = ? WHERE id = ? AND team_id = ? AND status = 'in_progress' AND assignee = ?",
     [Date.now(), taskId, teamId, assignee],
   )
+  if (result.changes === 1) return
+  const task = deps.db.query(
+    "SELECT status, assignee FROM team_task WHERE id = ? AND team_id = ?",
+  ).get(taskId, teamId) as { status: string; assignee: string | null } | null
+  if (task?.status === "in_progress" && task.assignee === assignee) {
+    throw new Error(`Task "${taskId}" is still owned by ${assignee} after rollback`)
+  }
 }
 
 /**
@@ -305,26 +312,42 @@ async function executeTeamSpawnLocked(
       [teamInfo.teamId, args.name, childSessionId, args.agent, resolvedModel ?? null, args.prompt, worktreeDir, worktreeBranch, workspaceId, planApproval, now, now]
     )
   } catch (err) {
-    rollbackSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name)
+    const registrationError = err instanceof Error ? err.message : String(err)
     let safeBranch: string | null = null
     if (worktreeBranch) {
       const resource = getTeamResourceParts(deps.db, teamInfo.teamId)
       safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, args.name)
       const ok = await preserve(worktreeBranch, safeBranch, deps.directory)
       if (!ok) {
-        sendLeadAlert(deps.db, deps.client, {
-          teamId: teamInfo.teamId,
-          content: `Teammate "${args.name}" could not be registered and branch ${worktreeBranch} could not be preserved. Its session and worktree remain intact for manual recovery. Error: ${err instanceof Error ? err.message : String(err)}.`,
-          wakeText: `[System: Teammate ${args.name} registration and branch preservation failed; recovery guidance is available in team messages]`,
-        })
-        throw new Error(`${err instanceof Error ? err.message : String(err)}. Cleanup stopped because branch ${worktreeBranch} could not be preserved; the session and worktree were left intact for retry.`)
+        try {
+          sendLeadAlert(deps.db, deps.client, {
+            teamId: teamInfo.teamId,
+            content: `Teammate "${args.name}" could not be registered and branch ${worktreeBranch} could not be preserved. Its session and worktree remain intact for manual recovery. Session: ${childSessionId}. Worktree: ${worktreeDir ?? "none"}. Workspace: ${workspaceId ?? "none"}. Claimed task: ${args.claim_task ?? "none"}. Error: ${registrationError}.`,
+            wakeText: `[System: Teammate ${args.name} registration and branch preservation failed; recovery guidance is available in team messages]`,
+          })
+        } catch (alertError) {
+          const message = alertError instanceof Error ? alertError.message : String(alertError)
+          throw new Error(`${registrationError}; branch preservation failed and recovery alert also failed: ${message}. Session ${childSessionId}, live branch ${worktreeBranch}, worktree ${worktreeDir ?? "none"}, workspace ${workspaceId ?? "none"}, and claimed task ${args.claim_task ?? "none"} were left intact.`)
+        }
+        throw new Error(`${registrationError}. Cleanup stopped because branch ${worktreeBranch} could not be preserved; the session and worktree were left intact for retry.`)
       }
     }
-    sendLeadAlert(deps.db, deps.client, {
-      teamId: teamInfo.teamId,
-      content: `Teammate "${args.name}" could not be registered, so its unowned session was not aborted; manual recovery is required for session ${childSessionId} and its resources. Preserved branch: ${safeBranch ?? "none"}. Live branch: ${worktreeBranch ?? "none"}. Worktree: ${worktreeDir ?? "none"}. Workspace: ${workspaceId ?? "none"}. Registration error: ${err instanceof Error ? err.message : String(err)}.`,
-      wakeText: `[System: Teammate ${args.name} registration failed; unowned resources require manual recovery]`,
-    })
+    try {
+      sendLeadAlert(deps.db, deps.client, {
+        teamId: teamInfo.teamId,
+        content: `Teammate "${args.name}" could not be registered, so its unowned session was not aborted; manual recovery is required for session ${childSessionId} and its resources. Preserved branch: ${safeBranch ?? "none"}. Live branch: ${worktreeBranch ?? "none"}. Worktree: ${worktreeDir ?? "none"}. Workspace: ${workspaceId ?? "none"}. Claimed task: ${args.claim_task ?? "none"}. Registration error: ${registrationError}.`,
+        wakeText: `[System: Teammate ${args.name} registration failed; unowned resources require manual recovery]`,
+      })
+    } catch (alertError) {
+      const message = alertError instanceof Error ? alertError.message : String(alertError)
+      throw new Error(`${registrationError}; recovery alert also failed: ${message}. Preserved branch: ${safeBranch ?? "none"}. Session ${childSessionId} and its resources were left intact; claimed task ${args.claim_task ?? "none"} was not rolled back.`)
+    }
+    try {
+      rollbackSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name)
+    } catch (rollbackError) {
+      const message = rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
+      throw new Error(`${registrationError}; task rollback also failed: ${message}`)
+    }
     throw err
   }
 
@@ -521,10 +544,49 @@ async function executeTeamSpawnLocked(
           })
           return
         }
-        rollbackSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name)
-        if (workspaceId) await deps.client.workspace.remove({ id: workspaceId })
-        if (worktreeDir) await deps.client.worktree.remove({ worktreeRemoveInput: { directory: worktreeDir } })
-        deps.db.run("DELETE FROM team_member WHERE team_id = ? AND session_id = ?", [teamInfo.teamId, childSessionId])
+        const alertCleanupFailure = (phase: string, cleanupError: unknown) => {
+          const message = cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+          try {
+            sendLeadAlert(deps.db, deps.client, {
+              teamId: teamInfo.teamId,
+              content: `Teammate "${args.name}" failed to start and its session was aborted, but prompt rollback stopped during ${phase}: ${message}. The shutdown_requested member remains the durable owner of its safe branch and task ownership for manual recovery. Preserved branch: ${safeBranch ?? "none"}. Session: ${childSessionId}. Worktree: ${worktreeDir ?? "none"}. Workspace: ${workspaceId ?? "none"}. Claimed task: ${args.claim_task ?? "none"}. Retry the failed cleanup phase, then release the task and delete the member together before unregistering it.`,
+              wakeText: `[System: Teammate ${args.name} prompt rollback cleanup is incomplete; manual recovery guidance is available in team messages]`,
+            })
+          } catch (alertError) {
+            log(`spawn:promptAsync:cleanup-alert-failed name=${args.name} sessionId=${childSessionId} phase=${phase} cleanup=${message} alert=${alertError instanceof Error ? alertError.message : String(alertError)}`)
+          }
+        }
+        if (workspaceId) {
+          try {
+            await deps.client.workspace.remove({ id: workspaceId })
+          } catch (cleanupError) {
+            alertCleanupFailure("workspace removal", cleanupError)
+            return
+          }
+        }
+        if (worktreeDir) {
+          try {
+            await deps.client.worktree.remove({ worktreeRemoveInput: { directory: worktreeDir } })
+          } catch (cleanupError) {
+            alertCleanupFailure("worktree removal", cleanupError)
+            return
+          }
+        }
+        try {
+          deps.db.transaction(() => {
+            rollbackSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name)
+            const deleted = deps.db.run(
+              "DELETE FROM team_member WHERE team_id = ? AND session_id = ? AND status = 'shutdown_requested'",
+              [teamInfo.teamId, childSessionId],
+            )
+            if (deleted.changes !== 1) {
+              throw new Error("durable member deletion did not match the shutdown_requested owner")
+            }
+          })()
+        } catch (cleanupError) {
+          alertCleanupFailure("atomic task release and member deletion", cleanupError)
+          return
+        }
         deps.registry.unregister(childSessionId)
         const modelInfo = resolvedModel ? ` (model: ${resolvedModel})` : ""
         sendLeadAlert(deps.db, deps.client, {
@@ -533,7 +595,9 @@ async function executeTeamSpawnLocked(
           wakeText: `[System: Teammate ${args.name} failed to start; guidance is available in team messages]`,
         })
       }
-      preserveThenAbort().catch(() => { /* best effort */ })
+      preserveThenAbort().catch(cleanupError => {
+        log(`spawn:promptAsync:cleanup-failed name=${args.name} sessionId=${childSessionId} err=${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`)
+      })
       const modelInfo = resolvedModel ? ` (model: ${resolvedModel})` : ""
       deps.client.tui.showToast({
         title: "Team",
