@@ -198,6 +198,55 @@ describe("buildLeadSystemPrompt", () => {
     expect(brief).toContain("Need a product decision")
     expect(brief).not.toContain("- waiting-task: Task waiting-task")
   })
+
+  test("removes a blocker after later progress and task completion", () => {
+    const db = setupDb()
+    insertTeam(db, "brief-resolve", "brief-resolve", "lead-sess")
+    insertTask(db, "brief-resolve", "task-progress", "in_progress")
+    insertTask(db, "brief-resolve", "task-done", "completed")
+    const rows = [
+      ["block-progress", "task-progress", "blocker", "Progress blocker", 1],
+      ["block-done", "task-done", "blocker", "Completed blocker", 2],
+      ["resume", "task-progress", "progress", "Work resumed", 3],
+    ] as const
+    rows.forEach(([id, taskId, kind, summary, time]) => {
+      db.run(
+        "INSERT INTO team_message (id, team_id, from_name, to_name, content, delivered, read, time_created) VALUES (?, ?, 'alice', 'lead', ?, 1, 0, ?)",
+        [id, "brief-resolve", `<task-result><kind>${kind}</kind><task_id>${taskId}</task_id><status>in_progress</status><summary>${summary}</summary><details>private</details></task-result>`, time],
+      )
+    })
+
+    const brief = buildLeadSystemPrompt(db, "brief-resolve")
+    expect(brief).toContain("Work resumed")
+    expect(brief).not.toContain("Progress blocker")
+    expect(brief).not.toContain("Completed blocker")
+    expect(brief).not.toContain("Blockers:")
+  })
+
+  test("projects the latest state independently across tasks and member fallbacks", () => {
+    const db = setupDb()
+    insertTeam(db, "brief-keys", "brief-keys", "lead-sess")
+    const rows = [
+      ["task-a", "alice", "<task_id>task-a</task_id>", "blocker", "Task A blocked", 1],
+      ["task-b", "alice", "<task_id>task-b</task_id>", "blocker", "Task B blocked", 2],
+      ["alice-old", "alice", "", "blocker", "Alice blocked", 3],
+      ["bob", "bob", "", "blocker", "Bob blocked", 4],
+      ["alice-new", "alice", "", "result", "Alice resolved", 5],
+    ] as const
+    rows.toReversed().forEach(([id, from, task, kind, summary, time]) => {
+      db.run(
+        "INSERT INTO team_message (id, team_id, from_name, to_name, content, delivered, read, time_created) VALUES (?, ?, ?, 'lead', ?, 1, 0, ?)",
+        [id, "brief-keys", from, `<task-result><kind>${kind}</kind>${task}<status>in_progress</status><summary>${summary}</summary><details>private</details></task-result>`, time],
+      )
+    })
+
+    const brief = buildLeadSystemPrompt(db, "brief-keys")
+    expect(brief).toContain("Task A blocked")
+    expect(brief).toContain("Task B blocked")
+    expect(brief).toContain("Bob blocked")
+    expect(brief).toContain("Alice resolved")
+    expect(brief).not.toContain("Alice blocked")
+  })
 })
 
 describe("buildTeammateSystemPrompt", () => {

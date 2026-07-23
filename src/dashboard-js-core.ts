@@ -1,4 +1,4 @@
-import { parseTaskResult } from "./result-parser"
+import { projectStructuredResults } from "./structured-result-projection"
 
 type DashboardConnectionMode = "loading" | "live" | "error" | "stale" | "recovered"
 
@@ -18,7 +18,7 @@ interface DashboardAttentionTask {
 interface DashboardAttentionSource {
   members?: DashboardAttentionMember[]
   tasks?: DashboardAttentionTask[]
-  messages?: Array<{ fromName: string; content: string }>
+  messages?: Array<{ id: string; fromName: string; content: string; timeCreated: number }>
 }
 
 interface DashboardAttentionItem {
@@ -46,9 +46,9 @@ export function deriveDashboardAttention(_source: DashboardAttentionSource): Das
       target: { type: "agent", id: member.name },
     })
   })
-  messages.forEach(message => {
-    const blocker = parseTaskResult(message.content)
-    if (blocker?.kind !== "blocker") return
+  projectStructuredResults(messages, tasks).forEach(message => {
+    const blocker = message.result
+    if (blocker.kind !== "blocker") return
     const task = blocker.taskId ? tasks.find(candidate => candidate.id === blocker.taskId) : undefined
     items.push({
       kind: "阻塞报告",
@@ -164,6 +164,7 @@ const si=s=>ST[s]||ST.ready;
 const PR={high:'text-red-400 bg-red-500/10 border border-red-500/20',medium:'text-amber-400 bg-amber-500/10 border border-amber-500/20',low:'text-txt-400 bg-base-800 border border-base-700'};
 
 function parseR(c){const m=c.match(/<task-result>([\\s\\S]*?)<\\/task-result>/);if(!m)return null;const i=m[1],s=(i.match(/<status>([\\s\\S]*?)<\\/status>/)||[])[1]?.trim(),u=(i.match(/<summary>([\\s\\S]*?)<\\/summary>/)||[])[1]?.trim(),d=(i.match(/<details>([\\s\\S]*?)<\\/details>/)||[])[1]?.trim(),k=(i.match(/<kind>([\\s\\S]*?)<\\/kind>/)||[])[1]?.trim(),taskId=(i.match(/<task_id>([\\s\\S]*?)<\\/task_id>/)||[])[1]?.trim();return s&&u?{status:s,summary:u,details:d||'',kind:k,taskId:taskId}:null}
+function projectR(t){const tasks=new Map((t.tasks||[]).map(x=>[x.id,x.status])),latest=new Map();[...(t.messages||[])].sort((a,b)=>b.timeCreated-a.timeCreated||String(b.id).localeCompare(String(a.id))).forEach(m=>{const p=parseR(m.content);if(!p||!['progress','result','blocker'].includes(p.kind))return;const key=p.taskId?'task:'+p.taskId:'member:'+m.fromName;if(latest.has(key)||(p.kind==='blocker'&&p.taskId&&tasks.get(p.taskId)==='completed'))return;latest.set(key,{key,messageId:m.id,fromName:m.fromName,timeCreated:m.timeCreated,result:{kind:p.kind,taskId:p.taskId,status:p.status,summary:p.summary}})});return[...latest.values()]}
 
 function allTeams(){
   if(!S?.teams)return{active:[],archived:[]};
@@ -214,7 +215,7 @@ function deriveAttention(t){
   const latest=msgs[0]||null;
   const items=[];
   errored.forEach(m=>items.push({kind:'智能体错误',label:m.name,detail:enumLabel(m.executionStatus||m.status),color:'red',target:{type:'agent',id:m.name}}));
-  msgs.forEach(m=>{const p=parseR(m.content);if(p?.kind!=='blocker')return;const task=p.taskId?tasks.find(x=>x.id===p.taskId):null;items.push({kind:'阻塞报告',label:task?.assignee||m.fromName,detail:p.summary,color:'amber',target:task?.assignee?{type:'agent',id:task.assignee}:p.taskId?{type:'task',id:p.taskId}:{type:'agent',id:m.fromName}})});
+  projectR(t).forEach(m=>{const p=m.result;if(p.kind!=='blocker')return;const task=p.taskId?tasks.find(x=>x.id===p.taskId):null;items.push({kind:'阻塞报告',label:task?.assignee||m.fromName,detail:p.summary,color:'amber',target:task?.assignee?{type:'agent',id:task.assignee}:p.taskId?{type:'task',id:p.taskId}:{type:'agent',id:m.fromName}})});
   stopping.forEach(m=>items.push({kind:'正在停止',label:m.name,detail:'已请求停止',color:'amber',target:{type:'agent',id:m.name}}));
   return{items,running,latest,waiting,errored};
 }
@@ -233,7 +234,8 @@ function deriveSparkline(name,msgs){
 function deriveTimeline(t){
   const ev=[];
   (t.members||[]).forEach(m=>{ev.push({key:'member|'+m.name+'|spawn',t:m.timeCreated,type:'spawn',label:E(m.name)+' 已启动',c:'bg-blue-400'});if(m.status==='shutdown')ev.push({key:'member|'+m.name+'|off',t:m.timeUpdated,type:'off',label:E(m.name)+' 已停止',c:'bg-txt-500'});if(m.status==='error')ev.push({key:'member|'+m.name+'|error',t:m.timeUpdated,type:'err',label:E(m.name)+' 出错',c:'bg-red-500'})});
-  (t.messages||[]).forEach(m=>{const p=parseR(m.content);ev.push({key:'message|'+m.id,t:m.timeCreated,type:'msg',label:E(m.fromName)+' \\u2192 '+(E(m.toName)||'全体'),c:p?'bg-emerald-500':'bg-blue-400'})});
+  const projected=new Map(projectR(t).map(x=>[x.messageId,x]));
+  (t.messages||[]).forEach(m=>{const p=parseR(m.content);if(p&&!projected.has(m.id))return;ev.push({key:'message|'+m.id,t:m.timeCreated,type:'msg',label:E(m.fromName)+' \\u2192 '+(E(m.toName)||'全体'),c:p?'bg-emerald-500':'bg-blue-400'})});
   (t.tasks||[]).filter(x=>x.status==='completed').forEach(x=>{ev.push({key:'task|'+x.id+'|done',t:x.timeUpdated,type:'done',label:'任务已完成',c:'bg-emerald-500'})});
   return ev.sort((a,b)=>a.t-b.t).slice(-50);
 }

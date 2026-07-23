@@ -2,6 +2,7 @@ import type { Database } from "./db"
 import { markDelivered } from "./messaging"
 import { parseTaskResult, formatTaskResult } from "./result-parser"
 import type { EnsembleConfig } from "./config"
+import { projectStructuredResults } from "./structured-result-projection"
 
 /** Truncate a string to maxLen chars, appending "..." if truncated. */
 function truncate(s: string, maxLen: number): string {
@@ -314,32 +315,32 @@ export function buildRollingLeadBrief(db: Database, teamId: string): string {
       lines.push(`- ${task.id}: ${truncate(task.content, 160)}${task.assignee ? ` (${task.assignee})` : ""}`)
     })
   }
-  const blockerMessages = db.query(
-    "SELECT from_name, content FROM team_message WHERE team_id = ? AND to_name = 'lead' AND content LIKE '%<kind>blocker</kind>%' ORDER BY time_created DESC, id DESC LIMIT 100",
-  ).all(teamId) as Array<{ from_name: string; content: string }>
-  const blockers = blockerMessages.flatMap(message => {
-    const parsed = parseTaskResult(message.content)
-    if (parsed?.kind !== "blocker") return []
-    return [`- ${parsed.taskId ?? message.from_name}: ${truncate(parsed.summary, 160)}`]
-  }).slice(0, 8)
+  const messages = db.query(
+    "SELECT id, from_name, content, time_created FROM team_message WHERE team_id = ? AND to_name = 'lead' AND content LIKE '%<task-result>%' ORDER BY time_created DESC, id DESC LIMIT 100",
+  ).all(teamId) as Array<{ id: string; from_name: string; content: string; time_created: number }>
+  const tasks = db.query(
+    "SELECT id, status FROM team_task WHERE team_id = ?",
+  ).all(teamId) as Array<{ id: string; status: string }>
+  const projected = projectStructuredResults(
+    messages.map(message => ({
+      id: message.id,
+      fromName: message.from_name,
+      content: message.content,
+      timeCreated: message.time_created,
+    })),
+    tasks,
+  )
+  const blockers = projected
+    .filter(item => item.result.kind === "blocker")
+    .slice(0, 8)
+    .map(item => `- ${item.result.taskId ?? item.fromName}: ${truncate(item.result.summary, 160)}`)
   if (blockers.length > 0) {
     lines.push("Blockers:")
     lines.push(...blockers)
   }
-  const messages = db.query(
-    "SELECT from_name, content FROM team_message WHERE team_id = ? AND to_name = 'lead' AND content LIKE '%<task-result>%' ORDER BY time_created DESC, id DESC LIMIT 100",
-  ).all(teamId) as Array<{ from_name: string; content: string }>
-  const latest = new Map<string, string>()
-  messages.forEach(message => {
-    const parsed = parseTaskResult(message.content)
-    if (!parsed) return
-    const label = parsed.kind ?? "result"
-    const key = `${parsed.taskId ?? message.from_name}:${label}`
-    if (!latest.has(key)) {
-      latest.set(key, `- [${label}] ${message.from_name}${parsed.taskId ? `/${parsed.taskId}` : ""}: ${truncate(parsed.summary, 240)}`)
-    }
-  })
-  const summaries = [...latest.values()].reverse()
+  const summaries = projected.toReversed().map(item =>
+    `- [${item.result.kind}] ${item.fromName}${item.result.taskId ? `/${item.result.taskId}` : ""}: ${truncate(item.result.summary, 240)}`
+  )
   if (summaries.length > 0) lines.push("Latest summaries:", ...summaries)
   const brief = truncateUtf8(lines.join("\n"), 8 * 1024)
   db.run("UPDATE team SET lead_brief = ?, lead_brief_updated_at = ? WHERE id = ?", [brief, Date.now(), teamId])

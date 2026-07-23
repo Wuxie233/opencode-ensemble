@@ -38,7 +38,9 @@ describe("dashboard UI contract", () => {
         { id: "unassigned", status: "blocked", assignee: null, content: "Needs owner" },
       ],
       messages: [{
+        id: "blocker-assigned",
         fromName: "builder",
+        timeCreated: 1,
         content: "<task-result><kind>blocker</kind><task_id>assigned</task_id><status>pending</status><summary>API contract is unavailable</summary><details>Waiting for owner decision</details></task-result>",
       }],
     })
@@ -47,6 +49,29 @@ describe("dashboard UI contract", () => {
     expect(result[0]?.target).toEqual({ type: "agent", id: "reviewer" })
     expect(result[1]?.target).toEqual({ type: "agent", id: "builder" })
     expect(result[1]?.detail).toContain("API contract is unavailable")
+  })
+
+  test("attention projects only unresolved latest structured states", () => {
+    const messages = [
+      { id: "task-a-block", fromName: "builder", timeCreated: 1, content: "<task-result><kind>blocker</kind><task_id>task-a</task_id><status>pending</status><summary>Stale task blocker</summary><details>private</details></task-result>" },
+      { id: "task-b-block", fromName: "builder", timeCreated: 2, content: "<task-result><kind>blocker</kind><task_id>task-b</task_id><status>pending</status><summary>Still blocked</summary><details>private</details></task-result>" },
+      { id: "task-a-progress", fromName: "builder", timeCreated: 3, content: "<task-result><kind>progress</kind><task_id>task-a</task_id><status>in_progress</status><summary>Resumed</summary><details>private</details></task-result>" },
+      { id: "task-done-block", fromName: "reviewer", timeCreated: 4, content: "<task-result><kind>blocker</kind><task_id>task-done</task_id><status>pending</status><summary>Completed stale blocker</summary><details>private</details></task-result>" },
+    ]
+    const source = {
+      tasks: [
+        { id: "task-a", status: "in_progress", assignee: "builder", content: "A" },
+        { id: "task-b", status: "in_progress", assignee: "builder", content: "B" },
+        { id: "task-done", status: "completed", assignee: "reviewer", content: "Done" },
+      ],
+      messages,
+    }
+
+    const first = deriveDashboardAttention(source)
+    const nextPoll = deriveDashboardAttention({ ...source, messages: messages.toReversed() })
+    expect(first).toEqual(nextPoll)
+    expect(first.map(item => item.detail)).toEqual(["Still blocked"])
+    expect(first[0]?.target).toEqual({ type: "agent", id: "builder" })
   })
 
   test("global shortcuts ignore editable and interactive controls", () => {
@@ -205,6 +230,8 @@ describe("dashboard UI contract", () => {
     expect(DASHBOARD_JS_CORE).toContain("key:'member|'+m.name+'|spawn'")
     expect(DASHBOARD_JS_CORE).toContain("key:'message|'+m.id")
     expect(DASHBOARD_JS_CORE).toContain("key:'task|'+x.id+'|done'")
+    expect(DASHBOARD_JS_CORE).toContain("const projected=new Map(projectR(t).map(x=>[x.messageId,x]))")
+    expect(DASHBOARD_JS_CORE).toContain("if(p&&!projected.has(m.id))return")
     expect(DASHBOARD_JS_RENDER).toContain("const key=ev.key")
   })
 
