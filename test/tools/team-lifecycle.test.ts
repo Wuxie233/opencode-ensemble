@@ -641,7 +641,7 @@ describe("team_cleanup", () => {
     expect(team.status).toBe("active")
   })
 
-  test("force cleanup refreshes the live source branch after abort failure and retains resources until retry succeeds", async () => {
+  test("force cleanup refreshes the live source branch after abort failure and retains resources after retry settles", async () => {
     insertMember(deps.db, "t1", "alice", "sess-alice", "busy", "running")
     deps.db.run(
       "UPDATE team_member SET worktree_dir = ?, worktree_branch = ?, workspace_id = ? WHERE name = 'alice'",
@@ -713,14 +713,15 @@ describe("team_cleanup", () => {
       async () => "ensemble-my-team-alice",
     )
 
-    expect(result).toContain("cleaned up")
+    expect(result).toContain("not cleaned up")
+    expect(result).toContain("team_merge")
     expect(preserveCalls).toHaveLength(2)
     expect(preserveCalls[0]?.source).toBe("ensemble-my-team-alice")
     expect(preserveCalls[1]?.source).toBe("ensemble-my-team-alice")
     expect(preserveCalls[1]?.target).toBe(preserveCalls[0]?.target)
-    expect((deps.db.query("SELECT status FROM team WHERE id = 't1'").get() as { status: string }).status).toBe("archived")
-    expect(deps.client.calls.filter(call => call.method === "worktree.remove")).toHaveLength(1)
-    expect(deps.client.calls.filter(call => call.method === "workspace.remove")).toHaveLength(1)
+    expect((deps.db.query("SELECT status FROM team WHERE id = 't1'").get() as { status: string }).status).toBe("active")
+    expect(deps.client.calls.filter(call => call.method === "worktree.remove")).toHaveLength(0)
+    expect(deps.client.calls.filter(call => call.method === "workspace.remove")).toHaveLength(0)
   })
 
   test("force cleanup does not remove resources or archive when a later member abort fails", async () => {
@@ -793,6 +794,7 @@ describe("team_cleanup", () => {
     insertMember(deps.db, "t1", "alice", "sess-alice", "shutdown", "idle")
     deps.db.run("UPDATE team_member SET worktree_dir = ?, worktree_branch = ? WHERE name = 'alice'",
       ["/tmp/worktree-alice", "ensemble-my-team-alice"])
+    deps.db.run("UPDATE team_member SET merge_state = 'merged' WHERE name = 'alice'")
     deps.registry.register("t1", "alice", "sess-alice")
 
     const result = await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete, false)
@@ -806,6 +808,7 @@ describe("team_cleanup", () => {
     insertMember(deps.db, "t1", "alice", "sess-alice", "shutdown", "idle")
     deps.db.run("UPDATE team_member SET worktree_dir = ?, worktree_branch = ? WHERE name = 'alice'",
       ["/tmp/worktree-alice", "ensemble-my-team-alice"])
+    deps.db.run("UPDATE team_member SET merge_state = 'merged' WHERE name = 'alice'")
     deps.registry.register("t1", "alice", "sess-alice")
 
     deps.client.worktree.remove = async () => { throw new Error("worktree gone") }
@@ -826,6 +829,7 @@ describe("team_cleanup", () => {
     insertMember(deps.db, "t1", "alice", "sess-alice", "shutdown", "idle")
     deps.db.run("UPDATE team_member SET worktree_dir = ?, worktree_branch = ? WHERE name = 'alice'",
       ["/tmp/worktree-alice", "ensemble-my-team-alice"])
+    deps.db.run("UPDATE team_member SET merge_state = 'merged' WHERE name = 'alice'")
     deps.registry.register("t1", "alice", "sess-alice")
 
     await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete, false)
@@ -838,6 +842,7 @@ describe("team_cleanup", () => {
     insertMember(deps.db, "t1", "alice", "sess-alice", "shutdown", "idle")
     deps.db.run("UPDATE team_member SET worktree_dir = ?, worktree_branch = ?, workspace_id = ? WHERE name = 'alice'",
       ["/tmp/worktree-alice", "ensemble-my-team-alice", "ws-alice-123"])
+    deps.db.run("UPDATE team_member SET merge_state = 'merged' WHERE name = 'alice'")
     deps.registry.register("t1", "alice", "sess-alice")
 
     await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete, false)
@@ -851,6 +856,7 @@ describe("team_cleanup", () => {
     insertMember(deps.db, "t1", "alice", "sess-alice", "shutdown", "idle")
     deps.db.run("UPDATE team_member SET worktree_dir = ?, worktree_branch = ?, workspace_id = ? WHERE name = 'alice'",
       ["/tmp/worktree-alice", "ensemble-my-team-alice", "ws-alice-123"])
+    deps.db.run("UPDATE team_member SET merge_state = 'merged' WHERE name = 'alice'")
     deps.registry.register("t1", "alice", "sess-alice")
 
     await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete, false)
@@ -863,6 +869,7 @@ describe("team_cleanup", () => {
     insertMember(deps.db, "t1", "alice", "sess-alice", "shutdown", "idle")
     deps.db.run("UPDATE team_member SET worktree_dir = ?, worktree_branch = ?, workspace_id = ? WHERE name = 'alice'",
       ["/tmp/worktree-alice", "ensemble-my-team-alice", "ws-alice-123"])
+    deps.db.run("UPDATE team_member SET merge_state = 'merged' WHERE name = 'alice'")
     deps.registry.register("t1", "alice", "sess-alice")
 
     deps.client.workspace.remove = async () => { throw new Error("workspace gone") }
@@ -878,6 +885,7 @@ describe("team_cleanup", () => {
       ["/tmp/wt-alice", "ensemble-my-team-alice"])
     deps.db.run("UPDATE team_member SET worktree_dir = ?, worktree_branch = ? WHERE name = 'bob'",
       ["/tmp/wt-bob", "ensemble-my-team-bob"])
+    deps.db.run("UPDATE team_member SET merge_state = 'merged' WHERE name IN ('alice', 'bob')")
     deps.registry.register("t1", "alice", "sess-alice")
     deps.registry.register("t1", "bob", "sess-bob")
 
@@ -936,6 +944,7 @@ describe("team_cleanup", () => {
     insertMember(deps.db, "t1", "alice", "sess-alice", "shutdown", "idle")
     deps.db.run("UPDATE team_member SET worktree_dir = ?, worktree_branch = ? WHERE name = 'alice'",
       ["/tmp/wt-alice", "ensemble-my-team-alice"])
+    deps.db.run("UPDATE team_member SET merge_state = 'merged' WHERE name = 'alice'")
     deps.registry.register("t1", "alice", "sess-alice")
 
     const result = await executeTeamCleanup(deps, { force: false, acknowledge_uncommitted: true }, "lead-sess", async () => true, noopMerge, noopDelete, false)
@@ -953,6 +962,7 @@ describe("team_cleanup", () => {
     insertMember(deps.db, "t1", "alice", "sess-alice", "shutdown", "idle")
     deps.db.run("UPDATE team_member SET worktree_dir = ?, worktree_branch = ? WHERE name = 'alice'",
       ["/tmp/wt-alice", "ensemble-my-team-alice"])
+    deps.db.run("UPDATE team_member SET merge_state = 'merged' WHERE name = 'alice'")
     deps.registry.register("t1", "alice", "sess-alice")
 
     const result = await executeTeamCleanup(deps, { force: false }, "lead-sess", async () => false, noopMerge, noopDelete, false)

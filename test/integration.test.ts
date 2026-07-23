@@ -5,6 +5,7 @@ import { executeTeamSpawn } from "../src/tools/team-spawn"
 import { executeTeamMessage } from "../src/tools/team-message"
 import { executeTeamShutdown } from "../src/tools/team-shutdown"
 import { executeTeamCleanup } from "../src/tools/team-cleanup"
+import { executeTeamMerge } from "../src/tools/team-merge"
 import type { MergeBranchFn, DeleteBranchFn } from "../src/tools/merge-helper"
 import { buildLeadSystemPrompt } from "../src/system-prompt"
 import { recoverStaleMembers } from "../src/recovery"
@@ -83,6 +84,9 @@ describe("integration: full team lifecycle", () => {
     }
     const noopMerge: MergeBranchFn = async () => ({ ok: true })
     const noopDelete: DeleteBranchFn = async () => true
+    for (const name of names) {
+      await executeTeamMerge(deps, { member: name }, leadSession, noopMerge, noopDelete, async () => [])
+    }
     const cleanupResult = await executeTeamCleanup(deps, { force: false }, leadSession, undefined, noopMerge, noopDelete, false)
     expect(cleanupResult).toContain("cleaned up")
 

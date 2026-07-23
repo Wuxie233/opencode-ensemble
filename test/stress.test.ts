@@ -94,9 +94,9 @@ describe("stress: config validation", () => {
   })
 })
 
-// ─── Auto-merge ordering ───
+// ─── Explicit merge verification ───
 
-describe("stress: auto-merge on cleanup", () => {
+describe("stress: explicit merge verification on cleanup", () => {
   let deps: Deps
   const lead = "lead-sess"
 
@@ -106,7 +106,7 @@ describe("stress: auto-merge on cleanup", () => {
     spawnFailures.clear()
   })
 
-  test("merge runs before worktree removal — merge fn sees branches", async () => {
+  test("multiple writer branches block merge and worktree removal", async () => {
     await executeTeamCreate(deps, { name: "merge-order" }, lead)
     const teamId = getTeamId(deps, "merge-order")
     await executeTeamSpawn(deps, { name: "a", agent: "build", prompt: "t" }, lead)
@@ -122,15 +122,15 @@ describe("stress: auto-merge on cleanup", () => {
     }
 
     const result = await executeTeamCleanup(deps, { force: false }, lead, undefined, trackMerge, noopDelete, true)
-    expect(result).toContain("Safety-net merged 2 unmerged branch")
-    expect(mergedBranches).toHaveLength(2)
-
-    // Worktree removal happened AFTER merge
+    expect(result).toContain("team_merge")
+    expect(result).toContain("a (")
+    expect(result).toContain("b (")
+    expect(mergedBranches).toHaveLength(0)
     const wtRemoves = deps.client.calls.filter(c => c.method === "worktree.remove")
-    expect(wtRemoves).toHaveLength(2)
+    expect(wtRemoves).toHaveLength(0)
   })
 
-  test("mixed merge success and conflict reports both", async () => {
+  test("cleanup does not attempt partial automatic integration", async () => {
     await executeTeamCreate(deps, { name: "mix-merge" }, lead)
     const teamId = getTeamId(deps, "mix-merge")
     await executeTeamSpawn(deps, { name: "ok", agent: "build", prompt: "t" }, lead)
@@ -144,28 +144,31 @@ describe("stress: auto-merge on cleanup", () => {
     }
 
     const result = await executeTeamCleanup(deps, { force: false }, lead, undefined, mixedMerge, noopDelete, true)
-    expect(result).toContain("Safety-net merged 1 unmerged branch")
-    expect(result).toContain("Could not auto-merge")
+    expect(result).toContain("not cleaned up")
+    expect(result).toContain("team_merge")
+    expect(mixedCallCount).toBe(0)
   })
 
-  test("all merges fail — only conflict message shown", async () => {
+  test("merge callback errors cannot replace explicit integration", async () => {
     await executeTeamCreate(deps, { name: "all-fail" }, lead)
     const teamId = getTeamId(deps, "all-fail")
     await executeTeamSpawn(deps, { name: "x", agent: "build", prompt: "t" }, lead)
     deps.db.run("UPDATE team_member SET status = 'shutdown' WHERE team_id = ?", [teamId])
 
     const result = await executeTeamCleanup(deps, { force: false }, lead, undefined, failMerge, noopDelete, true)
-    expect(result).toContain("Could not auto-merge")
-    expect(result).not.toContain("Merged")
+    expect(result).toContain("team_merge")
+    expect(result).not.toContain("conflict")
   })
 
-  test("mergeOnCleanup=false returns old-style merge commands", async () => {
+  test("mergeOnCleanup=false still requires explicit team_merge", async () => {
     await executeTeamCreate(deps, { name: "no-merge" }, lead)
     const teamId = getTeamId(deps, "no-merge")
     await executeTeamSpawn(deps, { name: "y", agent: "build", prompt: "t" }, lead)
     deps.db.run("UPDATE team_member SET status = 'shutdown' WHERE team_id = ?", [teamId])
 
     const result = await executeTeamCleanup(deps, { force: false }, lead, undefined, noopMerge, noopDelete, false)
+    expect(result).toContain("team_merge")
+    expect(deps.db.query("SELECT status FROM team WHERE id = ?").get(teamId)).toEqual({ status: "active" })
   })
 })
 

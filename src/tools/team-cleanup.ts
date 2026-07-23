@@ -400,19 +400,18 @@ function buildPurgeConfirmationInstructions(preview: string, confirmToken: strin
 }
 
 /**
- * Execute the team_cleanup tool. Archives the team and cleans up resources.
- * Acts as a safety net: merges any remaining unmerged preserved branches
- * that the lead forgot to merge with team_merge.
+ * Execute the team_cleanup tool. Archives the team after every writer branch
+ * has completed explicit integration and cleans up its resources.
  */
 export async function executeTeamCleanup(
   deps: ToolDeps,
   args: { force: boolean; acknowledge_uncommitted?: boolean; purge?: string[]; confirm_purge?: boolean; confirm_token?: string },
   sessionId: string,
   isDirty: IsDirtyFn = checkWorktreeDirty,
-  merge: MergeBranchFn = mergeBranch,
+  _merge: MergeBranchFn = mergeBranch,
   delBranch: DeleteBranchFn = deleteBranch,
-  mergeOnCleanup = true,
-  overlapCheck: OverlapCheckFn = getOverlappingFiles,
+  _mergeOnCleanup = true,
+  _overlapCheck: OverlapCheckFn = getOverlappingFiles,
   _approvePurge?: PurgeApprovalFn,
   _listBranches?: ListBranchesFn,
   _branchExists?: BranchExistsFn,
@@ -593,11 +592,19 @@ export async function executeTeamCleanup(
     }
   }
 
-  // Safety net: merge only branches that have never entered integration.
+  const awaitingMerge = members.filter(member => member.worktree_branch !== null && member.merge_state === "none")
   const interruptedMerges = members.filter(member => member.worktree_branch !== null && member.merge_state === "merging")
-  if (interruptedMerges.length > 0) {
-    const names = interruptedMerges.map(member => `${member.name} (${member.worktree_branch})`).join(", ")
-    return `Team "${teamInfo.teamName}" was not cleaned up. Merge already started for: ${names}. Inspect git diff and the branch, then settle the merge explicitly; Ensemble will not reapply it automatically.`
+  if (awaitingMerge.length > 0 || interruptedMerges.length > 0) {
+    const guidance = [`Team "${teamInfo.teamName}" was not cleaned up. Writer branches require explicit merge verification before resources can be removed or the team archived.`]
+    if (awaitingMerge.length > 0) {
+      const names = awaitingMerge.map(member => `${member.name} (${member.worktree_branch})`).join(", ")
+      guidance.push(`Call team_merge for: ${names}. Review the resulting unstaged changes, then retry team_cleanup.`)
+    }
+    if (interruptedMerges.length > 0) {
+      const names = interruptedMerges.map(member => `${member.name} (${member.worktree_branch})`).join(", ")
+      guidance.push(`Merge already started for: ${names}. Inspect git diff and each source branch, verify the integration result, and settle the merge explicitly before retrying team_cleanup; Ensemble will not reapply it automatically.`)
+    }
+    return guidance.join("\n")
   }
 
   const mergedWithBranch = members.filter(member => member.worktree_branch !== null && member.merge_state === "merged")
@@ -610,56 +617,6 @@ export async function executeTeamCleanup(
     } else {
       residualBranches.push(`${member.name} (${branch})`)
     }
-  }
-
-  const unmerged = members.filter(member => member.worktree_branch !== null && member.merge_state === "none")
-  const merged: string[] = []
-  const conflicted: string[] = []
-  const overlapWarnings: string[] = []
-
-  if (unmerged.length > 0 && mergeOnCleanup) {
-    for (const member of unmerged) {
-      const branch = member.worktree_branch!
-      const claimed = deps.db.run(
-        "UPDATE team_member SET merge_state = 'merging', merged_source_branch = ? WHERE team_id = ? AND name = ? AND merge_state = 'none'",
-        [branch, teamInfo.teamId, member.name],
-      ).changes === 1
-      if (!claimed) {
-        conflicted.push(`${member.name} (${branch}; merge already being handled)`)
-        continue
-      }
-      // Warn (but don't block) if lead has local changes to overlapping files
-      try {
-        const overlap = await overlapCheck(branch, deps.directory)
-        if (overlap.length > 0) {
-          overlapWarnings.push(`${member.name}: ${overlap.join(", ")}`)
-        }
-      } catch { /* best effort */ }
-      const result = await merge(branch, deps.directory)
-      if (result.ok) {
-        deps.db.run("UPDATE team_member SET merge_state = 'merged' WHERE team_id = ? AND name = ? AND merge_state = 'merging'", [teamInfo.teamId, member.name])
-        if (await delBranch(branch, deps.directory)) {
-          deps.db.run("UPDATE team_member SET worktree_branch = NULL WHERE team_id = ? AND name = ?", [teamInfo.teamId, member.name])
-          member.worktree_branch = null
-        } else {
-          residualBranches.push(`${member.name} (${branch})`)
-        }
-        merged.push(`${member.name} (${branch})`)
-      } else {
-        deps.db.run("UPDATE team_member SET merge_state = 'none' WHERE team_id = ? AND name = ? AND merge_state = 'merging'", [teamInfo.teamId, member.name])
-        log(`cleanup:merge:conflict member=${member.name} branch=${branch} err=${result.error}`)
-        conflicted.push(`${member.name} (${branch})`)
-      }
-    }
-  }
-
-  if (conflicted.length > 0) {
-    const parts = [`Team "${teamInfo.teamName}" was not cleaned up. The team remains active.`]
-    if (merged.length > 0) {
-      parts.push(`Safety-net merged ${merged.length} unmerged branch(es): ${merged.join(", ")}. Review with: git diff`)
-    }
-    parts.push(`Could not auto-merge: ${conflicted.join(", ")}. Merge manually, then retry cleanup.`)
-    return parts.join("\n")
   }
 
   // Remove workspaces and worktrees
@@ -691,12 +648,6 @@ export async function executeTeamCleanup(
 
   // Build response
   const parts: string[] = [`Team "${teamInfo.teamName}" cleaned up.`]
-  if (merged.length > 0) {
-    parts.push(`Safety-net merged ${merged.length} unmerged branch(es): ${merged.join(", ")}. Review with: git diff`)
-  }
-  if (overlapWarnings.length > 0) {
-    parts.push(`Warning: safety-net merge overwrote local changes to overlapping files:\n${overlapWarnings.map(w => `  - ${w}`).join("\n")}\nReview with: git diff`)
-  }
   if (residualBranches.length > 0) {
     parts.push(`Branch cleanup failed after integration; these branches remain recorded and will not be merged twice: ${residualBranches.join(", ")}.`)
   }
