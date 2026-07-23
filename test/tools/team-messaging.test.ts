@@ -345,4 +345,77 @@ describe("team_message — plan approval", () => {
     await expect(executeTeamMessage(deps, { to: "alice", text: "ok", approve: true }, "sess-bob"))
       .rejects.toThrow("Only the lead can approve or reject")
   })
+
+  test("rolls back approval when the durable message insert fails", async () => {
+    deps.db.run("UPDATE team_member SET plan_approval = 'pending' WHERE team_id = ? AND name = ?", ["t1", "alice"])
+    deps.db.exec("CREATE TRIGGER fail_plan_message BEFORE INSERT ON team_message BEGIN SELECT RAISE(ABORT, 'message insert failed'); END")
+
+    await expect(executeTeamMessage(deps, { to: "alice", text: "looks good", approve: true }, "lead-sess"))
+      .rejects.toThrow("message insert failed")
+
+    expect(deps.db.query("SELECT plan_approval FROM team_member WHERE team_id = ? AND name = ?").get("t1", "alice"))
+      .toEqual({ plan_approval: "pending" })
+    expect(deps.db.query("SELECT id FROM team_message WHERE team_id = ?").all("t1")).toHaveLength(0)
+    expect(deps.client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(0)
+  })
+
+  test("makes concurrent identical approval retries idempotent with one durable message and wake", async () => {
+    deps.db.run("UPDATE team_member SET plan_approval = 'pending' WHERE team_id = ? AND name = ?", ["t1", "alice"])
+
+    const results = await Promise.allSettled([
+      executeTeamMessage(deps, { to: "alice", text: "approved once", approve: true }, "lead-sess"),
+      executeTeamMessage(deps, { to: "alice", text: "approved once", approve: true }, "lead-sess"),
+    ])
+
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(2)
+    expect(deps.db.query("SELECT plan_approval FROM team_member WHERE team_id = ? AND name = ?").get("t1", "alice"))
+      .toEqual({ plan_approval: "approved" })
+    expect(deps.db.query("SELECT id FROM team_message WHERE team_id = ? AND to_name = ?").all("t1", "alice")).toHaveLength(1)
+    expect(deps.client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(1)
+  })
+
+  test("makes an identical approval retry idempotent but rejects a conflicting later rejection", async () => {
+    deps.db.run("UPDATE team_member SET plan_approval = 'pending' WHERE team_id = ? AND name = ?", ["t1", "alice"])
+    await executeTeamMessage(deps, { to: "alice", text: "ship it", approve: true }, "lead-sess")
+
+    await expect(executeTeamMessage(deps, { to: "alice", text: "ship it", approve: true }, "lead-sess"))
+      .resolves.toBe("Message sent to alice.")
+    await expect(executeTeamMessage(deps, { to: "alice", text: "changed my mind", reject: "revise it" }, "lead-sess"))
+      .rejects.toThrow("not in plan approval mode")
+
+    expect(deps.db.query("SELECT content FROM team_message WHERE team_id = ? AND to_name = ?").all("t1", "alice")).toHaveLength(1)
+    expect(deps.client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(1)
+  })
+
+  test("makes an identical rejection retry idempotent and delivers the first rejection once", async () => {
+    deps.db.run("UPDATE team_member SET plan_approval = 'pending', reported_to_lead = 1 WHERE team_id = ? AND name = ?", ["t1", "alice"])
+    const args = { to: "alice", text: "revise the plan", reject: "missing rollback coverage" }
+
+    await expect(executeTeamMessage(deps, args, "lead-sess")).resolves.toBe("Message sent to alice.")
+    await expect(executeTeamMessage(deps, args, "lead-sess")).resolves.toBe("Message sent to alice.")
+    await Bun.sleep(1)
+
+    expect(deps.db.query("SELECT plan_approval, reported_to_lead FROM team_member WHERE team_id = ? AND name = ?").get("t1", "alice"))
+      .toEqual({ plan_approval: "rejected", reported_to_lead: 0 })
+    expect(deps.db.query("SELECT delivered FROM team_message WHERE team_id = ? AND to_name = ?").all("t1", "alice"))
+      .toEqual([{ delivered: 1 }])
+    expect(deps.client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(1)
+  })
+
+  test("commits approval and its message before waking the same teammate session", async () => {
+    deps.db.run("UPDATE team_member SET plan_approval = 'pending', reported_to_lead = 1 WHERE team_id = ? AND name = ?", ["t1", "alice"])
+    let observed: { plan_approval: string; messages: number; sessionID: string } | undefined
+    deps.client.session.promptAsync = (options) => {
+      observed = {
+        ...(deps.db.query("SELECT plan_approval FROM team_member WHERE team_id = ? AND name = ?").get("t1", "alice") as { plan_approval: string }),
+        messages: (deps.db.query("SELECT COUNT(*) AS count FROM team_message WHERE team_id = ? AND to_name = ?").get("t1", "alice") as { count: number }).count,
+        sessionID: options.sessionID,
+      }
+      return Promise.resolve({})
+    }
+
+    await executeTeamMessage(deps, { to: "alice", text: "continue implementation", approve: true }, "lead-sess")
+
+    expect(observed).toEqual({ plan_approval: "approved", messages: 1, sessionID: "sess-alice" })
+  })
 })

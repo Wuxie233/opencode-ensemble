@@ -180,8 +180,8 @@ export function handleSessionStatusEvent(
   const team = db.query("SELECT status FROM team WHERE id = ?").get(entry.teamId) as { status: string } | null
   if (!team || team.status === "archived") return undefined
 
-  const member = db.query("SELECT status, execution_status, abort_recovery_state FROM team_member WHERE team_id = ? AND name = ?")
-    .get(entry.teamId, entry.memberName) as { status: string; execution_status: string; abort_recovery_state: string } | null
+  const member = db.query("SELECT status, execution_status, abort_recovery_state, plan_approval FROM team_member WHERE team_id = ? AND name = ?")
+    .get(entry.teamId, entry.memberName) as { status: string; execution_status: string; abort_recovery_state: string; plan_approval: string } | null
   if (!member) return undefined
 
   if (member.status === "error" || member.status === "shutdown") return undefined
@@ -198,7 +198,7 @@ export function handleSessionStatusEvent(
     )
     // Mark teammate as having reported if they sent at least one message to lead (issue #3).
     // Set on busy→ready transition so Q&A messages during work don't prematurely block delivery.
-    if (member.status === "busy" && newStatus === "ready") {
+    if (member.status === "busy" && newStatus === "ready" && member.plan_approval !== "pending") {
       const leadMsgCount = (db.query(
         "SELECT COUNT(*) as c FROM team_message WHERE team_id = ? AND from_name = ? AND to_name = 'lead'"
       ).get(entry.teamId, entry.memberName) as { c: number }).c

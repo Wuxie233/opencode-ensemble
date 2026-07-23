@@ -50,6 +50,30 @@ describe("handleSessionStatusEvent", () => {
     expect(row.execution_status).toBe("idle")
   })
 
+  test("keeps a pending-plan progress report active and incomplete when the session becomes idle", () => {
+    insertTeam(db, "t1", "my-team", "lead-sess")
+    insertMember(db, "t1", "alice", "sess-1", "busy", "running")
+    db.run("UPDATE team_member SET plan_approval = 'pending' WHERE team_id = ? AND name = ?", ["t1", "alice"])
+    sendMessage(db, {
+      teamId: "t1",
+      from: "alice",
+      to: "lead",
+      content: "<task-result><kind>progress</kind><status>in_progress</status><summary>Plan ready</summary><details>Awaiting approval before edits.</details></task-result>",
+    })
+    registry.register("t1", "alice", "sess-1")
+
+    handleSessionStatusEvent(db, registry, "sess-1", "idle")
+
+    expect(db.query(
+      "SELECT status, execution_status, plan_approval, reported_to_lead FROM team_member WHERE session_id = ?",
+    ).get("sess-1")).toEqual({
+      status: "ready",
+      execution_status: "idle",
+      plan_approval: "pending",
+      reported_to_lead: 0,
+    })
+  })
+
   test("keeps shutdown_requested member nonterminal when session becomes idle", () => {
     insertTeam(db, "t1", "my-team", "lead-sess")
     insertMember(db, "t1", "alice", "sess-1", "shutdown_requested", "running")

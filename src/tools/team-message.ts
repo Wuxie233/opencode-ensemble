@@ -3,6 +3,7 @@ import { resolveRecipientSession } from "../types"
 import { requireTeamMember } from "./shared"
 import { sendMessage, markDelivered, hasReportedCompletion } from "../messaging"
 import { log } from "../log"
+import { immediateTransaction } from "../db"
 
 /**
  * Execute the team_message tool. Sends a direct message to a teammate or lead.
@@ -36,8 +37,9 @@ export async function executeTeamMessage(
   }
   if (!recipientSessionId) throw new Error(`Recipient "${args.to}" not found in team "${teamInfo.teamName}"`)
 
-  // Handle plan approval/rejection
   let messageText = args.text
+  let msgId: string
+  let shouldDeliver = true
   if (args.approve || args.reject) {
     if (args.approve && args.reject) {
       throw new Error("Cannot both approve and reject a plan.")
@@ -45,33 +47,57 @@ export async function executeTeamMessage(
     if (teamInfo.role !== "lead") {
       throw new Error("Only the lead can approve or reject plans.")
     }
-    const recipient = deps.db.query(
-      "SELECT plan_approval FROM team_member WHERE team_id = ? AND name = ?"
-    ).get(teamInfo.teamId, args.to) as { plan_approval: string } | null
-    if (!recipient || recipient.plan_approval !== "pending") {
+    messageText = args.approve
+      ? `[Plan Approved] ${args.text}`
+      : `[Plan Rejected: ${args.reject}] ${args.text}`
+    const decision = immediateTransaction(deps.db, () => {
+      const planApproval = args.approve ? "approved" : "rejected"
+      const updated = deps.db.run(
+        `UPDATE team_member
+         SET plan_approval = ?, reported_to_lead = 0, time_updated = ?
+         WHERE team_id = ? AND name = ? AND plan_approval = 'pending'`,
+        [planApproval, Date.now(), teamInfo.teamId, args.to],
+      )
+      if (updated.changes === 1) {
+        return {
+          messageId: sendMessage(deps.db, {
+            teamId: teamInfo.teamId,
+            from: senderName,
+            to: args.to,
+            content: messageText,
+          }),
+          shouldDeliver: true,
+        }
+      }
+      const existing = deps.db.query(
+        `SELECT tm.plan_approval, msg.id
+         FROM team_member tm
+         LEFT JOIN team_message msg
+           ON msg.team_id = tm.team_id
+          AND msg.from_name = ?
+          AND msg.to_name = tm.name
+          AND msg.content = ?
+         WHERE tm.team_id = ? AND tm.name = ?
+         ORDER BY msg.time_created ASC, msg.id ASC
+         LIMIT 1`,
+      ).get(senderName, messageText, teamInfo.teamId, args.to) as { plan_approval: string; id: string | null } | null
+      if (existing?.plan_approval === planApproval && existing.id) {
+        return { messageId: existing.id, shouldDeliver: false }
+      }
       throw new Error(`Recipient "${args.to}" is not in plan approval mode (plan_approval is not pending).`)
-    }
-    if (args.approve) {
-      deps.db.run(
-        "UPDATE team_member SET plan_approval = 'approved', time_updated = ? WHERE team_id = ? AND name = ?",
-        [Date.now(), teamInfo.teamId, args.to]
-      )
-      messageText = `[Plan Approved] ${args.text}`
-    } else {
-      deps.db.run(
-        "UPDATE team_member SET plan_approval = 'rejected', time_updated = ? WHERE team_id = ? AND name = ?",
-        [Date.now(), teamInfo.teamId, args.to]
-      )
-      messageText = `[Plan Rejected: ${args.reject}] ${args.text}`
-    }
+    })
+    msgId = decision.messageId
+    shouldDeliver = decision.shouldDeliver
+  } else {
+    msgId = sendMessage(deps.db, {
+      teamId: teamInfo.teamId,
+      from: senderName,
+      to: args.to,
+      content: messageText,
+    })
   }
 
-  const msgId = sendMessage(deps.db, {
-    teamId: teamInfo.teamId,
-    from: senderName,
-    to: args.to,
-    content: messageText,
-  })
+  if (!shouldDeliver) return `Message sent to ${args.to}.`
 
   const isToLead = args.to === "lead"
 
