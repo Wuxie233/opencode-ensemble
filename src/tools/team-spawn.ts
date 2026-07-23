@@ -7,6 +7,8 @@ import type { EnsembleConfig } from "../config"
 import { getTeamResourceParts, preserveBranch, preservedBranchName, teamWorktreeName } from "./merge-helper"
 import type { PreserveBranchFn } from "./merge-helper"
 import { recomputeCurrentPhase } from "../task-phase"
+import { appendTeamEvent } from "../team-event"
+import { immediateTransaction } from "../db"
 
 /** Tracks consecutive spawn failures per team for circuit breaker. */
 export const spawnFailures = new Map<string, { count: number; lastError: string }>()
@@ -99,6 +101,11 @@ function claimSpawnTask(deps: ToolDeps, teamId: string, taskId: string, assignee
     if (result.changes === 0) {
       throw new Error(`Task "${taskId}" is already claimed (race condition)`)
     }
+    appendTeamEvent(deps.db, {
+      teamId,
+      kind: "task.claimed",
+      payload: { task_id: taskId, assignee },
+    })
     recomputeCurrentPhase(deps.db, teamId, now)
   })()
 }
@@ -315,11 +322,18 @@ async function executeTeamSpawnLocked(
   if (resolvedModel) log(`spawn:model name=${args.name} model=${resolvedModel}`)
 
   try {
-    deps.db.run(
-      `INSERT INTO team_member (team_id, name, session_id, agent, status, execution_status, model, prompt, worktree_dir, worktree_branch, workspace_id, plan_approval, time_created, time_updated)
-       VALUES (?, ?, ?, ?, 'busy', 'starting', ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [teamInfo.teamId, args.name, childSessionId, args.agent, resolvedModel ?? null, args.prompt, worktreeDir, worktreeBranch, workspaceId, planApproval, now, now]
-    )
+    immediateTransaction(deps.db, () => {
+      deps.db.run(
+        `INSERT INTO team_member (team_id, name, session_id, agent, status, execution_status, model, prompt, worktree_dir, worktree_branch, workspace_id, plan_approval, time_created, time_updated)
+         VALUES (?, ?, ?, ?, 'busy', 'starting', ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [teamInfo.teamId, args.name, childSessionId, args.agent, resolvedModel ?? null, args.prompt, worktreeDir, worktreeBranch, workspaceId, planApproval, now, now]
+      )
+      appendTeamEvent(deps.db, {
+        teamId: teamInfo.teamId,
+        kind: "member.registered",
+        payload: { member_name: args.name },
+      })
+    })
   } catch (err) {
     const registrationError = err instanceof Error ? err.message : String(err)
     let safeBranch: string | null = null

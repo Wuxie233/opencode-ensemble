@@ -217,7 +217,24 @@ export const MIGRATIONS: string[] = [
        AND substr(name, -1, 1) != '-'
        THEN name
      ELSE 'project'
-   END WHERE slug IS NULL;`,
+    END WHERE slug IS NULL;`,
+  // Migration 13: Privacy-safe append-only lifecycle events. Deliberately no backfill.
+  `CREATE TABLE team_event (
+     id              TEXT PRIMARY KEY,
+     team_id         TEXT NOT NULL REFERENCES team(id) ON DELETE CASCADE,
+     kind            TEXT NOT NULL,
+     payload         TEXT NOT NULL,
+     operation_id    TEXT,
+     cause_event_id  TEXT,
+     time_created    INTEGER NOT NULL
+   );
+   CREATE INDEX team_event_team_time_idx ON team_event(team_id, time_created, id);
+   CREATE INDEX team_event_operation_idx ON team_event(team_id, operation_id) WHERE operation_id IS NOT NULL;
+   CREATE TRIGGER team_event_no_update
+     BEFORE UPDATE ON team_event
+     BEGIN
+       SELECT RAISE(ABORT, 'team_event rows are append-only');
+     END;`,
 ]
 
 /**

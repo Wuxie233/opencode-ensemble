@@ -4,6 +4,7 @@ import type { IsDirtyFn } from "./shared"
 import { spawnFailures } from "./team-spawn"
 import { getTeamResourceParts, mergeBranch, deleteBranch, preserveBranch, preservedBranchName, getOverlappingFiles, resolveWorktreeBranch, teamResourceSegment } from "./merge-helper"
 import type { MergeBranchFn, DeleteBranchFn, PreserveBranchFn, ResolveWorktreeBranchFn, OverlapCheckFn } from "./merge-helper"
+import { appendTeamEvent } from "../team-event"
 import { log } from "../log"
 import { runCommand } from "../process"
 import { sendLeadAlert } from "../messaging"
@@ -638,7 +639,13 @@ export async function executeTeamCleanup(
   // Archive the team and consume residual messages atomically. A failed
   // fire-and-forget delivery cannot reopen messages after this boundary.
   deps.db.transaction(() => {
-    deps.db.run("UPDATE team SET status = 'archived', time_updated = ? WHERE id = ?", [Date.now(), teamInfo.teamId])
+    const archived = deps.db.run(
+      "UPDATE team SET status = 'archived', time_updated = ? WHERE id = ? AND status = 'active'",
+      [Date.now(), teamInfo.teamId],
+    )
+    if (archived.changes === 1) {
+      appendTeamEvent(deps.db, { teamId: teamInfo.teamId, kind: "team.archived", payload: {} })
+    }
     deps.db.run("UPDATE team_message SET delivered = 1, delivery_claimed_at = NULL WHERE team_id = ? AND delivered = 0", [teamInfo.teamId])
   })()
 

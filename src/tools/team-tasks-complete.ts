@@ -5,6 +5,7 @@ import { sendMessage, wakeTeamLead } from "../messaging"
 import { immediateTransaction } from "../db"
 import { serializeTaskResult } from "../result-parser"
 import { recomputeCurrentPhase } from "../task-phase"
+import { appendTeamEvent } from "../team-event"
 
 interface TerminalResultInput {
   summary: string
@@ -71,6 +72,11 @@ export async function executeTeamTasksComplete(
       [now, args.task_id, teamInfo.teamId],
     )
     if (completion.changes !== 1) return { changed: false, content: task.content, unblocked: 0 }
+    const completionEventId = appendTeamEvent(deps.db, {
+      teamId: teamInfo.teamId,
+      kind: "task.completed",
+      payload: { task_id: args.task_id },
+    })
 
     let unblocked = 0
     const allTasks = deps.db.query("SELECT id, depends_on, status FROM team_task WHERE team_id = ?")
@@ -85,7 +91,17 @@ export async function executeTeamTasksComplete(
         return dep && (dep.status === "completed" || dep.status === "cancelled")
       })
       if (!allResolved) continue
-      deps.db.run("UPDATE team_task SET status = 'pending', time_updated = ? WHERE id = ?", [now, t.id])
+      const ready = deps.db.run(
+        "UPDATE team_task SET status = 'pending', time_updated = ? WHERE id = ? AND team_id = ? AND status = 'blocked'",
+        [now, t.id, teamInfo.teamId],
+      )
+      if (ready.changes !== 1) continue
+      appendTeamEvent(deps.db, {
+        teamId: teamInfo.teamId,
+        kind: "task.unblocked",
+        payload: { task_id: t.id },
+        causeEventId: completionEventId,
+      })
       unblocked++
     }
 

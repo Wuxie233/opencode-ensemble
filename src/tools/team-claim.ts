@@ -2,6 +2,7 @@ import type { ToolDeps } from "../types"
 import { immediateTransaction } from "../db"
 import { recomputeCurrentPhase } from "../task-phase"
 import { requireTeamMember } from "./shared"
+import { appendTeamEvent } from "../team-event"
 
 /**
  * Execute the team_claim tool. Atomically claims a pending task.
@@ -30,6 +31,11 @@ export async function executeTeamClaim(
       [claimerName, now, args.task_id, teamInfo.teamId],
     )
     if (result.changes === 0) throw new Error(`Task "${args.task_id}" is already claimed (race condition)`)
+    appendTeamEvent(deps.db, {
+      teamId: teamInfo.teamId,
+      kind: "task.claimed",
+      payload: { task_id: args.task_id, assignee: claimerName },
+    })
     recomputeCurrentPhase(deps.db, teamInfo.teamId, now)
     return String(task.content)
   })

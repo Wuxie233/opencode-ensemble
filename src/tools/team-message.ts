@@ -4,6 +4,7 @@ import { requireTeamMember } from "./shared"
 import { sendMessage, markDelivered, hasReportedCompletion } from "../messaging"
 import { log } from "../log"
 import { immediateTransaction } from "../db"
+import { appendTeamEvent } from "../team-event"
 
 /**
  * Execute the team_message tool. Sends a direct message to a teammate or lead.
@@ -59,6 +60,11 @@ export async function executeTeamMessage(
         [planApproval, Date.now(), teamInfo.teamId, args.to],
       )
       if (updated.changes === 1) {
+        appendTeamEvent(deps.db, {
+          teamId: teamInfo.teamId,
+          kind: args.approve ? "plan.approved" : "plan.rejected",
+          payload: { member_name: args.to },
+        })
         return {
           messageId: sendMessage(deps.db, {
             teamId: teamInfo.teamId,

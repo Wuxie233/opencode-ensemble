@@ -3,6 +3,7 @@ import { requireTeamMember } from "./shared"
 import { generateId } from "../util"
 import { immediateTransaction } from "../db"
 import { recomputeCurrentPhase } from "../task-phase"
+import { appendTeamEvent } from "../team-event"
 
 interface TaskInput {
   key?: string
@@ -53,18 +54,26 @@ export async function executeTeamTasksAdd(
 
     args.tasks.forEach((task, index) => {
       const dependencies = resolvedDependencies[index]!
+      const taskId = ids[index]
+      if (!taskId) throw new Error("Task ID allocation failed")
       const resolved = dependencies.every(depId => {
         const batchIndex = ids.indexOf(depId)
         if (batchIndex >= 0) return false
         const status = existing.get(depId)
         return status === "completed" || status === "cancelled"
       })
+      const status = dependencies.length > 0 && !resolved ? "blocked" : "pending"
       deps.db.run(
         `INSERT INTO team_task (id, team_id, content, status, priority, depends_on, phase, time_created, time_updated)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [ids[index], teamInfo.teamId, task.content, dependencies.length > 0 && !resolved ? "blocked" : "pending",
+        [taskId, teamInfo.teamId, task.content, status,
           task.priority, dependencies.length > 0 ? JSON.stringify(dependencies) : null, task.phase ?? null, now, now],
       )
+      appendTeamEvent(deps.db, {
+        teamId: teamInfo.teamId,
+        kind: "task.created",
+        payload: { task_id: taskId, status },
+      })
     })
     recomputeCurrentPhase(deps.db, teamInfo.teamId, now)
   })
