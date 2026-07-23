@@ -1,3 +1,5 @@
+import { parseTaskResult } from "./result-parser"
+
 type DashboardConnectionMode = "loading" | "live" | "error" | "stale" | "recovered"
 
 interface DashboardAttentionMember {
@@ -16,6 +18,7 @@ interface DashboardAttentionTask {
 interface DashboardAttentionSource {
   members?: DashboardAttentionMember[]
   tasks?: DashboardAttentionTask[]
+  messages?: Array<{ fromName: string; content: string }>
 }
 
 interface DashboardAttentionItem {
@@ -31,6 +34,7 @@ export function deriveDashboardAttention(_source: DashboardAttentionSource): Das
   const source = _source
   const members = source.members ?? []
   const tasks = source.tasks ?? []
+  const messages = source.messages ?? []
   const items: DashboardAttentionItem[] = []
 
   members.filter(member => member.status === "error").forEach(member => {
@@ -42,15 +46,18 @@ export function deriveDashboardAttention(_source: DashboardAttentionSource): Das
       target: { type: "agent", id: member.name },
     })
   })
-  tasks.filter(task => task.status === "blocked").forEach(task => {
+  messages.forEach(message => {
+    const blocker = parseTaskResult(message.content)
+    if (blocker?.kind !== "blocker") return
+    const task = blocker.taskId ? tasks.find(candidate => candidate.id === blocker.taskId) : undefined
     items.push({
-      kind: "受阻任务",
-      label: task.assignee ?? "未分配",
-      detail: task.content,
+      kind: "阻塞报告",
+      label: task?.assignee ?? message.fromName,
+      detail: blocker.summary,
       color: "amber",
-      target: task.assignee
+      target: task?.assignee
         ? { type: "agent", id: task.assignee }
-        : { type: "task", id: task.id },
+        : blocker.taskId ? { type: "task", id: blocker.taskId } : { type: "agent", id: message.fromName },
     })
   })
   members.filter(member => member.status === "shutdown_requested").forEach(member => {
@@ -101,7 +108,7 @@ const E=s=>s?String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'
 const D=ms=>{const s=Math.floor(Math.abs(ms)/1000);return s<60?s+'秒':s<3600?Math.floor(s/60)+'分钟':s<86400?Math.floor(s/3600)+'小时':Math.floor(s/86400)+'天'};
 function relT(ep){const ms=Math.max(0,Date.now()-ep);if(ms<10000)return'刚刚';if(ms<60000)return Math.floor(ms/1000)+'秒前';if(ms<3600000)return Math.floor(ms/60000)+'分钟前';if(ms<86400000)return Math.floor(ms/3600000)+'小时前';return Math.floor(ms/86400000)+'天前'}
 
-const ENUM_LABELS={busy:'工作中',ready:'空闲',shutdown_requested:'正在停止',shutdown:'已结束',error:'错误',idle:'空闲',starting:'正在启动',running:'运行中',cancel_requested:'已请求取消',cancelling:'正在取消',cancelled:'已取消',completing:'即将完成',completed:'已完成',failed:'失败',timed_out:'已超时',active:'进行中',archived:'已归档',pending:'待处理',in_progress:'进行中',blocked:'受阻',working:'工作中',done:'已完成',empty:'暂无成员',high:'高',medium:'中',low:'低',approved:'已批准',rejected:'已拒绝',none:'无需审批'};
+const ENUM_LABELS={busy:'工作中',ready:'空闲',shutdown_requested:'正在停止',shutdown:'已结束',error:'错误',idle:'空闲',starting:'正在启动',running:'运行中',cancel_requested:'已请求取消',cancelling:'正在取消',cancelled:'已取消',completing:'即将完成',completed:'已完成',failed:'失败',timed_out:'已超时',active:'进行中',archived:'已归档',pending:'待处理',in_progress:'进行中',blocked:'等待依赖',working:'工作中',done:'已完成',empty:'暂无成员',high:'高',medium:'中',low:'低',approved:'已批准',rejected:'已拒绝',none:'无需审批'};
 function enumLabel(value){return ENUM_LABELS[value]||value}
 function nextAgentIndex(current,count,direction){if(count<=0)return-1;if(current<0)return direction>0?0:count-1;return(current+direction+count)%count}
 function findAgentIndex(names,selectedName,fallback){const index=selectedName?names.indexOf(selectedName):-1;return index>=0?index:fallback>=0&&fallback<names.length?fallback:-1}
@@ -156,7 +163,7 @@ const ST={
 const si=s=>ST[s]||ST.ready;
 const PR={high:'text-red-400 bg-red-500/10 border border-red-500/20',medium:'text-amber-400 bg-amber-500/10 border border-amber-500/20',low:'text-txt-400 bg-base-800 border border-base-700'};
 
-function parseR(c){const m=c.match(/<task-result>([\\s\\S]*?)<\\/task-result>/);if(!m)return null;const i=m[1],s=(i.match(/<status>([\\s\\S]*?)<\\/status>/)||[])[1]?.trim(),u=(i.match(/<summary>([\\s\\S]*?)<\\/summary>/)||[])[1]?.trim(),d=(i.match(/<details>([\\s\\S]*?)<\\/details>/)||[])[1]?.trim();return s&&u?{status:s,summary:u,details:d||''}:null}
+function parseR(c){const m=c.match(/<task-result>([\\s\\S]*?)<\\/task-result>/);if(!m)return null;const i=m[1],s=(i.match(/<status>([\\s\\S]*?)<\\/status>/)||[])[1]?.trim(),u=(i.match(/<summary>([\\s\\S]*?)<\\/summary>/)||[])[1]?.trim(),d=(i.match(/<details>([\\s\\S]*?)<\\/details>/)||[])[1]?.trim(),k=(i.match(/<kind>([\\s\\S]*?)<\\/kind>/)||[])[1]?.trim(),taskId=(i.match(/<task_id>([\\s\\S]*?)<\\/task_id>/)||[])[1]?.trim();return s&&u?{status:s,summary:u,details:d||'',kind:k,taskId:taskId}:null}
 
 function allTeams(){
   if(!S?.teams)return{active:[],archived:[]};
@@ -174,22 +181,21 @@ function deriveHealth(t){
   return{w:mm.filter(m=>m.status==='busy').length,i:mm.filter(m=>m.status==='ready').length,e:mm.filter(m=>m.status==='error').length,d:mm.filter(m=>m.status==='shutdown'||m.status==='shutdown_requested').length,total:mm.length};
 }
 
-function coarseTeamStatus(t){const h=deriveHealth(t),blocked=(t.tasks||[]).filter(x=>x.status==='blocked').length;if(h.e)return{label:'error',color:'red',dot:'bg-red-500'};if(blocked)return{label:'blocked',color:'amber',dot:'bg-amber-500'};if(h.w)return{label:'working',color:'blue',dot:'bg-blue-500'};if(h.i)return{label:'idle',color:'muted',dot:'bg-txt-500'};return{label:t.status==='active'?'empty':t.status,color:'muted',dot:'bg-base-600'}}
+function coarseTeamStatus(t){const h=deriveHealth(t);if(h.e)return{label:'error',color:'red',dot:'bg-red-500'};if(h.w)return{label:'working',color:'blue',dot:'bg-blue-500'};if(h.i)return{label:'idle',color:'muted',dot:'bg-txt-500'};return{label:t.status==='active'?'empty':t.status,color:'muted',dot:'bg-base-600'}}
 function projectStatus(p){const teams=p.teams||[],counts={working:0,blocked:0,error:0,idle:0,done:0};teams.forEach(t=>{const s=coarseTeamStatus(t).label;if(s==='working')counts.working++;else if(s==='blocked')counts.blocked++;else if(s==='error')counts.error++;else if(s==='idle'||s==='empty')counts.idle++;else counts.done++});if(counts.error)return{label:'error',color:'red',dot:'bg-red-500',counts};if(counts.blocked)return{label:'blocked',color:'amber',dot:'bg-amber-500',counts};if(counts.working)return{label:'working',color:'blue',dot:'bg-blue-500',counts};return{label:'idle',color:'muted',dot:'bg-txt-500',counts}}
 function statusTitleProject(p){const s=projectStatus(p),teams=p.teams||[];return projectLabel(p)+'\\n状态：'+enumLabel(s.label)+'\\n团队：'+teams.length+'\\n工作中：'+s.counts.working+' · 受阻：'+s.counts.blocked+' · 错误：'+s.counts.error+' · 空闲：'+s.counts.idle}
-function statusTitleTeam(t){const h=deriveHealth(t),tasks=t.tasks||[],blocked=tasks.filter(x=>x.status==='blocked').length,active=tasks.filter(x=>x.status==='in_progress').length,pending=tasks.filter(x=>x.status==='pending').length,done=tasks.filter(x=>x.status==='completed').length;return t.name+'\\n状态：'+enumLabel(coarseTeamStatus(t).label)+'\\n智能体：共 '+h.total+' 个，工作中 '+h.w+'，空闲 '+h.i+'，错误 '+h.e+'\\n任务：进行中 '+active+'，受阻 '+blocked+'，待处理 '+pending+'，已完成 '+done}
+function statusTitleTeam(t){const h=deriveHealth(t),tasks=t.tasks||[],waiting=tasks.filter(x=>x.status==='blocked').length,active=tasks.filter(x=>x.status==='in_progress').length,pending=tasks.filter(x=>x.status==='pending').length,done=tasks.filter(x=>x.status==='completed').length;return t.name+'\\n状态：'+enumLabel(coarseTeamStatus(t).label)+'\\n智能体：共 '+h.total+' 个，工作中 '+h.w+'，空闲 '+h.i+'，错误 '+h.e+'\\n任务：进行中 '+active+'，等待依赖 '+waiting+'，待处理 '+pending+'，已完成 '+done}
 
 function lastMessageFor(name,msgs){return msgs.filter(m=>m.fromName===name||m.toName===name).sort((a,b)=>b.timeCreated-a.timeCreated)[0]||null}
 function activeTaskFor(name,tasks){return tasks.find(x=>x.assignee===name&&x.status==='in_progress')||tasks.find(x=>x.assignee===name&&x.status==='blocked')||null}
-function blockedTaskFor(name,tasks){return tasks.find(x=>x.assignee===name&&x.status==='blocked')||null}
+function waitingTaskFor(name,tasks){return tasks.find(x=>x.assignee===name&&x.status==='blocked')||null}
 
 function rankAgent(a,b,t){
   const tasks=t?.tasks||[],msgs=t?.messages||[];
   const score=m=>{
-    const lm=lastMessageFor(m.name,msgs),bt=blockedTaskFor(m.name,tasks);
+    const lm=lastMessageFor(m.name,msgs);
     let s=0;
     if(m.status==='error')s-=1000;
-    if(bt)s-=800;
     if(m.status==='shutdown_requested')s-=650;
     if(m.status==='busy')s-=500;
     if(m.status==='ready'&&activeTaskFor(m.name,tasks))s-=350;
@@ -202,15 +208,15 @@ function rankAgent(a,b,t){
 
 function deriveAttention(t){
   const tasks=t.tasks||[],msgs=t.messages||[];
-  const blocked=tasks.filter(x=>x.status==='blocked'),running=tasks.filter(x=>x.status==='in_progress');
+  const waiting=tasks.filter(x=>x.status==='blocked'),running=tasks.filter(x=>x.status==='in_progress');
   const errored=(t.members||[]).filter(m=>m.status==='error');
   const stopping=(t.members||[]).filter(m=>m.status==='shutdown_requested');
   const latest=msgs[0]||null;
   const items=[];
   errored.forEach(m=>items.push({kind:'智能体错误',label:m.name,detail:enumLabel(m.executionStatus||m.status),color:'red',target:{type:'agent',id:m.name}}));
-  blocked.forEach(x=>items.push({kind:'受阻任务',label:x.assignee||'未分配',detail:x.content,color:'amber',target:x.assignee?{type:'agent',id:x.assignee}:{type:'task',id:x.id}}));
+  msgs.forEach(m=>{const p=parseR(m.content);if(p?.kind!=='blocker')return;const task=p.taskId?tasks.find(x=>x.id===p.taskId):null;items.push({kind:'阻塞报告',label:task?.assignee||m.fromName,detail:p.summary,color:'amber',target:task?.assignee?{type:'agent',id:task.assignee}:p.taskId?{type:'task',id:p.taskId}:{type:'agent',id:m.fromName}})});
   stopping.forEach(m=>items.push({kind:'正在停止',label:m.name,detail:'已请求停止',color:'amber',target:{type:'agent',id:m.name}}));
-  return{items,running,latest,blocked,errored};
+  return{items,running,latest,waiting,errored};
 }
 
 function deriveSparkline(name,msgs){

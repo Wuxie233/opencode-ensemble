@@ -6,6 +6,7 @@ import { log } from "../log"
 import type { EnsembleConfig } from "../config"
 import { getTeamResourceParts, preserveBranch, preservedBranchName, teamWorktreeName } from "./merge-helper"
 import type { PreserveBranchFn } from "./merge-helper"
+import { recomputeCurrentPhase } from "../task-phase"
 
 /** Tracks consecutive spawn failures per team for circuit breaker. */
 export const spawnFailures = new Map<string, { count: number; lastError: string }>()
@@ -86,33 +87,41 @@ function claimSpawnTask(deps: ToolDeps, teamId: string, taskId: string, assignee
     const task = deps.db.query("SELECT status, assignee FROM team_task WHERE id = ? AND team_id = ?")
       .get(taskId, teamId) as { status: string; assignee: string | null } | null
     if (!task) throw new Error(`Task "${taskId}" not found`)
-    if (task.status === "blocked") throw new Error(`Task "${taskId}" is blocked by unresolved dependencies`)
+    if (task.status === "blocked") throw new Error(`Task "${taskId}" is waiting for unresolved dependencies`)
     if (task.status !== "pending") throw new Error(`Task "${taskId}" is not pending (status: ${task.status})`)
     if (task.assignee) throw new Error(`Task "${taskId}" is already claimed by ${task.assignee}`)
 
+    const now = Date.now()
     const result = deps.db.run(
       "UPDATE team_task SET status = 'in_progress', assignee = ?, time_updated = ? WHERE id = ? AND team_id = ? AND status = 'pending' AND assignee IS NULL",
-      [assignee, Date.now(), taskId, teamId],
+      [assignee, now, taskId, teamId],
     )
     if (result.changes === 0) {
       throw new Error(`Task "${taskId}" is already claimed (race condition)`)
     }
+    recomputeCurrentPhase(deps.db, teamId, now)
   })()
 }
 
 function rollbackSpawnTask(deps: ToolDeps, teamId: string, taskId: string | undefined, assignee: string): void {
   if (!taskId) return
-  const result = deps.db.run(
-    "UPDATE team_task SET status = 'pending', assignee = NULL, time_updated = ? WHERE id = ? AND team_id = ? AND status = 'in_progress' AND assignee = ?",
-    [Date.now(), taskId, teamId, assignee],
-  )
-  if (result.changes === 1) return
-  const task = deps.db.query(
-    "SELECT status, assignee FROM team_task WHERE id = ? AND team_id = ?",
-  ).get(taskId, teamId) as { status: string; assignee: string | null } | null
-  if (task?.status === "in_progress" && task.assignee === assignee) {
-    throw new Error(`Task "${taskId}" is still owned by ${assignee} after rollback`)
-  }
+  deps.db.transaction(() => {
+    const now = Date.now()
+    const result = deps.db.run(
+      "UPDATE team_task SET status = 'pending', assignee = NULL, time_updated = ? WHERE id = ? AND team_id = ? AND status = 'in_progress' AND assignee = ?",
+      [now, taskId, teamId, assignee],
+    )
+    if (result.changes === 1) {
+      recomputeCurrentPhase(deps.db, teamId, now)
+      return
+    }
+    const task = deps.db.query(
+      "SELECT status, assignee FROM team_task WHERE id = ? AND team_id = ?",
+    ).get(taskId, teamId) as { status: string; assignee: string | null } | null
+    if (task?.status === "in_progress" && task.assignee === assignee) {
+      throw new Error(`Task "${taskId}" is still owned by ${assignee} after rollback`)
+    }
+  })()
 }
 
 /**

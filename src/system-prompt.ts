@@ -310,14 +310,21 @@ export function buildRollingLeadBrief(db: Database, teamId: string): string {
   ).all(teamId) as Array<{ id: string; content: string; assignee: string | null }>
   if (active.length > 0) {
     lines.push("Active work:")
-    active.forEach(task => lines.push(`- ${task.id}: ${truncate(task.content, 160)}${task.assignee ? ` (${task.assignee})` : ""}`))
+    active.forEach(task => {
+      lines.push(`- ${task.id}: ${truncate(task.content, 160)}${task.assignee ? ` (${task.assignee})` : ""}`)
+    })
   }
-  const blocked = db.query(
-    "SELECT id, content FROM team_task WHERE team_id = ? AND status = 'blocked' ORDER BY time_updated DESC LIMIT 8",
-  ).all(teamId) as Array<{ id: string; content: string }>
-  if (blocked.length > 0) {
+  const blockerMessages = db.query(
+    "SELECT from_name, content FROM team_message WHERE team_id = ? AND to_name = 'lead' AND content LIKE '%<kind>blocker</kind>%' ORDER BY time_created DESC, id DESC LIMIT 100",
+  ).all(teamId) as Array<{ from_name: string; content: string }>
+  const blockers = blockerMessages.flatMap(message => {
+    const parsed = parseTaskResult(message.content)
+    if (parsed?.kind !== "blocker") return []
+    return [`- ${parsed.taskId ?? message.from_name}: ${truncate(parsed.summary, 160)}`]
+  }).slice(0, 8)
+  if (blockers.length > 0) {
     lines.push("Blockers:")
-    blocked.forEach(task => lines.push(`- ${task.id}: ${truncate(task.content, 160)}`))
+    lines.push(...blockers)
   }
   const messages = db.query(
     "SELECT from_name, content FROM team_message WHERE team_id = ? AND to_name = 'lead' AND content LIKE '%<task-result>%' ORDER BY time_created DESC, id DESC LIMIT 100",

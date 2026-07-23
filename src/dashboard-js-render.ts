@@ -16,8 +16,8 @@ function renderProjectButton(p,cp){const teams=p.teams||[],active=teams.filter(t
 function renderTeamLink(t,c){const ss=coarseTeamStatus(t),tsel=c&&c.id===t.id;return '<button type="button" title="'+E(statusTitleTeam(t))+'" class="team-link block w-full min-h-11 text-left border-l-2 border-transparent -ml-px py-2 pl-3 pr-2 text-[12px] text-txt-400 hover:text-txt-100 hover:bg-base-900/70 transition-colors" aria-current="'+(tsel?'true':'false')+'" data-team="'+E(t.id)+'" onclick="selectTeam(this.dataset.team)"><div class="flex items-start gap-2 min-w-0"><span class="w-[6px] h-[6px] rounded-full mt-1.5 '+ss.dot+(ss.label==='working'?' pulse':'')+' shrink-0"></span><span class="break-words min-w-0 font-mono">'+E(t.name)+'</span><span class="ml-auto text-[10px] text-txt-400">'+E(enumLabel(ss.label))+'</span></div></button>'}
 
 function rHealth(t){
-  const el=document.getElementById('hring'),text=document.getElementById('health-text'),h=deriveHealth(t),blocked=(t.tasks||[]).filter(x=>x.status==='blocked').length;
-  text.textContent=h.e?h.e+' 个错误':blocked?blocked+' 项受阻':h.w?h.w+' 个工作中':'无运行风险';
+  const el=document.getElementById('hring'),text=document.getElementById('health-text'),h=deriveHealth(t);
+  text.textContent=h.e?h.e+' 个错误':h.w?h.w+' 个工作中':'无运行风险';
   if(!h.total){el.style.background='conic-gradient(#2a3144 0deg,#2a3144 360deg)';return}
   const total=h.total,segs=[];let deg=0;
   if(h.w){const d=h.w/total*360;segs.push('#3b82f6 '+deg+'deg '+(deg+d)+'deg');deg+=d}
@@ -44,7 +44,7 @@ function rSum(t){
     '<span class="w-[6px] h-[6px] rounded-full '+(t.status==='active'?'bg-emerald-500':'bg-txt-500')+'"></span>'+
     '<span class="font-mono font-semibold text-txt-200">'+E(t.name)+'</span>'+
     (h.e?chip(h.e+' 个错误','red'):'')+
-    (tk.filter(x=>x.status==='blocked').length?chip(tk.filter(x=>x.status==='blocked').length+' 项受阻','amber'):'')+
+    (tk.filter(x=>x.status==='blocked').length?chip(tk.filter(x=>x.status==='blocked').length+' 项等待依赖','muted'):'')+
     (h.w?chip(h.w+' 个工作中','blue'):'')+
     (h.i?chip(h.i+' 个空闲','muted'):'')+
     (h.d?chip(h.d+' 个已结束','muted'):'')+
@@ -58,7 +58,7 @@ function rAttention(t){
   const el=document.getElementById('attention'),a=deriveAttention(t),h=deriveHealth(t),tk=t.tasks||[];
   const tone=a.items.length?'border-amber-500/30 bg-amber-500/[0.05]':'border-emerald-500/20 bg-emerald-500/[0.035]';
   const lead=a.items.length?'需要关注':'未发现阻塞';
-  const chips=[chip(h.w+' 个工作中','blue'),chip(a.running.length+' 项进行中','green'),chip(a.blocked.length+' 项受阻',a.blocked.length?'amber':'muted'),chip(tk.filter(x=>x.status==='pending').length+' 项待处理','muted')];
+  const chips=[chip(h.w+' 个工作中','blue'),chip(a.running.length+' 项进行中','green'),chip(a.waiting.length+' 项等待依赖','muted'),chip(tk.filter(x=>x.status==='pending').length+' 项待处理','muted')];
   let html='<div class="rounded-lg border '+tone+' px-3 py-2 flex flex-col gap-2">';
   html+='<div class="flex flex-wrap items-center gap-x-4 gap-y-2"><div class="min-w-[160px]"><div class="text-[10px] uppercase tracking-[.16em] text-txt-500">团队关注事项</div><div class="text-[14px] font-semibold text-txt-100">'+lead+'</div></div>';
   html+='<div class="flex flex-wrap gap-1.5">'+chips.join('')+'</div></div>';
@@ -75,7 +75,7 @@ function rAgents(t){
   selCard=findAgentIndex(sorted.map(m=>m.name),selectedAgent,selCard);
   if(selCard>=0)selectedAgent=sorted[selCard].name;
   const html=sorted.map((m,idx)=>{
-    const s=si(m.status),task=activeTaskFor(m.name,t.tasks||[]),msg=lastMessageFor(m.name,msgs),blocked=blockedTaskFor(m.name,t.tasks||[]);
+    const s=si(m.status),task=activeTaskFor(m.name,t.tasks||[]),msg=lastMessageFor(m.name,msgs),waiting=waitingTaskFor(m.name,t.tasks||[]);
     const d=D(n-m.timeUpdated),mi=msg?relT(msg.timeCreated):'\\u2014';
     const tt=task?.content,tr=tt;
     const mp=msg?msg.content:'';
@@ -89,7 +89,7 @@ function rAgents(t){
         spark+
         '<span class="max-w-[7rem] truncate text-[10px] text-txt-500 ml-auto shrink">'+E(m.agent)+'</span>'+
       '</div>'+
-      (tr?'<div class="mt-2 text-[13px] text-txt-200 leading-snug break-words">'+(blocked?'<span class="text-amber-400">受阻任务：</span>':'当前任务：')+E(tr)+'</div>':'<div class="mt-2 text-[13px] text-txt-500 leading-snug">无进行中任务</div>')+
+      (tr?'<div class="mt-2 text-[13px] text-txt-200 leading-snug break-words">'+(waiting?'<span class="text-txt-400">等待依赖：</span>':'当前任务：')+E(tr)+'</div>':'<div class="mt-2 text-[13px] text-txt-500 leading-snug">无进行中任务</div>')+
       (mp?'<div class="mt-1 text-[12px] text-txt-400 line-clamp-2 break-words">最新消息：'+E(mp)+'</div><div class="mt-1 text-[10px] text-txt-500">打开智能体详情查看完整消息</div>':'')+
       '<div class="mt-2 flex items-center gap-1.5 flex-wrap">'+
         chip('状态持续 '+d,'muted')+chip('消息 '+mi,'muted')+chip(E(enumLabel(m.executionStatus||m.status)),m.status==='busy'?'blue':m.status==='error'?'red':'muted')+
@@ -121,8 +121,8 @@ function openDrawer(name,opener){
   meta.push(chip('启动于 '+relT(m.timeCreated),'muted'));
   if(m.worktreeBranch)meta.push(chip(E(m.worktreeBranch),'muted'));
   h+='<div class="flex flex-wrap gap-1.5 mb-4 pb-4 border-b border-base-800/50">'+meta.join('')+'</div>';
-  var blockedTask=blockedTaskFor(name,t.tasks||[]);
-  if(blockedTask){h+='<div class="mb-4 rounded border border-amber-500/30 bg-amber-500/[0.05] p-3"><div class="text-[10px] uppercase tracking-wider text-amber-400 mb-1">当前受阻任务</div><div class="task-copy text-[13px] text-txt-200">'+E(blockedTask.content)+'</div></div>'}
+  var waitingTask=waitingTaskFor(name,t.tasks||[]);
+  if(waitingTask){h+='<div class="mb-4 rounded border border-base-700 bg-base-800/20 p-3"><div class="text-[10px] uppercase tracking-wider text-txt-400 mb-1">等待依赖</div><div class="task-copy text-[13px] text-txt-200">'+E(waitingTask.content)+'</div></div>'}
   // Prompt
   if(m.prompt){
     h+='<div class="mb-4"><div class="text-txt-400 text-[10px] uppercase tracking-wider mb-2">原始提示词</div>';
@@ -311,7 +311,7 @@ function rTasks(t){
     '<span class="text-[11px] text-txt-400 font-mono">'+c+'/'+tk.length+'</span>'+
     (allDone?'<span class="text-emerald-400 text-[10px] font-medium">全部完成</span>':'')+
   '</div>'+
-  grp('进行中',g.in_progress,'bg-blue-500',true)+grp('待处理',g.pending,'bg-txt-500',true)+grp('受阻',g.blocked||[],'bg-amber-500',true)+grp('已完成',g.completed,'bg-emerald-500',false);
+  grp('进行中',g.in_progress,'bg-blue-500',true)+grp('待处理',g.pending,'bg-txt-500',true)+grp('等待依赖',g.blocked||[],'bg-txt-500',true)+grp('已完成',g.completed,'bg-emerald-500',false);
   restD(el,ds);
 }
 

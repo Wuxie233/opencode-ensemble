@@ -257,6 +257,23 @@ describe("team_spawn", () => {
     expect(task).toEqual({ status: "in_progress", assignee: "alice" })
   })
 
+  test("recomputes current phase when claim_task enters the active frontier", async () => {
+    insertTask(deps, "t1", "task-first")
+    insertTask(deps, "t1", "task-build")
+    deps.db.run("UPDATE team_task SET phase = 'discovery' WHERE id = 'task-first'")
+    deps.db.run("UPDATE team_task SET phase = 'implementation' WHERE id = 'task-build'")
+
+    await executeTeamSpawn(deps, {
+      name: "alice",
+      agent: "build",
+      prompt: "Build",
+      claim_task: "task-build",
+    }, "lead-sess", async () => true)
+
+    expect(deps.db.query("SELECT current_phase FROM team WHERE id = 't1'").get())
+      .toEqual({ current_phase: "implementation" })
+  })
+
   test("rejects claim_task from another team without spawning", async () => {
     insertTeam(deps.db, "t2", "other-team", "other-lead")
     insertTask(deps, "t2", "task-123")

@@ -32,6 +32,7 @@ describe("opencode-ensemble agent skill", () => {
     expect(readme).not.toContain("anthropic/claude-opus-4-6");
     expect(readme).toContain("plan_approval: true");
     expect(readme).toContain("depends_on");
+    expect(readme).toContain("ready frontier contains pending tasks whose dependencies are complete");
     expect(readme).toContain("returned key-to-ID mapping");
     expect(readme).toContain('key: "map-flow"');
     expect(readme).toContain("Lead Brief");
@@ -54,6 +55,7 @@ describe("opencode-ensemble agent skill", () => {
     expect(skill).toContain("references/eval-scenarios.md");
     expect(skill).toContain("Do not impose a Scout limit");
     expect(skill).toContain("batch-local `key`");
+    expect(skill).toContain("ready frontier: pending tasks whose dependencies are complete");
     expect(skill).toContain("sixth distinct consecutive provider retry");
     expect(skill).toContain("resume_from");
     expect(skill).toContain("Do not invent task IDs");

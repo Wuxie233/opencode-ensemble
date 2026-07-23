@@ -2,6 +2,7 @@ import type { ToolDeps } from "../types"
 import { requireTeamMember } from "./shared"
 import { generateId } from "../util"
 import { immediateTransaction } from "../db"
+import { recomputeCurrentPhase } from "../task-phase"
 
 interface TaskInput {
   key?: string
@@ -13,7 +14,7 @@ interface TaskInput {
 
 /**
  * Execute the team_tasks_add tool. Adds tasks to the shared board.
- * Tasks with unresolved dependencies are marked as 'blocked'.
+ * Tasks with unresolved dependencies remain internally 'blocked' and are presented as waiting.
  */
 export async function executeTeamTasksAdd(
   deps: ToolDeps,
@@ -65,10 +66,7 @@ export async function executeTeamTasksAdd(
           task.priority, dependencies.length > 0 ? JSON.stringify(dependencies) : null, task.phase ?? null, now, now],
       )
     })
-    const phase = args.tasks.map(task => task.phase?.trim()).filter((value): value is string => Boolean(value)).at(-1)
-    if (phase) {
-      deps.db.run("UPDATE team SET current_phase = ?, time_updated = ? WHERE id = ?", [phase, now, teamInfo.teamId])
-    }
+    recomputeCurrentPhase(deps.db, teamInfo.teamId, now)
   })
 
   const mapping = [...keyedIds].map(([key, id]) => `${key}=${id}`)

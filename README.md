@@ -129,7 +129,7 @@ Install the companion skill to teach your AI how to form useful Ensemble teams, 
 npx skills@latest add hueyexe/opencode-ensemble --skill opencode-ensemble
 ```
 
-The skill is useful when you want the agent to decide whether parallel work is appropriate, split work into independent slices, use `depends_on` correctly, or pick a safe mix of `explore` and `build` teammates.
+The skill is useful when you want the agent to decide whether parallel work is appropriate, split work into independent slices, use `depends_on` correctly, or pick a safe mix of `explore` and `build` teammates. The ready frontier contains pending tasks whose dependencies are complete; dependency-waiting tasks are normal queued work, not blockers.
 
 Good team shapes:
 

@@ -475,7 +475,7 @@ const plugin: Plugin = async (input) => {
             priority: tool.schema.enum(["high", "medium", "low"]).default("medium").describe("Task priority"),
             key: tool.schema.string().optional().describe("Optional batch-local task key used by depends_on in the same call"),
             depends_on: tool.schema.array(tool.schema.string()).optional().describe("Existing same-Team task IDs or batch-local keys this task depends on"),
-            phase: tool.schema.string().optional().describe("Optional workflow phase; the latest supplied phase becomes the Team's current phase"),
+            phase: tool.schema.string().optional().describe("Optional workflow phase used to derive the Team's current phase from its active ready frontier"),
           })).describe("Tasks to add"),
         },
         async execute(args, ctx) {
@@ -505,7 +505,7 @@ const plugin: Plugin = async (input) => {
       }),
 
       team_claim: tool({
-        description: "Claim a pending task from the shared task list. Only unclaimed, unblocked tasks can be claimed.",
+        description: "Claim a pending task from the shared task list. Only tasks on the ready frontier can be claimed.",
         args: {
           task_id: tool.schema.string().describe("ID of the task to claim"),
         },

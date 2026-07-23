@@ -5,6 +5,7 @@ import { executeTeamTasksAdd } from "../../src/tools/team-tasks-add"
 import { executeTeamTasksComplete } from "../../src/tools/team-tasks-complete"
 import { executeTeamClaim } from "../../src/tools/team-claim"
 import { parseTaskResult } from "../../src/result-parser"
+import { recomputeCurrentPhase } from "../../src/task-phase"
 
 describe("team_tasks_list", () => {
   let deps: ReturnType<typeof setupDeps>
@@ -31,6 +32,20 @@ describe("team_tasks_list", () => {
     expect(result).toContain("Fix bug")
     expect(result).toContain("Write docs")
     expect(result).toContain("pending")
+  })
+
+  test("presents dependency-blocked tasks as waiting", async () => {
+    const result = await executeTeamTasksAdd(deps, { tasks: [
+      { key: "first", content: "First", priority: "high" },
+      { content: "Second", priority: "medium", depends_on: ["first"] },
+    ] }, "sess-alice")
+
+    expect(result).toContain("first=")
+    const board = await executeTeamTasksList(deps, "sess-alice")
+    expect(board).toContain("[waiting] Second")
+    expect(board).not.toContain("[blocked] Second")
+    expect(deps.db.query("SELECT status FROM team_task WHERE content = 'Second'").get())
+      .toEqual({ status: "blocked" })
   })
 
   test("rejects if not in a team", async () => {
@@ -191,19 +206,43 @@ describe("team_tasks_complete", () => {
     expect(deps.client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(1)
   })
 
-  test("tracks the current phase while reusing the same Team", async () => {
+  test("derives current phase from the ready task frontier", async () => {
     await executeTeamTasksAdd(deps, { tasks: [
       { key: "research", content: "Research", priority: "high", phase: "discovery" },
-    ] }, "sess-alice")
-    await executeTeamTasksAdd(deps, { tasks: [
-      { key: "build", content: "Build", priority: "high", phase: "implementation" },
+      { key: "build", content: "Build", priority: "high", depends_on: ["research"], phase: "implementation" },
+      { key: "review", content: "Review", priority: "medium", depends_on: ["build"], phase: "verification" },
     ] }, "sess-alice")
 
     expect(deps.db.query("SELECT current_phase FROM team WHERE id = 't1'").get())
-      .toEqual({ current_phase: "implementation" })
+      .toEqual({ current_phase: "discovery" })
     const board = await executeTeamTasksList(deps, "sess-alice")
     expect(board).toContain("phase: discovery")
     expect(board).toContain("phase: implementation")
+  })
+
+  test("prefers an in-progress phase and clears it when no active frontier remains", async () => {
+    const added = await executeTeamTasksAdd(deps, { tasks: [
+      { key: "first", content: "First", priority: "high", phase: "discovery" },
+      { key: "second", content: "Second", priority: "high", phase: "implementation" },
+    ] }, "sess-alice")
+    expect(added).toContain("first=")
+    const firstId = (deps.db.query("SELECT id FROM team_task WHERE content = 'First'").get() as { id: string }).id
+    const secondId = (deps.db.query("SELECT id FROM team_task WHERE content = 'Second'").get() as { id: string }).id
+    expect(firstId).toBeTruthy()
+    expect(secondId).toBeTruthy()
+
+    await executeTeamClaim(deps, { task_id: secondId! }, "sess-alice")
+    expect(deps.db.query("SELECT current_phase FROM team WHERE id = 't1'").get())
+      .toEqual({ current_phase: "implementation" })
+
+    deps.db.run("UPDATE team_task SET status = 'completed' WHERE id = ?", [secondId!])
+    recomputeCurrentPhase(deps.db, "t1", Date.now())
+    expect(deps.db.query("SELECT current_phase FROM team WHERE id = 't1'").get())
+      .toEqual({ current_phase: "discovery" })
+    deps.db.run("UPDATE team_task SET status = 'completed' WHERE id = ?", [firstId!])
+    recomputeCurrentPhase(deps.db, "t1", Date.now())
+    expect(deps.db.query("SELECT current_phase FROM team WHERE id = 't1'").get())
+      .toEqual({ current_phase: null })
   })
 
   test("unblocks dependent tasks when completed", async () => {
@@ -422,7 +461,7 @@ describe("team_claim", () => {
     const taskBId = r2.match(/task_\S+/)![0]!
 
     await expect(executeTeamClaim(deps, { task_id: taskBId }, "sess-alice"))
-      .rejects.toThrow("blocked")
+      .rejects.toThrow("waiting")
   })
 
   test("rejects if task not found", async () => {

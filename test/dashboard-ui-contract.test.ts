@@ -37,12 +37,16 @@ describe("dashboard UI contract", () => {
         { id: "assigned", status: "blocked", assignee: "builder", content: "Waiting for API" },
         { id: "unassigned", status: "blocked", assignee: null, content: "Needs owner" },
       ],
+      messages: [{
+        fromName: "builder",
+        content: "<task-result><kind>blocker</kind><task_id>assigned</task_id><status>pending</status><summary>API contract is unavailable</summary><details>Waiting for owner decision</details></task-result>",
+      }],
     })
 
-    expect(result.map(item => item.kind)).toEqual(["智能体错误", "受阻任务", "受阻任务"])
+    expect(result.map(item => item.kind)).toEqual(["智能体错误", "阻塞报告"])
     expect(result[0]?.target).toEqual({ type: "agent", id: "reviewer" })
     expect(result[1]?.target).toEqual({ type: "agent", id: "builder" })
-    expect(result[2]?.target).toEqual({ type: "task", id: "unassigned" })
+    expect(result[1]?.detail).toContain("API contract is unavailable")
   })
 
   test("global shortcuts ignore editable and interactive controls", () => {
@@ -184,7 +188,7 @@ describe("dashboard UI contract", () => {
     expect(DASHBOARD_JS_EVENTS).toContain("function restoreModalFocus")
     expect(DASHBOARD_JS_RENDER).toContain("focusedAgent")
     expect(DASHBOARD_JS_RENDER).toContain("focusedAgent===selectedAgent")
-    expect(DASHBOARD_JS_RENDER).toContain("当前受阻任务")
+    expect(DASHBOARD_JS_RENDER).toContain("等待依赖")
   })
 
   test("runtime chips can shrink and wrap long identifiers", () => {

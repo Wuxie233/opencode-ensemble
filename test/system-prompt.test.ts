@@ -183,6 +183,21 @@ describe("buildLeadSystemPrompt", () => {
     expect(prompt).toContain("New state")
     expect(prompt).not.toContain("Old state")
   })
+
+  test("treats dependency waits as normal and structured blocker reports as alerts", () => {
+    const db = setupDb()
+    insertTeam(db, "brief-wait", "brief-wait", "lead-sess")
+    insertTask(db, "brief-wait", "waiting-task", "blocked")
+    db.run(
+      "INSERT INTO team_message (id, team_id, from_name, to_name, content, delivered, read, time_created) VALUES (?, ?, ?, ?, ?, 1, 0, ?)",
+      ["blocker", "brief-wait", "alice", "lead", "<task-result><kind>blocker</kind><task_id>waiting-task</task_id><status>pending</status><summary>Need a product decision</summary><details>Choice is unresolved</details></task-result>", Date.now()],
+    )
+
+    const brief = buildLeadSystemPrompt(db, "brief-wait")
+    expect(brief).toContain("Blockers:")
+    expect(brief).toContain("Need a product decision")
+    expect(brief).not.toContain("- waiting-task: Task waiting-task")
+  })
 })
 
 describe("buildTeammateSystemPrompt", () => {

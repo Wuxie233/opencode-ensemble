@@ -38,7 +38,7 @@ Use `plan_approval: true` only for risky or costly-to-reverse writer work. Read-
 
 1. Create one Team for the confirmed request and reuse it across research, implementation, review, verification, and recovery.
 2. Build the coordination graph in `team_tasks_add`. One batch may assign local `key` values and use them in `depends_on`, including forward references. Use existing same-Team task IDs for later additions. Add `phase` when the workflow moves to a new phase.
-3. Maximize useful concurrency across ready tasks. Spawn calls must be issued one at a time, but spawned teammates execute concurrently.
+3. Maximize useful concurrency across the ready frontier: pending tasks whose dependencies are complete. Dependency-waiting tasks are normal queued work, not blockers. Spawn calls must be issued one at a time, but spawned teammates execute concurrently.
 4. Delegate broad searches, raw logs, trial-and-error, and detailed evidence so the Lead receives concise decision-ready summaries.
 5. Use `worktree: false` for read-only teammates and exclusive write ownership for builders.
 6. Use `plan_approval: true` for risky implementation work.
