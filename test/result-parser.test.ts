@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test"
-import { parseTaskResult } from "../src/result-parser"
+import { parseTaskResult, serializeTaskResult } from "../src/result-parser"
 
 describe("parseTaskResult", () => {
   test("parses valid task-result with all fields", () => {
@@ -101,5 +101,25 @@ That's all.`
     const result = parseTaskResult(content)
     expect(result).not.toBeNull()
     expect(result!.status).toBe("failed")
+  })
+
+  test("round-trips XML-like terminal result fields safely", () => {
+    const content = serializeTaskResult({
+      kind: "result",
+      taskId: "task-1",
+      status: "completed",
+      summary: "Fix <parser> & tests",
+      details: "Preserved </details> text.",
+      branch: "ensemble/a&b",
+    })
+
+    expect(parseTaskResult(content)).toEqual({
+      kind: "result",
+      taskId: "task-1",
+      status: "completed",
+      summary: "Fix <parser> & tests",
+      details: "Preserved </details> text.",
+      branch: "ensemble/a&b",
+    })
   })
 })

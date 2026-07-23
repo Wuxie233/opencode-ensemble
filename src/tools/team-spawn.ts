@@ -403,7 +403,7 @@ async function executeTeamSpawnLocked(
     "- team_broadcast: send a message to all team members",
     "- team_tasks_list: view the shared team task board",
     "- team_tasks_add: add tasks to the shared board",
-    "- team_tasks_complete: mark a task complete on the shared board",
+    "- team_tasks_complete: atomically complete a claimed task and report its terminal result to the Lead",
     "- team_claim: claim a pending task from the shared board",
   )
 
@@ -423,14 +423,14 @@ async function executeTeamSpawnLocked(
   context.push("", "When you finish your task:")
   if (!isReadOnly && worktreeBranch) {
     context.push(`1. Commit your changes: git add -A && git commit -m "your summary"`)
-    context.push("2. If you claimed a task, mark it complete using team_tasks_complete.")
     context.push(
-      "3. Send ONE message to the lead using team_message with this format:",
+      "2. If you claimed a task, call team_tasks_complete once with task_id and result: { summary, details, branch }. This atomically completes the task and reports the terminal result to the Lead.",
+      "3. If you did not claim a task, send ONE message to the lead using team_message with this format:",
     )
   } else if (!isReadOnly) {
-    context.push("1. If you claimed a task, mark it complete using team_tasks_complete.")
     context.push(
-      "2. Send ONE message to the lead using team_message with this format:",
+      "1. If you claimed a task, call team_tasks_complete once with task_id and result: { summary, details }. This atomically completes the task and reports the terminal result to the Lead.",
+      "2. If you did not claim a task, send ONE message to the lead using team_message with this format:",
     )
   } else {
     context.push(

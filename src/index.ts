@@ -486,9 +486,14 @@ const plugin: Plugin = async (input) => {
       }),
 
       team_tasks_complete: tool({
-        description: "Mark a task as completed on the shared board. This unblocks any tasks that depend on it.",
+        description: "Mark a task as completed on the shared board. This unblocks dependent tasks. Teammates should include result to atomically report terminal results to the Lead.",
         args: {
           task_id: tool.schema.string().describe("ID of the task to mark complete"),
+          result: tool.schema.object({
+            summary: tool.schema.string().describe("One-line completion summary"),
+            details: tool.schema.string().describe("Full findings or changes made"),
+            branch: tool.schema.string().optional().describe("Worktree branch containing the completed work"),
+          }).optional().describe("Optional terminal result persisted atomically with task completion"),
         },
         async execute(args, ctx) {
           const result = await executeTeamTasksComplete(deps, args, ctx.sessionID)

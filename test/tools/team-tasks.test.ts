@@ -4,6 +4,7 @@ import { executeTeamTasksList } from "../../src/tools/team-tasks-list"
 import { executeTeamTasksAdd } from "../../src/tools/team-tasks-add"
 import { executeTeamTasksComplete } from "../../src/tools/team-tasks-complete"
 import { executeTeamClaim } from "../../src/tools/team-claim"
+import { parseTaskResult } from "../../src/result-parser"
 
 describe("team_tasks_list", () => {
   let deps: ReturnType<typeof setupDeps>
@@ -226,6 +227,138 @@ describe("team_tasks_complete", () => {
     // Task B should now be pending
     const taskBAfter = deps.db.query("SELECT status FROM team_task WHERE content = ?").get("Task B") as Record<string, string>
     expect(taskBAfter.status).toBe("pending")
+  })
+
+  test("atomically completes an owned task, reports its result, and wakes Lead once", async () => {
+    const resultA = await executeTeamTasksAdd(deps, { tasks: [
+      { content: "Task A", priority: "high", phase: "implementation" },
+    ] }, "sess-alice")
+    const taskAId = resultA.match(/task_\S+/)![0]!
+    await executeTeamTasksAdd(deps, { tasks: [
+      { content: "Task B", priority: "high", depends_on: [taskAId], phase: "verification" },
+    ] }, "sess-alice")
+    await executeTeamClaim(deps, { task_id: taskAId }, "sess-alice")
+    deps.client.calls.length = 0
+
+    await executeTeamTasksComplete(deps, {
+      task_id: taskAId,
+      result: {
+        summary: "Implemented the fix",
+        details: "Changed the transaction and added tests.",
+        branch: "ensemble/example/alice",
+      },
+    }, "sess-alice")
+
+    const taskA = deps.db.query("SELECT status FROM team_task WHERE id = ?").get(taskAId)
+    const taskB = deps.db.query("SELECT status FROM team_task WHERE content = 'Task B'").get()
+    expect(taskA).toEqual({ status: "completed" })
+    expect(taskB).toEqual({ status: "pending" })
+    expect(deps.db.query("SELECT current_phase FROM team WHERE id = 't1'").get())
+      .toEqual({ current_phase: "verification" })
+    expect(deps.db.query(
+      "SELECT execution_status, reported_to_lead FROM team_member WHERE team_id = 't1' AND name = 'alice'",
+    ).get()).toEqual({ execution_status: "completed", reported_to_lead: 1 })
+
+    const messages = deps.db.query(
+      "SELECT from_name, to_name, content FROM team_message WHERE team_id = 't1'",
+    ).all() as Array<{ from_name: string; to_name: string; content: string }>
+    expect(messages).toHaveLength(1)
+    expect(messages[0]!.from_name).toBe("alice")
+    expect(messages[0]!.to_name).toBe("lead")
+    expect(parseTaskResult(messages[0]!.content)).toEqual({
+      kind: "result",
+      taskId: taskAId,
+      status: "completed",
+      summary: "Implemented the fix",
+      details: "Changed the transaction and added tests.",
+      branch: "ensemble/example/alice",
+    })
+    expect(deps.client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(1)
+  })
+
+  test("rejects an atomic result from a non-owner without changing state", async () => {
+    insertMember(deps.db, "t1", "bob", "sess-bob")
+    deps.registry.register("t1", "bob", "sess-bob")
+    const added = await executeTeamTasksAdd(deps, { tasks: [
+      { content: "Owned task", priority: "high" },
+    ] }, "sess-alice")
+    const taskId = added.match(/task_\S+/)![0]!
+    await executeTeamClaim(deps, { task_id: taskId }, "sess-alice")
+    deps.client.calls.length = 0
+
+    await expect(executeTeamTasksComplete(deps, {
+      task_id: taskId,
+      result: { summary: "Not mine", details: "Tried to complete another member's task." },
+    }, "sess-bob")).rejects.toThrow("owned by alice")
+
+    expect(deps.db.query("SELECT status FROM team_task WHERE id = ?").get(taskId)).toEqual({ status: "in_progress" })
+    expect(deps.db.query("SELECT id FROM team_message WHERE team_id = 't1'").all()).toHaveLength(0)
+    expect(deps.client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(0)
+  })
+
+  test("rejects an oversized atomic result before completing the task", async () => {
+    const added = await executeTeamTasksAdd(deps, { tasks: [
+      { content: "Large result", priority: "high" },
+    ] }, "sess-alice")
+    const taskId = added.match(/task_\S+/)![0]!
+    await executeTeamClaim(deps, { task_id: taskId }, "sess-alice")
+    deps.client.calls.length = 0
+
+    await expect(executeTeamTasksComplete(deps, {
+      task_id: taskId,
+      result: { summary: "Large", details: "x".repeat(11 * 1024) },
+    }, "sess-alice")).rejects.toThrow("10KB")
+
+    expect(deps.db.query("SELECT status FROM team_task WHERE id = ?").get(taskId)).toEqual({ status: "in_progress" })
+    expect(deps.db.query("SELECT id FROM team_message WHERE team_id = 't1'").all()).toHaveLength(0)
+    expect(deps.client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(0)
+  })
+
+  test("rolls back task, dependency, and reporting state when result insertion fails", async () => {
+    const added = await executeTeamTasksAdd(deps, { tasks: [
+      { content: "Atomic task", priority: "high" },
+    ] }, "sess-alice")
+    const taskId = added.match(/task_\S+/)![0]!
+    await executeTeamTasksAdd(deps, { tasks: [
+      { content: "Dependent", priority: "high", depends_on: [taskId] },
+    ] }, "sess-alice")
+    await executeTeamClaim(deps, { task_id: taskId }, "sess-alice")
+    deps.db.exec("CREATE TRIGGER fail_terminal_result BEFORE INSERT ON team_message BEGIN SELECT RAISE(ABORT, 'message insert failed'); END")
+    deps.client.calls.length = 0
+
+    await expect(executeTeamTasksComplete(deps, {
+      task_id: taskId,
+      result: { summary: "Done", details: "Should roll back." },
+    }, "sess-alice")).rejects.toThrow("message insert failed")
+
+    expect(deps.db.query("SELECT status FROM team_task WHERE id = ?").get(taskId)).toEqual({ status: "in_progress" })
+    expect(deps.db.query("SELECT status FROM team_task WHERE content = 'Dependent'").get()).toEqual({ status: "blocked" })
+    expect(deps.db.query(
+      "SELECT execution_status, reported_to_lead FROM team_member WHERE team_id = 't1' AND name = 'alice'",
+    ).get()).toEqual({ execution_status: "idle", reported_to_lead: 0 })
+    expect(deps.client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(0)
+  })
+
+  test("does not duplicate an atomic result or wake when completion is retried", async () => {
+    const added = await executeTeamTasksAdd(deps, { tasks: [
+      { content: "Retry task", priority: "high" },
+    ] }, "sess-alice")
+    const taskId = added.match(/task_\S+/)![0]!
+    await executeTeamClaim(deps, { task_id: taskId }, "sess-alice")
+    const args = {
+      task_id: taskId,
+      result: { summary: "Done once", details: "The retry is idempotent." },
+    }
+    deps.client.calls.length = 0
+
+    const results = await Promise.all([
+      executeTeamTasksComplete(deps, args, "sess-alice"),
+      executeTeamTasksComplete(deps, args, "sess-alice"),
+    ])
+
+    expect(results.some(result => result.includes("already completed"))).toBe(true)
+    expect(deps.db.query("SELECT id FROM team_message WHERE team_id = 't1'").all()).toHaveLength(1)
+    expect(deps.client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(1)
   })
 
   test("rejects if task not found", async () => {

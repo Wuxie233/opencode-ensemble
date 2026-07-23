@@ -205,7 +205,7 @@ describe("team_spawn", () => {
     expect(resumePacket).toContain("RECENT")
   })
 
-  test("context message instructs teammate to mark tasks complete before messaging lead", async () => {
+  test("context message instructs teammate to atomically complete and report claimed tasks", async () => {
     await executeTeamSpawn(deps, {
       name: "alice",
       agent: "build",
@@ -218,8 +218,8 @@ describe("team_spawn", () => {
 
     // Should instruct to mark task complete
     expect(text).toContain("team_tasks_complete")
-    // Should NOT have the old "STOP" as step 2 without mentioning task completion first
-    expect(text).toMatch(/mark.*complete.*team_message/s)
+    expect(text).toContain("result: { summary, details, branch }")
+    expect(text).not.toMatch(/mark it complete using team_tasks_complete[\s\S]*Send ONE message to the lead/)
   })
 
   test("context message includes assigned task when claim_task is provided", async () => {
