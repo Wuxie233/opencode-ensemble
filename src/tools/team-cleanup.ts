@@ -8,6 +8,7 @@ import { appendTeamEvent } from "../team-event"
 import { log } from "../log"
 import { runCommand } from "../process"
 import { sendLeadAlert } from "../messaging"
+import { recomputeCurrentPhase } from "../task-phase"
 
 type PurgeApprovalFn = (preview: string) => Promise<void>
 type ListBranchesFn = (namespace: string, cwd: string) => Promise<string[]>
@@ -573,11 +574,12 @@ export async function executeTeamCleanup(
 
       const safeBranch = preserved.get(member.name)
       deps.db.transaction(() => {
+        const now = Date.now()
         const settled = deps.db.run(
           `UPDATE team_member
            SET status = 'shutdown', execution_status = 'idle', worktree_branch = COALESCE(?, worktree_branch), time_updated = ?
            WHERE team_id = ? AND name = ? AND status = 'shutdown_requested'`,
-          [safeBranch ?? null, Date.now(), teamInfo.teamId, member.name],
+          [safeBranch ?? null, now, teamInfo.teamId, member.name],
         )
         if (settled.changes !== 1) {
           throw new Error(`Cannot clean up team "${teamInfo.teamName}": ${member.name}'s shutdown state changed after abort.`)
@@ -585,8 +587,9 @@ export async function executeTeamCleanup(
         deps.db.run(
           `UPDATE team_task SET status = 'pending', assignee = NULL, time_updated = ?
            WHERE team_id = ? AND assignee = ? AND status = 'in_progress'`,
-          [Date.now(), teamInfo.teamId, member.name],
+          [now, teamInfo.teamId, member.name],
         )
+        recomputeCurrentPhase(deps.db, teamInfo.teamId, now)
       })()
       member.status = "shutdown"
       if (safeBranch) member.worktree_branch = safeBranch

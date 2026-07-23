@@ -203,6 +203,7 @@ describe("team_shutdown", () => {
     deps.db.run("UPDATE team_member SET status = 'shutdown_requested', execution_status = 'cancelling' WHERE name = 'alice'")
     insertTask(deps.db, "t1", "task-alice")
     deps.db.run("UPDATE team_task SET status = 'in_progress', assignee = 'alice' WHERE id = 'task-alice'")
+    deps.db.run("UPDATE team SET current_phase = 'implementation' WHERE id = 't1'")
     let finishAbort: (() => void) | undefined
     deps.client.session.abort = async () => new Promise<void>(resolve => { finishAbort = resolve })
 
@@ -225,6 +226,8 @@ describe("team_shutdown", () => {
       .toEqual({ status: "shutdown", execution_status: "idle" })
     expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-alice'").get())
       .toEqual({ status: "pending", assignee: null })
+    expect(deps.db.query("SELECT current_phase FROM team WHERE id = 't1'").get())
+      .toEqual({ current_phase: null })
   })
 
   test("falls back to shutdown_requested when status poll fails", async () => {
@@ -384,10 +387,20 @@ describe("team_cleanup", () => {
   })
 
   test("force=true aborts active members and archives", async () => {
+    const now = Date.now()
     insertMember(deps.db, "t1", "alice", "sess-alice", "busy", "running")
     insertMember(deps.db, "t1", "bob", "sess-bob", "shutdown", "idle")
     deps.registry.register("t1", "alice", "sess-alice")
     deps.registry.register("t1", "bob", "sess-bob")
+    deps.db.run(
+      "INSERT INTO team_task (id, team_id, content, status, priority, phase, time_created, time_updated) VALUES ('task-ready', 't1', 'resume ready work', 'pending', 'high', 'discovery', ?, ?)",
+      [now - 1, now - 1],
+    )
+    deps.db.run(
+      "INSERT INTO team_task (id, team_id, content, status, priority, assignee, phase, time_created, time_updated) VALUES ('task-alice', 't1', 'interrupted work', 'in_progress', 'high', 'alice', 'implementation', ?, ?)",
+      [now, now],
+    )
+    deps.db.run("UPDATE team SET current_phase = 'implementation' WHERE id = 't1'")
 
     const result = await executeTeamCleanup(deps, { force: true }, "lead-sess", undefined, noopMerge, noopDelete, false)
     expect(result).toContain("cleaned up")
@@ -397,6 +410,8 @@ describe("team_cleanup", () => {
 
     const team = deps.db.query("SELECT status FROM team WHERE id = ?").get("t1") as Record<string, string>
     expect(team.status).toBe("archived")
+    expect(deps.db.query("SELECT current_phase FROM team WHERE id = 't1'").get())
+      .toEqual({ current_phase: "discovery" })
   })
 
   test("force cleanup marks members shutdown_requested before aborting", async () => {

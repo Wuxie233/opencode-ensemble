@@ -83,13 +83,19 @@ describe("recoverStaleMembers", () => {
   })
 
   test("marks busy members as error on recovery", async () => {
+    const now = Date.now()
     insertTeam(db, "t1", "my-team", "lead-sess")
     insertMember(db, "t1", "alice", "sess-1", "busy", "running")
     insertMember(db, "t1", "bob", "sess-2", "busy", "running")
     db.run(
-      "INSERT INTO team_task (id, team_id, content, status, priority, assignee, time_created, time_updated) VALUES (?, ?, ?, 'in_progress', 'high', ?, ?, ?)",
-      ["task-alice", "t1", "recover interrupted task", "alice", Date.now(), Date.now()],
+      "INSERT INTO team_task (id, team_id, content, status, priority, phase, time_created, time_updated) VALUES (?, ?, ?, 'pending', 'high', ?, ?, ?)",
+      ["task-ready", "t1", "resume ready work", "discovery", now - 1, now - 1],
     )
+    db.run(
+      "INSERT INTO team_task (id, team_id, content, status, priority, assignee, phase, time_created, time_updated) VALUES (?, ?, ?, 'in_progress', 'high', ?, ?, ?, ?)",
+      ["task-alice", "t1", "recover interrupted task", "alice", "implementation", now, now],
+    )
+    db.run("UPDATE team SET current_phase = 'implementation' WHERE id = 't1'")
 
     const result = await recoverStaleMembers(db, client)
     expect(result.interrupted).toBe(2)
@@ -113,6 +119,8 @@ describe("recoverStaleMembers", () => {
     expect(leadWakes.every(call => (call.args[0] as { sessionID: string }).sessionID === "lead-sess")).toBe(true)
     expect((db.query("SELECT status, assignee FROM team_task WHERE id = ?").get("task-alice") as { status: string; assignee: string | null }))
       .toEqual({ status: "pending", assignee: null })
+    expect(db.query("SELECT current_phase FROM team WHERE id = 't1'").get())
+      .toEqual({ current_phase: "discovery" })
 
     expect((await recoverStaleMembers(db, client)).interrupted).toBe(0)
     expect((db.query("SELECT COUNT(*) AS count FROM team_message").get() as { count: number }).count).toBe(2)

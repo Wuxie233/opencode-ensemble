@@ -35,9 +35,14 @@ describe("Watchdog", () => {
     )
     deps.registry.register("t1", "alice", "sess-a")
     deps.db.run(
-      "INSERT INTO team_task (id, team_id, content, status, priority, assignee, time_created, time_updated) VALUES (?, ?, ?, 'in_progress', 'high', ?, ?, ?)",
-      ["task-a", "t1", "recover timed out task", "alice", pastTime, pastTime],
+      "INSERT INTO team_task (id, team_id, content, status, priority, phase, time_created, time_updated) VALUES (?, ?, ?, 'pending', 'high', ?, ?, ?)",
+      ["task-ready", "t1", "resume ready work", "discovery", pastTime - 1, pastTime - 1],
     )
+    deps.db.run(
+      "INSERT INTO team_task (id, team_id, content, status, priority, assignee, phase, time_created, time_updated) VALUES (?, ?, ?, 'in_progress', 'high', ?, ?, ?, ?)",
+      ["task-a", "t1", "recover timed out task", "alice", "implementation", pastTime, pastTime],
+    )
+    deps.db.run("UPDATE team SET current_phase = 'implementation' WHERE id = 't1'")
 
     const watchdog = new Watchdog({ db: deps.db, client: deps.client, registry: deps.registry, ttlMs: 30_000 })
     await watchdog.check()
@@ -66,6 +71,8 @@ describe("Watchdog", () => {
     expect(alerts[0]!.content).toContain("timed out")
     expect((deps.db.query("SELECT status, assignee FROM team_task WHERE id = ?").get("task-a") as { status: string; assignee: string | null }))
       .toEqual({ status: "pending", assignee: null })
+    expect(deps.db.query("SELECT current_phase FROM team WHERE id = 't1'").get())
+      .toEqual({ current_phase: "discovery" })
 
     await watchdog.check()
     expect((deps.db.query("SELECT COUNT(*) AS count FROM team_message").get() as { count: number }).count).toBe(1)

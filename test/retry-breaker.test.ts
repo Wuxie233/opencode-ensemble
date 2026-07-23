@@ -99,6 +99,13 @@ describe("retry breaker", () => {
 
   test("preserves and aborts before releasing ownership, then guides a resumed replacement", async () => {
     const deps = setupRetryingMember()
+    const now = Date.now()
+    deps.db.run(
+      "INSERT INTO team_task (id, team_id, content, status, priority, phase, time_created, time_updated) VALUES ('task-ready', 't1', 'Resume ready work', 'pending', 'high', 'discovery', ?, ?)",
+      [now - 1, now - 1],
+    )
+    deps.db.run("UPDATE team_task SET phase = 'implementation', time_created = ? WHERE id = 'task-retry'", [now])
+    deps.db.run("UPDATE team SET current_phase = 'implementation' WHERE id = 't1'")
     deps.db.run(
       "UPDATE team_member SET worktree_branch = 'ensemble-my-team-alice', worktree_dir = '/tmp/wt-alice' WHERE name = 'alice'",
     )
@@ -131,6 +138,8 @@ describe("retry breaker", () => {
       .toEqual({ status: "pending", assignee: null })
     expect(deps.db.query("SELECT status, execution_status FROM team_member WHERE name = 'alice'").get())
       .toEqual({ status: "error", execution_status: "failed" })
+    expect(deps.db.query("SELECT current_phase FROM team WHERE id = 't1'").get())
+      .toEqual({ current_phase: "discovery" })
     const alert = deps.db.query("SELECT content FROM team_message WHERE team_id = 't1' AND to_name = 'lead'").get() as { content: string }
     expect(alert.content).toContain("6 consecutive retries")
     expect(alert.content).toContain('resume_from: "alice"')

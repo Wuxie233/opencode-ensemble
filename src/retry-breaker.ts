@@ -5,6 +5,7 @@ import { getTeamResourceParts, preserveBranch, preservedBranchName, resolveWorkt
 import type { PreserveBranchFn, ResolveWorktreeBranchFn } from "./tools/merge-helper"
 import { sendLeadAlert, sendMessage, wakeTeamLead } from "./messaging"
 import { log } from "./log"
+import { recomputeCurrentPhase } from "./task-phase"
 
 const activeTerminations = new Map<string, Promise<RetryExhaustion | undefined>>()
 
@@ -142,19 +143,21 @@ export async function breakRetryLoop(
       "SELECT id FROM team_task WHERE team_id = ? AND assignee = ? AND status = 'in_progress' ORDER BY time_created, id",
     ).all(request.teamId, request.memberName) as Array<{ id: string }>
     transitioned = deps.db.transaction(() => {
+      const now = Date.now()
       const result = deps.db.run(
         `UPDATE team_member SET status = 'error', execution_status = 'failed',
             worktree_branch = COALESCE(?, worktree_branch), time_updated = ?
          WHERE team_id = ? AND name = ? AND session_id = ?
             AND status = 'shutdown_requested' AND execution_status = 'cancelling'`,
-        [preservedBranch, Date.now(), request.teamId, request.memberName, request.sessionId],
+        [preservedBranch, now, request.teamId, request.memberName, request.sessionId],
       )
       if (result.changes !== 1) return false
       deps.db.run(
         `UPDATE team_task SET status = 'pending', assignee = NULL, time_updated = ?
          WHERE team_id = ? AND assignee = ? AND status = 'in_progress'`,
-        [Date.now(), request.teamId, request.memberName],
+        [now, request.teamId, request.memberName],
       )
+      recomputeCurrentPhase(deps.db, request.teamId, now)
       const taskNotice = taskRows.length > 0
         ? ` Released task${taskRows.length === 1 ? "" : "s"}: ${taskRows.map(task => task.id).join(", ")}.`
         : ""

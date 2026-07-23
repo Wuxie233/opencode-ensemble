@@ -15,6 +15,7 @@ import {
 import { preserveBranch, preservedBranchName, resolveWorktreeBranch, teamResourceSegment } from "./tools/merge-helper"
 import { log } from "./log"
 import { runCommand } from "./process"
+import { recomputeCurrentPhase } from "./task-phase"
 
 /**
  * Scan for team members stuck in 'busy' status (stale from a crash)
@@ -129,6 +130,7 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
     }
 
     const transitioned = db.transaction(() => {
+      const now = Date.now()
       const terminal = kind === "shutdown" ? ["shutdown", "idle"] : kind === "retry" ? ["error", "failed"] : kind === "watchdog" ? ["error", "timed_out"] : ["error", "idle"]
       const result = db.run(
          `UPDATE team_member SET status = ?, execution_status = ?, time_updated = ?
@@ -136,14 +138,15 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
             AND ((? = 'shutdown' AND status = 'shutdown_requested' AND retry_tripped = 0)
               OR (? = 'retry' AND status = 'shutdown_requested' AND retry_tripped = 1)
               OR (? IN ('watchdog', 'stale') AND status = 'busy' AND retry_tripped = 0))`,
-        [terminal[0], terminal[1], Date.now(), member.team_id, member.name, kind, kind, kind],
+        [terminal[0], terminal[1], now, member.team_id, member.name, kind, kind, kind],
       )
       if (result.changes !== 1) return false
       db.run(
         `UPDATE team_task SET status = 'pending', assignee = NULL, time_updated = ?
          WHERE team_id = ? AND assignee = ? AND status = 'in_progress'`,
-        [Date.now(), member.team_id, member.name],
+        [now, member.team_id, member.name],
       )
+      recomputeCurrentPhase(db, member.team_id, now)
       sendMessage(db, {
         teamId: member.team_id,
         from: "system",

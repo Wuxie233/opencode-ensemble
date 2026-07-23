@@ -2,6 +2,7 @@ import type { Database } from "./db"
 import type { MemberRegistry, DescendantTracker } from "./state"
 import { findTeamBySession } from "./types"
 import { sendMessage } from "./messaging"
+import { recomputeCurrentPhase } from "./task-phase"
 
 const TEAM_TOOL_PREFIX = "team_"
 const RETRY_WARNING_THRESHOLD = 6
@@ -356,12 +357,13 @@ export function handleSessionErrorEvent(
 
   const errMsg = error?.data?.message ?? error?.name ?? "unknown error"
   const alert = db.transaction((): SessionErrorAlert | undefined => {
+    const now = Date.now()
     const claimed = db.run(
       `UPDATE team_member
        SET status = 'error', execution_status = 'failed', time_updated = ?
        WHERE team_id = ? AND name = ? AND session_id = ? AND status IN ('ready', 'busy')
          AND execution_status IN ('idle', 'starting', 'running', 'cancel_requested')`,
-      [Date.now(), member.team_id, member.name, sessionId],
+      [now, member.team_id, member.name, sessionId],
     )
     if (claimed.changes !== 1) return undefined
 
@@ -369,8 +371,9 @@ export function handleSessionErrorEvent(
       `UPDATE team_task
        SET status = 'pending', assignee = NULL, time_updated = ?
        WHERE team_id = ? AND assignee = ? AND status = 'in_progress'`,
-      [Date.now(), member.team_id, member.name],
+      [now, member.team_id, member.name],
     ).changes
+    recomputeCurrentPhase(db, member.team_id, now)
     const taskNotice = releasedTasks > 0
       ? ` ${releasedTasks} assigned task${releasedTasks === 1 ? " was" : "s were"} returned to pending so a replacement can claim ${releasedTasks === 1 ? "it" : "them"}.`
       : ""

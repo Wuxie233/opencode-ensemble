@@ -823,13 +823,18 @@ describe("handleSessionErrorEvent", () => {
   test("releases in-progress tasks assigned to the failed member", () => {
     const now = Date.now()
     db.run(
-      "INSERT INTO team_task (id, team_id, content, status, priority, assignee, time_created, time_updated) VALUES (?, ?, ?, 'in_progress', 'high', ?, ?, ?)",
-      ["task-failed", "t1", "finish the interrupted work", "scout", now, now],
+      "INSERT INTO team_task (id, team_id, content, status, priority, phase, time_created, time_updated) VALUES (?, ?, ?, 'pending', 'high', ?, ?, ?)",
+      ["task-ready", "t1", "resume the ready frontier", "discovery", now - 1, now - 1],
+    )
+    db.run(
+      "INSERT INTO team_task (id, team_id, content, status, priority, assignee, phase, time_created, time_updated) VALUES (?, ?, ?, 'in_progress', 'high', ?, ?, ?, ?)",
+      ["task-failed", "t1", "finish the interrupted work", "scout", "implementation", now, now],
     )
     db.run(
       "INSERT INTO team_task (id, team_id, content, status, priority, assignee, time_created, time_updated) VALUES (?, ?, ?, 'completed', 'medium', ?, ?, ?)",
       ["task-done", "t1", "leave completed work alone", "scout", now, now],
     )
+    db.run("UPDATE team SET current_phase = 'implementation' WHERE id = 't1'")
 
     handleSessionErrorEvent(db, registry, "scout-sess", {
       name: "MessageAbortedError",
@@ -842,6 +847,8 @@ describe("handleSessionErrorEvent", () => {
       .get("task-done") as { status: string; assignee: string | null }
     expect(failed).toEqual({ status: "pending", assignee: null })
     expect(completed).toEqual({ status: "completed", assignee: "scout" })
+    expect(db.query("SELECT current_phase FROM team WHERE id = 't1'").get())
+      .toEqual({ current_phase: "discovery" })
 
     const alert = db.query("SELECT content FROM team_message WHERE team_id = ? AND to_name = 'lead'")
       .get("t1") as { content: string }

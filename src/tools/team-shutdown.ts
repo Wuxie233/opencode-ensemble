@@ -5,6 +5,7 @@ import { getTeamResourceParts, preserveBranch, preservedBranchName, resolveWorkt
 import type { PreserveBranchFn, ResolveWorktreeBranchFn } from "./merge-helper"
 import { log } from "../log"
 import { sendLeadAlert } from "../messaging"
+import { recomputeCurrentPhase } from "../task-phase"
 
 /**
  * Execute the team_shutdown tool. Requests a teammate to shut down.
@@ -223,16 +224,18 @@ async function preserveAndAbort(
 
 function settleShutdown(deps: ToolDeps, teamId: string, memberName: string): void {
   deps.db.transaction(() => {
+    const now = Date.now()
     const transitioned = deps.db.run(
       "UPDATE team_member SET status = 'shutdown', execution_status = 'idle', time_updated = ? WHERE team_id = ? AND name = ? AND status = 'shutdown_requested'",
-      [Date.now(), teamId, memberName],
+      [now, teamId, memberName],
     )
     if (transitioned.changes !== 1) return
     deps.db.run(
       `UPDATE team_task SET status = 'pending', assignee = NULL, time_updated = ?
        WHERE team_id = ? AND assignee = ? AND status = 'in_progress'`,
-      [Date.now(), teamId, memberName],
+      [now, teamId, memberName],
     )
+    recomputeCurrentPhase(deps.db, teamId, now)
   })()
 }
 

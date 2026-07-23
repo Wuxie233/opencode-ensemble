@@ -6,6 +6,7 @@ import type { ActivityBuffer } from "./activity"
 import { preserveBranch, preservedBranchName, resolveWorktreeBranch } from "./tools/merge-helper"
 import { sendLeadAlert, sendMessage, wakeTeamLead } from "./messaging"
 import { log } from "./log"
+import { recomputeCurrentPhase } from "./task-phase"
 
 interface WatchdogOpts {
   db: Database
@@ -298,18 +299,20 @@ export class Watchdog {
       }
 
       const transitioned = this.db.transaction(() => {
+        const now = Date.now()
         const result = this.db.run(
           `UPDATE team_member SET status = 'error', execution_status = 'timed_out', time_updated = ?
            WHERE team_id = ? AND name = ?
              AND (status = 'ready' OR (status = 'busy' AND execution_status = 'cancelling'))`,
-          [Date.now(), member.team_id, member.name],
+          [now, member.team_id, member.name],
         )
         if (result.changes !== 1) return false
         this.db.run(
           `UPDATE team_task SET status = 'pending', assignee = NULL, time_updated = ?
            WHERE team_id = ? AND assignee = ? AND status = 'in_progress'`,
-          [Date.now(), member.team_id, member.name],
+          [now, member.team_id, member.name],
         )
+        recomputeCurrentPhase(this.db, member.team_id, now)
         sendMessage(this.db, {
           teamId: member.team_id,
           from: "system",
