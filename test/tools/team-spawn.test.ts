@@ -352,6 +352,12 @@ describe("team_spawn", () => {
       assignee: string | null
     }
     expect(task).toEqual({ status: "pending", assignee: null })
+    const events = deps.db.query(
+      "SELECT id, kind, payload, cause_event_id FROM team_event WHERE kind IN ('task.claimed', 'task.released') ORDER BY time_created, id",
+    ).all() as Array<{ id: string; kind: string; payload: string; cause_event_id: string | null }>
+    expect(events.map(event => event.kind)).toEqual(["task.claimed", "task.released"])
+    expect(events[1]?.cause_event_id).toBe(events[0]?.id)
+    expect(JSON.parse(events[1]?.payload ?? "null")).toEqual({ task_id: "task-123", reason: "spawn_rollback" })
   })
 
   test("preserves untracked resources without aborting when member registration fails", async () => {
@@ -378,6 +384,12 @@ describe("team_spawn", () => {
       assignee: string | null
     }
     expect(task).toEqual({ status: "pending", assignee: null })
+    const releaseEvents = deps.db.query(
+      "SELECT id, kind, payload, cause_event_id FROM team_event WHERE kind IN ('task.claimed', 'task.released') ORDER BY time_created, id",
+    ).all() as Array<{ id: string; kind: string; payload: string; cause_event_id: string | null }>
+    expect(releaseEvents.map(event => event.kind)).toEqual(["task.claimed", "task.released"])
+    expect(releaseEvents[1]?.cause_event_id).toBe(releaseEvents[0]?.id)
+    expect(JSON.parse(releaseEvents[1]?.payload ?? "null")).toEqual({ task_id: "task-123", reason: "spawn_rollback" })
     expect(preserved).toHaveLength(1)
     expect(preserved[0]?.source).toStartWith("ensemble-")
     expect(preserved[0]?.target).toBe("ensemble/preserved/test-project/my-team#t1/alice")
@@ -511,6 +523,12 @@ describe("team_spawn", () => {
       assignee: string | null
     }
     expect(task).toEqual({ status: "pending", assignee: null })
+    const events = deps.db.query(
+      "SELECT id, kind, payload, cause_event_id FROM team_event WHERE kind IN ('task.claimed', 'task.released') ORDER BY time_created, id",
+    ).all() as Array<{ id: string; kind: string; payload: string; cause_event_id: string | null }>
+    expect(events.map(event => event.kind)).toEqual(["task.claimed", "task.released"])
+    expect(events[1]?.cause_event_id).toBe(events[0]?.id)
+    expect(JSON.parse(events[1]?.payload ?? "null")).toEqual({ task_id: "task-123", reason: "spawn_rollback" })
   })
 
   test("context message does NOT include assigned task line when claim_task is absent", async () => {

@@ -16,12 +16,11 @@ interface EventRow {
   id: string
   kind: string
   payload: string
-  operation_id: string | null
   cause_event_id: string | null
 }
 
 describe("team_event migration", () => {
-  test("migration 13 creates an empty append-only event table and indexes without backfill", () => {
+  test("migration 13 creates empty immutable event rows retained until Team purge without backfill", () => {
     const db = new Database(":memory:")
     db.exec("PRAGMA foreign_keys=ON")
     for (let i = 0; i < 12; i++) {
@@ -36,7 +35,8 @@ describe("team_event migration", () => {
     expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(13)
     expect(db.query("SELECT * FROM team_event").all()).toEqual([])
     const indexes = db.query("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'team_event'").all() as Array<{ name: string }>
-    expect(indexes.map(row => row.name)).toEqual(expect.arrayContaining(["team_event_team_time_idx", "team_event_operation_idx"]))
+    expect(indexes.map(row => row.name)).toEqual(expect.arrayContaining(["team_event_team_time_idx"]))
+    expect(indexes.map(row => row.name)).not.toContain("team_event_operation_idx")
   })
 
   test("deleting a team cascades to its events", () => {
@@ -77,32 +77,51 @@ describe("appendTeamEvent", () => {
     })).toThrow("payload value")
   })
 
-  test("rejects payloads over 2 KiB and never persists forbidden fields", () => {
+  test("rejects oversized identifiers before persistence and never persists forbidden fields", () => {
     expect(() => appendTeamEvent(deps.db, {
       teamId: "t1",
       kind: "task.created",
       payload: { task_id: `task_${"x".repeat(2048)}`, status: "pending" },
-    })).toThrow("2 KiB")
+    })).toThrow("payload value")
 
     const rows = deps.db.query("SELECT payload FROM team_event").all() as Array<{ payload: string }>
     expect(rows).toEqual([])
     for (const field of forbidden) expect(JSON.stringify(rows)).not.toContain(`\"${field}\"`)
   })
 
-  test("stores natural operation and cause identifiers", () => {
-    const cause = appendTeamEvent(deps.db, {
-      teamId: "t1", kind: "task.completed", payload: { task_id: "task_1" }, operationId: "op_1",
+  test("rebuilds payloads before serialization to resist custom toJSON and Proxy traps", () => {
+    const payload = new Proxy({ task_id: "task_1", assignee: "alice" }, {
+      get(target, property, receiver) {
+        if (property === "toJSON") return () => ({ prompt: "private prompt", task_id: "stolen" })
+        return Reflect.get(target, property, receiver)
+      },
     })
-    appendTeamEvent(deps.db, {
-      teamId: "t1", kind: "task.unblocked", payload: { task_id: "task_2" }, operationId: "op_1", causeEventId: cause,
-    })
-    const rows = deps.db.query("SELECT operation_id, cause_event_id FROM team_event ORDER BY time_created, id").all() as EventRow[]
-    expect(rows[1]).toMatchObject({ operation_id: "op_1", cause_event_id: cause })
+
+    appendTeamEvent(deps.db, { teamId: "t1", kind: "task.claimed", payload })
+
+    const row = deps.db.query("SELECT payload FROM team_event").get() as { payload: string }
+    expect(JSON.parse(row.payload)).toEqual({ task_id: "task_1", assignee: "alice" })
+    expect(row.payload).not.toContain("private")
+    expect(row.payload).not.toContain("prompt")
   })
 
-  test("rejects updates while allowing team-owned cascade deletion", () => {
+  test("stores validated cause identifiers without accepting caller operation identifiers", () => {
+    const cause = appendTeamEvent(deps.db, {
+      teamId: "t1", kind: "task.completed", payload: { task_id: "task_1" },
+    })
+    appendTeamEvent(deps.db, {
+      teamId: "t1", kind: "task.unblocked", payload: { task_id: "task_2" }, causeEventId: cause,
+    })
+    const rows = deps.db.query("SELECT cause_event_id FROM team_event ORDER BY time_created, id").all() as EventRow[]
+    expect(rows[1]).toMatchObject({ cause_event_id: cause })
+    expect(() => appendTeamEvent(deps.db, {
+      teamId: "t1", kind: "team.archived", payload: {}, operationId: "caller_chosen",
+    } as never)).toThrow()
+  })
+
+  test("keeps rows immutable while allowing explicit Team purge deletion", () => {
     const id = appendTeamEvent(deps.db, { teamId: "t1", kind: "team.created", payload: {} })
-    expect(() => deps.db.run("UPDATE team_event SET kind = 'team.archived' WHERE id = ?", [id])).toThrow("append-only")
+    expect(() => deps.db.run("UPDATE team_event SET kind = 'team.archived' WHERE id = ?", [id])).toThrow("immutable")
     expect((deps.db.query("SELECT kind FROM team_event WHERE id = ?").get(id) as { kind: string }).kind).toBe("team.created")
   })
 })
@@ -131,7 +150,7 @@ describe("team_event transactional callsites", () => {
     deps.db.run("UPDATE team_member SET worktree_branch = 'private-branch' WHERE team_id = ? AND name = 'alice'", [teamId])
     await executeTeamMerge(deps, { member: "alice" }, "lead", async () => ({ ok: true }), async () => false, async () => [])
 
-    const rows = deps.db.query("SELECT id, kind, payload, operation_id, cause_event_id FROM team_event WHERE team_id = ? ORDER BY time_created, id").all(teamId) as EventRow[]
+    const rows = deps.db.query("SELECT id, kind, payload, cause_event_id FROM team_event WHERE team_id = ? ORDER BY time_created, id").all(teamId) as EventRow[]
     expect(rows.map(row => row.kind)).toEqual(expect.arrayContaining([
       "team.created", "task.created", "member.registered", "plan.approved", "task.claimed",
       "task.completed", "task.unblocked", "merge.started", "merge.completed",
@@ -228,7 +247,78 @@ describe("team_event transactional callsites", () => {
     await executeTeamSpawn(deps, { name: "alice", agent: "build", prompt: "private", worktree: false, claim_task: taskId }, "lead")
     const rows = deps.db.query("SELECT payload FROM team_event WHERE kind = 'task.claimed'").all() as Array<{ payload: string }>
     expect(rows).toHaveLength(1)
-    expect(JSON.parse(rows[0]!.payload)).toEqual({ task_id: taskId, assignee: "alice" })
+    expect(JSON.parse(rows[0]?.payload ?? "null")).toEqual({ task_id: taskId, assignee: "alice" })
+  })
+
+  test("team_spawn rollback releases the exact claim with privacy-safe causality", async () => {
+    await executeTeamCreate(deps, { name: "spawn-release" }, "lead")
+    await executeTeamTasksAdd(deps, { tasks: [{ content: "private task", priority: "high" }] }, "lead")
+    const taskId = (deps.db.query("SELECT id FROM team_task").get() as { id: string }).id
+    deps.client.session.create = async () => { throw new Error("private session error") }
+
+    await expect(executeTeamSpawn(deps, {
+      name: "alice", agent: "build", prompt: "private prompt", worktree: false, claim_task: taskId,
+    }, "lead")).rejects.toThrow("private session error")
+
+    const rows = deps.db.query(
+      "SELECT id, kind, payload, cause_event_id FROM team_event WHERE kind IN ('task.claimed', 'task.released') ORDER BY time_created, id",
+    ).all() as EventRow[]
+    expect(rows).toHaveLength(2)
+    expect(rows[1]).toMatchObject({ kind: "task.released", cause_event_id: rows[0]?.id })
+    expect(JSON.parse(rows[1]?.payload ?? "null")).toEqual({ task_id: taskId, reason: "spawn_rollback" })
+    expect(rows.map(row => row.payload).join("\n")).not.toContain("private")
+  })
+
+  test("task release event insertion failure rolls back the conditional spawn claim release", async () => {
+    await executeTeamCreate(deps, { name: "release-rollback" }, "lead")
+    await executeTeamTasksAdd(deps, { tasks: [{ content: "task", priority: "high" }] }, "lead")
+    const taskId = (deps.db.query("SELECT id FROM team_task").get() as { id: string }).id
+    deps.client.session.create = async () => { throw new Error("session failed") }
+    deps.db.exec("CREATE TRIGGER reject_release_event BEFORE INSERT ON team_event WHEN NEW.kind = 'task.released' BEGIN SELECT RAISE(ABORT, 'release event rejected'); END")
+
+    await expect(executeTeamSpawn(deps, {
+      name: "alice", agent: "build", prompt: "prompt", worktree: false, claim_task: taskId,
+    }, "lead")).rejects.toThrow("release event rejected")
+
+    expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = ?").get(taskId))
+      .toEqual({ status: "in_progress", assignee: "alice" })
+    expect(deps.db.query("SELECT id FROM team_event WHERE kind = 'task.released'").all()).toEqual([])
+  })
+
+  test("team_spawn releases its exact claim when session creation returns no session id", async () => {
+    await executeTeamCreate(deps, { name: "missing-session" }, "lead")
+    await executeTeamTasksAdd(deps, { tasks: [{ content: "task", priority: "high" }] }, "lead")
+    const taskId = (deps.db.query("SELECT id FROM team_task").get() as { id: string }).id
+    deps.client.session.create = async () => ({})
+
+    await expect(executeTeamSpawn(deps, {
+      name: "alice", agent: "build", prompt: "prompt", worktree: false, claim_task: taskId,
+    }, "lead")).rejects.toThrow("Failed to create teammate session")
+
+    const events = deps.db.query(
+      "SELECT id, kind, cause_event_id FROM team_event WHERE kind IN ('task.claimed', 'task.released') ORDER BY time_created, id",
+    ).all() as EventRow[]
+    expect(events.map(event => event.kind)).toEqual(["task.claimed", "task.released"])
+    expect(events[1]?.cause_event_id).toBe(events[0]?.id)
+    expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = ?").get(taskId))
+      .toEqual({ status: "pending", assignee: null })
+  })
+
+  test("merge terminal events reference their exact merge.started event", async () => {
+    await executeTeamCreate(deps, { name: "merge-causes" }, "lead")
+    const teamId = (deps.db.query("SELECT id FROM team WHERE name = 'merge-causes'").get() as { id: string }).id
+    await executeTeamSpawn(deps, { name: "alice", agent: "build", prompt: "private", worktree: false }, "lead")
+    deps.db.run("UPDATE team_member SET status = 'shutdown', worktree_branch = 'branch-a' WHERE name = 'alice'")
+    await executeTeamMerge(deps, { member: "alice" }, "lead", async () => ({ ok: false, error: "private" }), async () => true, async () => [])
+    deps.db.run("UPDATE team_member SET worktree_branch = 'branch-b' WHERE name = 'alice'")
+    await executeTeamMerge(deps, { member: "alice" }, "lead", async () => ({ ok: true }), async () => false, async () => [])
+
+    const events = deps.db.query(
+      "SELECT id, kind, cause_event_id FROM team_event WHERE team_id = ? AND kind LIKE 'merge.%' ORDER BY time_created, id",
+    ).all(teamId) as EventRow[]
+    expect(events.map(event => event.kind)).toEqual(["merge.started", "merge.failed", "merge.started", "merge.completed"])
+    expect(events[1]?.cause_event_id).toBe(events[0]?.id)
+    expect(events[3]?.cause_event_id).toBe(events[2]?.id)
   })
 
   test("conditional claim update emits exactly one event under competition", async () => {

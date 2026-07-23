@@ -373,6 +373,31 @@ describe("team_merge", () => {
     expect(mergeCalls).toBe(1)
   })
 
+  test("does not reapply an external merge when merge.completed event insertion fails", async () => {
+    await executeTeamCreate(deps, { name: "event-fault" }, lead)
+    await executeTeamSpawn(deps, { name: "alice", agent: "build", prompt: "task" }, lead)
+    await executeTeamShutdown(deps, { member: "alice" }, lead, undefined, noopPreserve)
+    deps.db.exec("CREATE TRIGGER reject_merge_completed BEFORE INSERT ON team_event WHEN NEW.kind = 'merge.completed' BEGIN SELECT RAISE(ABORT, 'merge completion event rejected'); END")
+    let mergeCalls = 0
+    const mergeOnce: MergeBranchFn = async () => {
+      mergeCalls++
+      return { ok: true }
+    }
+
+    await expect(executeTeamMerge(deps, { member: "alice" }, lead, mergeOnce, noopDelete, noopOverlap))
+      .rejects.toThrow("merge completion event rejected")
+    expect(deps.db.query("SELECT merge_state FROM team_member WHERE name = 'alice'").get()).toEqual({ merge_state: "merging" })
+
+    const retry = await executeTeamMerge(deps, { member: "alice" }, lead, mergeOnce, noopDelete, noopOverlap)
+    expect(retry).toContain("already started")
+    expect(mergeCalls).toBe(1)
+
+    const cleanup = await executeTeamCleanup(deps, { force: false }, lead, undefined, mergeOnce, noopDelete, true, noopOverlap)
+    expect(cleanup).toContain("Inspect git diff")
+    expect(deps.db.query("SELECT status FROM team WHERE name = 'event-fault'").get()).toEqual({ status: "active" })
+    expect(mergeCalls).toBe(1)
+  })
+
   test("rejects merge for active (non-shutdown) member", async () => {
     await executeTeamCreate(deps, { name: "active-merge" }, lead)
     await executeTeamSpawn(deps, { name: "alice", agent: "build", prompt: "task" }, lead)

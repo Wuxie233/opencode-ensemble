@@ -84,8 +84,8 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   ])
 }
 
-function claimSpawnTask(deps: ToolDeps, teamId: string, taskId: string, assignee: string): void {
-  deps.db.transaction(() => {
+function claimSpawnTask(deps: ToolDeps, teamId: string, taskId: string, assignee: string): string {
+  return deps.db.transaction(() => {
     const task = deps.db.query("SELECT status, assignee FROM team_task WHERE id = ? AND team_id = ?")
       .get(taskId, teamId) as { status: string; assignee: string | null } | null
     if (!task) throw new Error(`Task "${taskId}" not found`)
@@ -101,17 +101,25 @@ function claimSpawnTask(deps: ToolDeps, teamId: string, taskId: string, assignee
     if (result.changes === 0) {
       throw new Error(`Task "${taskId}" is already claimed (race condition)`)
     }
-    appendTeamEvent(deps.db, {
+    const claimEventId = appendTeamEvent(deps.db, {
       teamId,
       kind: "task.claimed",
       payload: { task_id: taskId, assignee },
     })
     recomputeCurrentPhase(deps.db, teamId, now)
+    return claimEventId
   })()
 }
 
-function rollbackSpawnTask(deps: ToolDeps, teamId: string, taskId: string | undefined, assignee: string): void {
+function rollbackSpawnTask(
+  deps: ToolDeps,
+  teamId: string,
+  taskId: string | undefined,
+  assignee: string,
+  claimEventId: string | undefined,
+): void {
   if (!taskId) return
+  if (!claimEventId) throw new Error(`Task "${taskId}" rollback is missing its claim event`)
   deps.db.transaction(() => {
     const now = Date.now()
     const result = deps.db.run(
@@ -119,6 +127,12 @@ function rollbackSpawnTask(deps: ToolDeps, teamId: string, taskId: string | unde
       [now, taskId, teamId, assignee],
     )
     if (result.changes === 1) {
+      appendTeamEvent(deps.db, {
+        teamId,
+        kind: "task.released",
+        payload: { task_id: taskId, reason: "spawn_rollback" },
+        causeEventId: claimEventId,
+      })
       recomputeCurrentPhase(deps.db, teamId, now)
       return
     }
@@ -182,9 +196,9 @@ async function executeTeamSpawnLocked(
     ? await buildResumeContext(deps, teamInfo.teamId, args.resume_from)
     : undefined
 
-  if (args.claim_task) {
-    claimSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name)
-  }
+  const claimEventId = args.claim_task
+    ? claimSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name)
+    : undefined
 
   const isReadOnly = args.agent === "plan" || args.agent === "explore"
   const useWorktree = args.worktree !== false && !isReadOnly && !isWorktreeDirectory(deps.directory)
@@ -298,7 +312,7 @@ async function executeTeamSpawnLocked(
     if (worktreeDir) {
       try { await deps.client.worktree.remove({ worktreeRemoveInput: { directory: worktreeDir } }) } catch { /* best effort */ }
     }
-    rollbackSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name)
+    rollbackSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name, claimEventId)
     throw new Error(`Failed to create session for teammate "${args.name}": ${err instanceof Error ? err.message : String(err)}`)
   }
 
@@ -309,7 +323,7 @@ async function executeTeamSpawnLocked(
     if (worktreeDir) {
       try { await deps.client.worktree.remove({ worktreeRemoveInput: { directory: worktreeDir } }) } catch { /* best effort */ }
     }
-    rollbackSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name)
+    rollbackSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name, claimEventId)
     throw new Error("Failed to create teammate session")
   }
 
@@ -366,7 +380,7 @@ async function executeTeamSpawnLocked(
       throw new Error(`${registrationError}; recovery alert also failed: ${message}. Preserved branch: ${safeBranch ?? "none"}. Session ${childSessionId} and its resources were left intact; claimed task ${args.claim_task ?? "none"} was not rolled back.`)
     }
     try {
-      rollbackSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name)
+      rollbackSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name, claimEventId)
     } catch (rollbackError) {
       const message = rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
       throw new Error(`${registrationError}; task rollback also failed: ${message}`)
@@ -608,7 +622,7 @@ async function executeTeamSpawnLocked(
         }
         try {
           deps.db.transaction(() => {
-            rollbackSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name)
+            rollbackSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name, claimEventId)
             const deleted = deps.db.run(
               "DELETE FROM team_member WHERE team_id = ? AND session_id = ? AND status = 'shutdown_requested'",
               [teamInfo.teamId, childSessionId],
