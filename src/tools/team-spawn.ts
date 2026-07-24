@@ -428,9 +428,14 @@ async function executeTeamSpawnLocked(
     context.push(
       "",
       "IMPORTANT: You are in PLAN MODE.",
-      "Read and explore the codebase, then send your implementation plan to the lead via team_message.",
+      "Read and explore the codebase, then send your implementation plan to the lead via team_message using this exact format:",
+      "<plan-submission>",
+      "<summary>One-line implementation plan summary</summary>",
+      "<details>Ordered implementation and verification steps</details>",
+      "</plan-submission>",
       "Do NOT write or modify any files until the lead approves your plan.",
       "Wait for the lead's approval message before proceeding with implementation.",
+      "If the lead rejects your plan, submit the revision using the same format and wait for a new approval.",
     )
   }
 

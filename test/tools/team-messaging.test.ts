@@ -418,4 +418,109 @@ describe("team_message — plan approval", () => {
 
     expect(observed).toEqual({ plan_approval: "approved", messages: 1, sessionID: "sess-alice" })
   })
+
+  test("atomically reopens a reported rejected plan and a later approval wakes the same session", async () => {
+    deps.db.run(
+      "UPDATE team_member SET plan_approval = 'rejected', reported_to_lead = 1 WHERE team_id = ? AND name = ?",
+      ["t1", "alice"],
+    )
+    const revision = [
+      "<plan-submission>",
+      "<summary>Add rollback coverage</summary>",
+      "<details>Write the failure-path test before changing the transaction.</details>",
+      "</plan-submission>",
+    ].join("\n")
+
+    await executeTeamMessage(deps, { to: "lead", text: revision }, "sess-alice")
+
+    expect(deps.db.query(
+      "SELECT plan_approval, reported_to_lead, status, execution_status FROM team_member WHERE team_id = ? AND name = ?",
+    ).get("t1", "alice")).toEqual({
+      plan_approval: "pending",
+      reported_to_lead: 0,
+      status: "ready",
+      execution_status: "idle",
+    })
+    expect(deps.db.query("SELECT content FROM team_message WHERE team_id = ? AND from_name = ?").all("t1", "alice"))
+      .toEqual([{ content: revision }])
+
+    deps.client.calls.length = 0
+    await executeTeamMessage(deps, { to: "alice", text: "Proceed", approve: true }, "lead-sess")
+
+    expect(deps.db.query("SELECT plan_approval FROM team_member WHERE team_id = ? AND name = ?").get("t1", "alice"))
+      .toEqual({ plan_approval: "approved" })
+    const approvalWake = deps.client.calls.find(call => call.method === "session.promptAsync")
+    expect((approvalWake?.args[0] as { sessionID: string }).sessionID).toBe("sess-alice")
+  })
+
+  test("keeps identical pending plan submissions idempotent and wakes the lead once", async () => {
+    deps.db.run("UPDATE team_member SET plan_approval = 'pending' WHERE team_id = ? AND name = ?", ["t1", "alice"])
+    const plan = "<plan-submission><summary>Initial plan</summary><details>Test, implement, verify.</details></plan-submission>"
+
+    const results = await Promise.allSettled([
+      executeTeamMessage(deps, { to: "lead", text: plan }, "sess-alice"),
+      executeTeamMessage(deps, { to: "lead", text: plan }, "sess-alice"),
+    ])
+
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(2)
+    expect(deps.db.query("SELECT plan_approval FROM team_member WHERE team_id = ? AND name = ?").get("t1", "alice"))
+      .toEqual({ plan_approval: "pending" })
+    expect(deps.db.query("SELECT id FROM team_message WHERE team_id = ? AND from_name = ?").all("t1", "alice"))
+      .toHaveLength(1)
+    expect(deps.client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(1)
+  })
+
+  test("deduplicates concurrent identical rejected plan revisions and wakes the lead once", async () => {
+    deps.db.run("UPDATE team_member SET plan_approval = 'rejected' WHERE team_id = ? AND name = ?", ["t1", "alice"])
+    const revision = "<plan-submission><summary>Revised plan</summary><details>Add rollback coverage.</details></plan-submission>"
+
+    const results = await Promise.allSettled([
+      executeTeamMessage(deps, { to: "lead", text: revision }, "sess-alice"),
+      executeTeamMessage(deps, { to: "lead", text: revision }, "sess-alice"),
+    ])
+
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(2)
+    expect(deps.db.query("SELECT plan_approval, reported_to_lead FROM team_member WHERE team_id = ? AND name = ?").get("t1", "alice"))
+      .toEqual({ plan_approval: "pending", reported_to_lead: 0 })
+    expect(deps.db.query("SELECT id FROM team_message WHERE team_id = ? AND from_name = ?").all("t1", "alice"))
+      .toHaveLength(1)
+    expect(deps.client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(1)
+  })
+
+  test("does not reopen rejected plans for ordinary, structured, or malformed messages", async () => {
+    const messages = [
+      "progress: inspecting the transaction",
+      "<task-result><kind>progress</kind><status>in_progress</status><summary>working</summary><details>inspecting</details></task-result>",
+      "<task-result><kind>result</kind><status>completed</status><summary>done</summary><details>done</details></task-result>",
+      "<task-result><kind>blocker</kind><status>pending</status><summary>blocked</summary><details>need input</details></task-result>",
+      "<plan-submission><summary>missing details</summary></plan-submission>",
+      "<plan-submission><summary> </summary><details>nonempty</details></plan-submission>",
+      "prefix <plan-submission><summary>Plan</summary><details>Steps</details></plan-submission>",
+      "<plan-submission><summary>Plan</summary><details>Steps</details></plan-submission> suffix",
+    ]
+
+    for (const text of messages) {
+      deps.db.run("UPDATE team_member SET plan_approval = 'rejected', reported_to_lead = 1 WHERE team_id = ? AND name = ?", ["t1", "alice"])
+      await executeTeamMessage(deps, { to: "lead", text }, "sess-alice")
+      expect(deps.db.query("SELECT plan_approval, reported_to_lead FROM team_member WHERE team_id = ? AND name = ?").get("t1", "alice"))
+        .toEqual({ plan_approval: "rejected", reported_to_lead: 1 })
+    }
+  })
+
+  test("rolls back rejected-to-pending when the revised plan message insert fails", async () => {
+    deps.db.run(
+      "UPDATE team_member SET plan_approval = 'rejected', reported_to_lead = 1 WHERE team_id = ? AND name = ?",
+      ["t1", "alice"],
+    )
+    deps.db.exec("CREATE TRIGGER fail_revised_plan_message BEFORE INSERT ON team_message BEGIN SELECT RAISE(ABORT, 'message insert failed'); END")
+    const revision = "<plan-submission><summary>Revised plan</summary><details>Add the requested test.</details></plan-submission>"
+
+    await expect(executeTeamMessage(deps, { to: "lead", text: revision }, "sess-alice"))
+      .rejects.toThrow("message insert failed")
+
+    expect(deps.db.query("SELECT plan_approval, reported_to_lead FROM team_member WHERE team_id = ? AND name = ?").get("t1", "alice"))
+      .toEqual({ plan_approval: "rejected", reported_to_lead: 1 })
+    expect(deps.db.query("SELECT id FROM team_message WHERE team_id = ?").all("t1")).toHaveLength(0)
+    expect(deps.client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(0)
+  })
 })

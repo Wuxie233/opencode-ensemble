@@ -1406,6 +1406,8 @@ describe("team_spawn — plan approval", () => {
     expect(text).toContain("PLAN MODE")
     expect(text).toContain("Do NOT write or modify any files")
     expect(text).toContain("approval")
+    expect(text).toContain("<plan-submission>")
+    expect(text).toContain("If the lead rejects your plan, submit the revision using the same format")
   })
 
   test("context message does NOT include PLAN MODE when plan_approval is false/absent", async () => {

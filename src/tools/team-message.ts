@@ -6,6 +6,13 @@ import { log } from "../log"
 import { immediateTransaction } from "../db"
 import { appendTeamEvent } from "../team-event"
 
+function isPlanSubmission(content: string): boolean {
+  const match = content.match(
+    /^\s*<plan-submission>\s*<summary>([\s\S]*?)<\/summary>\s*<details>([\s\S]*?)<\/details>\s*<\/plan-submission>\s*$/,
+  )
+  return Boolean(match?.[1]?.trim() && match[2]?.trim())
+}
+
 /**
  * Execute the team_message tool. Sends a direct message to a teammate or lead.
  * Optionally approves or rejects a teammate's plan (lead only).
@@ -94,6 +101,55 @@ export async function executeTeamMessage(
     })
     msgId = decision.messageId
     shouldDeliver = decision.shouldDeliver
+  } else if (args.to === "lead" && teamInfo.role === "member" && isPlanSubmission(messageText)) {
+    const submission = immediateTransaction(deps.db, () => {
+      const member = deps.db.query(
+        "SELECT plan_approval FROM team_member WHERE team_id = ? AND name = ?",
+      ).get(teamInfo.teamId, senderName) as { plan_approval: string } | null
+
+      if (member?.plan_approval === "rejected") {
+        const updated = deps.db.run(
+          `UPDATE team_member
+           SET plan_approval = 'pending', reported_to_lead = 0, time_updated = ?
+           WHERE team_id = ? AND name = ? AND plan_approval = 'rejected'`,
+          [Date.now(), teamInfo.teamId, senderName],
+        )
+        if (updated.changes !== 1) {
+          throw new Error(`Plan submission race for teammate "${senderName}".`)
+        }
+        return {
+          messageId: sendMessage(deps.db, {
+            teamId: teamInfo.teamId,
+            from: senderName,
+            to: args.to,
+            content: messageText,
+          }),
+          shouldDeliver: true,
+        }
+      }
+
+      if (member?.plan_approval === "pending") {
+        const existing = deps.db.query(
+          `SELECT id FROM team_message
+           WHERE team_id = ? AND from_name = ? AND to_name = 'lead' AND content = ?
+           ORDER BY time_created DESC, id DESC
+           LIMIT 1`,
+        ).get(teamInfo.teamId, senderName, messageText) as { id: string } | null
+        if (existing) return { messageId: existing.id, shouldDeliver: false }
+      }
+
+      return {
+        messageId: sendMessage(deps.db, {
+          teamId: teamInfo.teamId,
+          from: senderName,
+          to: args.to,
+          content: messageText,
+        }),
+        shouldDeliver: true,
+      }
+    })
+    msgId = submission.messageId
+    shouldDeliver = submission.shouldDeliver
   } else {
     msgId = sendMessage(deps.db, {
       teamId: teamInfo.teamId,
