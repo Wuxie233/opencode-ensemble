@@ -149,15 +149,18 @@ an unexpected failure. Only transition a member to `shutdown` after
 `session.abort()` resolves; preservation or abort failures must leave it
 `shutdown_requested`, persist guidance for the Lead, and remain retryable.
 
-OpenCode owns ordinary provider retry policy. Keep attempts one through five
-silent and preserve the member/task as running. On the sixth distinct
-consecutive retry, atomically claim termination, preserve the branch, await
+OpenCode owns ordinary provider retry policy. Without an alternate model in
+`modelFallbackByAgent`, keep attempts one through five silent and preserve the
+member/task as running. With an alternate configured, the fallback threshold
+may safely stop the current member and give the Lead an explicit
+`resume_from` + model handoff. On the configured exhaustion attempt (six by
+default), atomically claim termination, preserve the branch, await
 `session.abort()`, then mark the member `error`/`failed`, release only its
 in-progress tasks, and alert the Lead to create a fresh session with
 `team_spawn(resume_from)`. Never release task ownership or recommend a
 replacement before abort succeeds. Preservation or abort failure must retain
 the member/task and the durable sixth-retry termination claim; later retry
-events retry termination without incrementing past six. OpenCode dispatches
+events retry termination without incrementing past the configured limit. OpenCode dispatches
 plugin event hooks fire-and-forget, so awaiting abort inside the hook is local
 coordination, not provider-loop backpressure. Keep one process-shared
 termination in flight per Session and use the durable claim plus a terminal

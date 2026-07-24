@@ -1166,23 +1166,16 @@ describe("team_spawn", () => {
     expect(result).not.toContain("branch:")
   })
 
-  test("falls back to shared directory if worktree creation fails", async () => {
+  test("cancels a writer spawn if worktree creation fails", async () => {
     deps.client.worktree.create = async () => { throw new Error("worktree failed") }
 
-    const result = await executeTeamSpawn(deps, {
+    await expect(executeTeamSpawn(deps, {
       name: "alice",
       agent: "build",
       prompt: "Fix the tests",
-    }, "lead-sess")
+    }, "lead-sess")).rejects.toThrow("Failed to create isolated worktree")
 
-    // Should still succeed — just without worktree
-    expect(result).toContain("alice")
-    expect(result).toContain("spawned")
-
-    // DB should have null worktree columns
-    const row = deps.db.query("SELECT worktree_dir, worktree_branch FROM team_member WHERE name = ?").get("alice") as Record<string, string | null>
-    expect(row.worktree_dir).toBeNull()
-    expect(row.worktree_branch).toBeNull()
+    expect(deps.db.query("SELECT name FROM team_member WHERE name = ?").get("alice")).toBeNull()
 
     // Toast warning should have been fired
     const toasts = deps.client.calls.filter(c => c.method === "tui.showToast")
@@ -1672,20 +1665,16 @@ describe("team_spawn — timeout on session.create / worktree.create", () => {
     }, "lead-sess")).rejects.toThrow(/timed out/i)
   }, 10000)
 
-  test("falls back to shared directory if worktree.create hangs beyond SPAWN_TIMEOUT_MS", async () => {
+  test("cancels the writer spawn if worktree.create times out", async () => {
     // Mock worktree.create to never resolve
     deps.client.worktree.create = () => new Promise(() => { /* never resolves */ })
 
-    const result = await executeTeamSpawn(deps, {
+    await expect(executeTeamSpawn(deps, {
       name: "bob",
       agent: "build",
       prompt: "Fix tests",
       worktree: true,
-    }, "lead-sess")
-
-    // Should succeed with fallback — no worktree branch in output
-    expect(result).toContain("bob")
-    expect(result).toContain("spawned")
-    expect(result).not.toContain("branch:")
+    }, "lead-sess")).rejects.toThrow(/worktree\.create.*timed out/i)
+    expect(deps.db.query("SELECT name FROM team_member WHERE name = ?").get("bob")).toBeNull()
   }, 10000)
 })

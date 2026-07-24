@@ -27,6 +27,17 @@ export interface EnsembleConfig {
   modelPool?: string[]
   /** Map agent type to specific model e.g. {"build": "anthropic/claude-opus-4-6"} */
   modelsByAgent?: Record<string, string>
+  /**
+   * Ordered fallback models by agent type for provider-retry recovery.
+   * At the fallback threshold, Ensemble safely stops the current teammate and
+   * gives the Lead an explicit resume_from + model handoff. Empty chains leave
+   * the normal retry sequence unchanged.
+   */
+  modelFallbackByAgent?: Record<string, string[]>
+  /** First consecutive retry attempt that may trigger model fallback (default: 4) */
+  retryFallbackStartAttempt?: number
+  /** Consecutive retry attempt that exhausts the sequence and stops the teammate (default: 6) */
+  retryExhaustionAttempt?: number
   /** How to assign models: "default" | "rotate" | "random" (default: "default") */
   modelAssignment?: "default" | "rotate" | "random"
   /** Lead asks user about model preferences before spawning (default: false) */
@@ -47,6 +58,9 @@ export const DEFAULT_CONFIG: Required<EnsembleConfig> = {
   defaultModel: "",
   modelPool: [],
   modelsByAgent: {},
+  modelFallbackByAgent: {},
+  retryFallbackStartAttempt: 4,
+  retryExhaustionAttempt: 6,
   modelAssignment: "default",
   promptForModels: false,
 }
@@ -72,6 +86,17 @@ function readConfigFile(filePath: string): Partial<EnsembleConfig> {
     if (typeof raw.modelsByAgent === "object" && raw.modelsByAgent !== null && !Array.isArray(raw.modelsByAgent)) {
       const valid = Object.entries(raw.modelsByAgent as Record<string, unknown>).every(([, v]) => typeof v === "string")
       if (valid) result.modelsByAgent = raw.modelsByAgent as Record<string, string>
+    }
+    if (typeof raw.modelFallbackByAgent === "object" && raw.modelFallbackByAgent !== null && !Array.isArray(raw.modelFallbackByAgent)) {
+      const entries = Object.entries(raw.modelFallbackByAgent as Record<string, unknown>)
+      const valid = entries.every(([, v]) => Array.isArray(v) && v.every((item) => typeof item === "string"))
+      if (valid) result.modelFallbackByAgent = raw.modelFallbackByAgent as Record<string, string[]>
+    }
+    if (typeof raw.retryFallbackStartAttempt === "number" && raw.retryFallbackStartAttempt > 0) {
+      result.retryFallbackStartAttempt = Math.floor(raw.retryFallbackStartAttempt)
+    }
+    if (typeof raw.retryExhaustionAttempt === "number" && raw.retryExhaustionAttempt > 0) {
+      result.retryExhaustionAttempt = Math.floor(raw.retryExhaustionAttempt)
     }
     if (typeof raw.modelAssignment === "string" && ["default", "rotate", "random"].includes(raw.modelAssignment)) result.modelAssignment = raw.modelAssignment as "default" | "rotate" | "random"
     if (typeof raw.promptForModels === "boolean") result.promptForModels = raw.promptForModels
@@ -106,5 +131,27 @@ export function loadConfig(projectDir: string): Required<EnsembleConfig> {
   const stall = process.env.STALL_THRESHOLD_MS
   if (stall !== undefined) merged.stallThresholdMs = stall === "0" ? 0 : (parseInt(stall, 10) || merged.stallThresholdMs)
 
+  if (merged.retryFallbackStartAttempt > merged.retryExhaustionAttempt) {
+    merged.retryFallbackStartAttempt = merged.retryExhaustionAttempt
+  }
+
   return merged
+}
+
+/**
+ * Resolve the next fallback model for an agent, skipping the current model and
+ * any models already tried in the ordered fallback chain.
+ */
+export function resolveFallbackModel(
+  agentType: string,
+  currentModel: string | null | undefined,
+  config: Required<EnsembleConfig>,
+  alreadyTried: readonly string[] = [],
+): string | undefined {
+  const chain = config.modelFallbackByAgent[agentType] ?? []
+  const tried = new Set(
+    [currentModel, ...alreadyTried]
+      .filter((value): value is string => typeof value === "string" && value.length > 0),
+  )
+  return chain.find((model) => model.length > 0 && !tried.has(model))
 }

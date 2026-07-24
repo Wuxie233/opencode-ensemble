@@ -147,6 +147,7 @@ export function buildLeadSystemPrompt(db: Database, teamId: string, config?: Req
     "Spawn only tasks in the ready frontier: pending tasks whose dependencies are complete.",
     "Independent read-only worktree:false spawns may run concurrently when the tool caller supports parallel calls.",
     "Create writer worktrees one at a time and wait for each team_spawn result before creating the next; created writers may execute concurrently.",
+    "For every writer, keep the default worktree:true. Pass worktree:false only for intentionally read-only work; a requested writer worktree failure cancels the spawn instead of falling back to the shared directory.",
     "Read-only agents (explore, plan) automatically skip worktree creation. For other read-only agents, pass worktree: false.",
     "",
     "Teammates work asynchronously and message you when done.",

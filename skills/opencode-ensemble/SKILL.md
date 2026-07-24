@@ -32,7 +32,7 @@ Cost, token use, and teammate count are not optimization constraints. Do not imp
 | Builder | `build` | `true` | One independent implementation slice |
 | Reviewer | `explore` | `false` | One named high-risk boundary after merge |
 
-Use `plan_approval: true` only for risky or costly-to-reverse writer work. Read-only teammates never need worktrees. Writers need exclusive path or vertical-slice ownership. Use Planner, QA, and Reviewer roles when they remove a real dependency or observe a named risk; do not make them ceremonial stages.
+Use `plan_approval: true` only for risky or costly-to-reverse writer work. Read-only teammates never need worktrees. Every writer keeps the default `worktree: true`; use `worktree: false` only for intentionally read-only work. Writer worktree creation failure cancels the spawn instead of silently sharing the Lead directory. Writers need exclusive path or vertical-slice ownership. Use Planner, QA, and Reviewer roles when they remove a real dependency or observe a named risk; do not make them ceremonial stages.
 
 ## Lead Workflow
 
@@ -40,7 +40,7 @@ Use `plan_approval: true` only for risky or costly-to-reverse writer work. Read-
 2. Build the coordination graph in `team_tasks_add`. One batch may assign local `key` values and use them in `depends_on`, including forward references. Use existing same-Team task IDs for later additions. Add `phase` when the workflow moves to a new phase.
 3. Maximize useful concurrency across the ready frontier: pending tasks whose dependencies are complete. Dependency-waiting tasks are normal queued work, not blockers. Independent read-only `worktree: false` spawns may be issued concurrently; create writer worktrees one at a time, while created writers may execute concurrently.
 4. Delegate broad searches, raw logs, trial-and-error, and detailed evidence so the Lead receives concise decision-ready summaries.
-5. Use `worktree: false` for read-only teammates and exclusive write ownership for builders.
+5. Use `worktree: false` only for read-only teammates. Keep `worktree: true` and exclusive write ownership for every writer.
 6. Use `plan_approval: true` for risky implementation work.
 7. Wait for messages instead of polling status. Use `team_status` only for a requested snapshot or a concrete stall/recovery check.
 8. Ask for structured `progress` and `blocker` messages tied to `task_id`. Claimed tasks report terminal results atomically through `team_tasks_complete`; use one `team_message` result only for unclaimed work. Keep raw evidence in the teammate session; use `team_results` when full detail is consequential.
@@ -62,6 +62,7 @@ Use `plan_approval: true` only for risky or costly-to-reverse writer work. Read-
 - Do not invent task IDs. `team_tasks_add` generates IDs; use the IDs returned by earlier calls when setting `depends_on` or `claim_task`.
 - Within one `team_tasks_add` call, prefer readable batch-local `key` values for a DAG. Dependencies must resolve to a local key or an existing task in the same Team; missing, cross-Team, self, and cyclic dependencies are invalid.
 - Keep teammate prompts short. The plugin already injects team role, allowed tools, worktree context, and the required task-result format.
+- Do not pass `worktree: false` to a writer. Fix a failed isolated spawn instead of allowing concurrent writes in the Lead directory.
 - Do not give teammates vague prompts like "fix the bug" or "work on tests".
 - Do not ask teammates to use lead-only tools such as `team_spawn`, `team_shutdown`, `team_merge`, `team_cleanup`, or `team_view`.
 - Do not tell teammates to report only in plain text. They must use `team_message`.

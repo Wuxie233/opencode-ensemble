@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { RetryTracker } from "../src/hooks"
+import type { RetryExhaustion } from "../src/hooks"
+import type { ToolDeps } from "../src/types"
 import { breakRetryLoop, handleRetryStatus } from "../src/retry-breaker"
 import { TerminalLivenessGuard } from "../src/terminal-liveness"
 import { insertMember, insertTeam, setupDeps } from "./helpers"
@@ -19,7 +21,7 @@ function requestFor(deps: ReturnType<typeof setupDeps>) {
   for (let attempt = 1; attempt <= 6; attempt++) {
     request = tracker.observeStatus(deps.db, deps.registry, "sess-alice", "retry", "provider overloaded", attempt) ?? request
   }
-  if (!request) throw new Error("expected retry exhaustion")
+  if (!request || request.kind !== "exhaustion") throw new Error("expected retry exhaustion")
   return request
 }
 
@@ -33,6 +35,56 @@ function setupRetryingMember() {
 }
 
 describe("retry breaker", () => {
+  test("keeps retrying the same model through attempt five when no alternate fallback exists", async () => {
+    const deps = setupRetryingMember()
+    deps.config.modelFallbackByAgent = { build: ["wuxie-openai/gpt-5.6-sol"] }
+    deps.db.run("UPDATE team_member SET model = 'wuxie-openai/gpt-5.6-sol' WHERE name = 'alice'")
+    const tracker = new RetryTracker({ fallbackEnabled: true, fallbackStartAttempt: 4, exhaustionAttempt: 6 })
+    const terminated: Array<{ attempts: number; fallbackModel?: string }> = []
+    const terminate = async (_deps: ToolDeps, request: RetryExhaustion) => {
+      terminated.push(request)
+      return true
+    }
+
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      expect(await handleRetryStatus(deps, tracker, "sess-alice", "retry", "provider overloaded", attempt, terminate)).toBeUndefined()
+    }
+    const result = await handleRetryStatus(deps, tracker, "sess-alice", "retry", "provider overloaded", 6, terminate)
+
+    expect(result).toMatchObject({ kind: "exhaustion", attempts: 6 })
+    expect(terminated).toHaveLength(1)
+    expect(terminated[0]).toMatchObject({ kind: "exhaustion", attempts: 6 })
+  })
+
+  test("hands a configured alternate model to the Lead at the fallback threshold", async () => {
+    const deps = setupRetryingMember()
+    deps.config.modelFallbackByAgent = { build: ["wuxie-openai/gpt-5.6-sol", "provider/backup"] }
+    deps.db.run("UPDATE team_member SET model = 'wuxie-openai/gpt-5.6-sol' WHERE name = 'alice'")
+    const tracker = new RetryTracker({ fallbackEnabled: true, fallbackStartAttempt: 4, exhaustionAttempt: 6 })
+    let captured: RetryExhaustion | undefined
+    const terminate = async (_deps: ToolDeps, request: RetryExhaustion) => {
+      captured = request
+      return true
+    }
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      await handleRetryStatus(deps, tracker, "sess-alice", "retry", "provider overloaded", attempt, terminate)
+    }
+    const result = await handleRetryStatus(deps, tracker, "sess-alice", "retry", "provider overloaded", 4, terminate)
+
+    expect(result).toMatchObject({ kind: "exhaustion", attempts: 4, fallbackModel: "provider/backup" })
+    expect(captured).toEqual({
+      kind: "exhaustion",
+      leadSessionId: "lead-sess",
+      memberName: "alice",
+      sessionId: "sess-alice",
+      teamId: "t1",
+      reason: "provider overloaded",
+      attempts: 4,
+      fallbackModel: "provider/backup",
+    })
+  })
+
   test("waits for the sixth-retry termination attempt before returning from status handling", async () => {
     const deps = setupRetryingMember()
     const tracker = new RetryTracker()
@@ -162,6 +214,7 @@ describe("retry breaker", () => {
     const tracker = new RetryTracker()
     const retry = tracker.observeStatus(deps.db, deps.registry, "sess-alice", "retry", "provider still unavailable", 7)
     expect(retry).toMatchObject({ attempts: 6, reason: "provider still unavailable" })
+    if (!retry || retry.kind !== "exhaustion") throw new Error("expected retry exhaustion")
     expect(await breakRetryLoop(deps, retry!, async () => true)).toBe(true)
     expect(deps.db.query("SELECT retry_count, retry_tripped FROM team_member WHERE name = 'alice'").get())
       .toEqual({ retry_count: 6, retry_tripped: 1 })

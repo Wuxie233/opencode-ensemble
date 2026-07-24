@@ -1,6 +1,7 @@
 import type { ToolDeps } from "./types"
-import type { RetryExhaustion } from "./hooks"
+import type { RetryExhaustion, RetryFallback } from "./hooks"
 import type { RetryTracker } from "./hooks"
+import { resolveFallbackModel } from "./config"
 import { getTeamResourceParts, preserveBranch, preservedBranchName, resolveWorktreeBranch } from "./tools/merge-helper"
 import type { PreserveBranchFn, ResolveWorktreeBranchFn } from "./tools/merge-helper"
 import { sendLeadAlert, sendMessage, wakeTeamLead } from "./messaging"
@@ -21,7 +22,7 @@ export async function handleRetryStatus(
 ): Promise<RetryExhaustion | undefined> {
   const existing = activeTerminations.get(sessionId)
   if (existing) return existing
-  const exhaustion = tracker.observeStatus(
+  const action = tracker.observeStatus(
     deps.db,
     deps.registry,
     sessionId,
@@ -29,6 +30,8 @@ export async function handleRetryStatus(
     message,
     attempt,
   )
+  if (!action) return
+  const exhaustion = action.kind === "fallback" ? claimFallbackHandoff(deps, action) : action
   if (!exhaustion) return
   const termination = terminate(deps, exhaustion).then(() => exhaustion)
   activeTerminations.set(sessionId, termination)
@@ -161,11 +164,14 @@ export async function breakRetryLoop(
       const taskNotice = taskRows.length > 0
         ? ` Released task${taskRows.length === 1 ? "" : "s"}: ${taskRows.map(task => task.id).join(", ")}.`
         : ""
+      const recoveryGuidance = request.fallbackModel
+        ? ` Start a fresh teammate with team_spawn, resume_from: "${request.memberName}", and model: "${request.fallbackModel}"; have it inspect actual state before continuing so completed tool side effects are not replayed.`
+        : ` Start a fresh teammate with team_spawn and resume_from: "${request.memberName}"; have it inspect actual state before continuing so completed tool side effects are not replayed.`
       sendMessage(deps.db, {
         teamId: request.teamId,
         from: "system",
         to: "lead",
-        content: `Teammate "${request.memberName}" (${request.sessionId}) was stopped after ${request.attempts} consecutive retries. Latest reason: ${request.reason}.${taskNotice} Start a fresh teammate with team_spawn and resume_from: "${request.memberName}"; have it inspect actual state before continuing so completed tool side effects are not replayed.`,
+        content: `Teammate "${request.memberName}" (${request.sessionId}) was stopped after ${request.attempts} consecutive retries. Latest reason: ${request.reason}.${taskNotice}${recoveryGuidance}`,
       })
       return true
     })()
@@ -193,6 +199,54 @@ export async function breakRetryLoop(
   )
   log(`retry-breaker:stopped member=${request.memberName} session=${request.sessionId} attempts=${request.attempts}`)
   return true
+}
+
+function claimFallbackHandoff(deps: ToolDeps, request: RetryFallback): RetryExhaustion | undefined {
+  const member = deps.db.query(
+    `SELECT agent, model, retry_fallback_models FROM team_member
+     WHERE team_id = ? AND name = ? AND session_id = ?
+       AND retry_tripped = 0 AND retry_fallback_used = 0
+       AND status IN ('ready', 'busy')`,
+  ).get(request.teamId, request.memberName, request.sessionId) as {
+    agent: string
+    model: string | null
+    retry_fallback_models: string | null
+  } | null
+  if (!member) return
+
+  const tried = parseFallbackModels(member.retry_fallback_models)
+  const fallbackModel = resolveFallbackModel(member.agent, member.model, deps.config, tried)
+  if (!fallbackModel) {
+    deps.db.run(
+      `UPDATE team_member SET retry_fallback_used = 1, time_updated = ?
+       WHERE team_id = ? AND name = ? AND session_id = ?
+         AND retry_tripped = 0 AND retry_fallback_used = 0`,
+      [Date.now(), request.teamId, request.memberName, request.sessionId],
+    )
+    return
+  }
+
+  const updated = deps.db.run(
+    `UPDATE team_member SET retry_fallback_used = 1, retry_fallback_models = ?,
+        retry_tripped = 1, time_updated = ?
+     WHERE team_id = ? AND name = ? AND session_id = ?
+       AND retry_tripped = 0 AND retry_fallback_used = 0
+       AND status IN ('ready', 'busy')`,
+    [JSON.stringify([...tried, fallbackModel]), Date.now(), request.teamId, request.memberName, request.sessionId],
+  )
+  if (updated.changes !== 1) return
+
+  return { ...request, kind: "exhaustion", fallbackModel }
+}
+
+function parseFallbackModels(value: string | null): string[] {
+  if (!value) return []
+  try {
+    const parsed: unknown = JSON.parse(value)
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : []
+  } catch {
+    return []
+  }
 }
 
 function restoreRetryOwnership(deps: ToolDeps, request: RetryExhaustion): void {

@@ -10,6 +10,7 @@ Use these gates to prevent common coordination failures.
 - Every Scout has a distinct evidence domain; there is no fixed Scout limit.
 - No two builders are expected to edit the same files.
 - Read-only work uses `agent: "explore"` and `worktree: false`.
+- Every writer uses `worktree: true`; a writer never falls back to the Lead directory after worktree creation failure.
 - Risky implementation work uses `plan_approval: true`.
 - Task dependencies are represented with `depends_on`.
 - Batch-local task `key` values are unique; all dependencies resolve within the current Team and form an acyclic graph.
@@ -21,6 +22,7 @@ Use these gates to prevent common coordination failures.
 - Call `team_create` before `team_spawn`.
 - Add shared tasks with `team_tasks_add` before assigning task IDs.
 - Spawn teammates one at a time and wait for each tool result.
+- Treat writer worktree creation failure as a blocked spawn. Do not retry it with `worktree: false` unless the task is reclassified as strictly read-only.
 - Keep teammate prompts focused and under one clear responsibility.
 - Tell teammates what to report, not just what to do.
 - Delegate raw logs, broad searches, and experiments; ask the teammate to send concise structured milestone summaries.

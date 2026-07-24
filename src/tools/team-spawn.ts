@@ -219,21 +219,23 @@ async function executeTeamSpawnLocked(
         deps.client.worktree.create({ worktreeCreateInput: { name: worktreeName } }),
         getSpawnTimeout(), `worktree.create for "${args.name}"`
       )
-      if (result.data) {
-        worktreeDir = result.data.directory
-        worktreeBranch = result.data.branch
-      }
+      if (!result.data) throw new Error("worktree.create returned no worktree")
+      worktreeDir = result.data.directory
+      worktreeBranch = result.data.branch
       log(`spawn:worktree:done name=${args.name} dir=${worktreeDir}`)
     } catch (err) {
-      log(`spawn:worktree:failed name=${args.name} err=${err instanceof Error ? err.message : String(err)}`)
+      const detail = err instanceof Error ? err.message : String(err)
+      log(`spawn:worktree:failed name=${args.name} err=${detail}`)
+      rollbackSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name, claimEventId)
       try {
         await deps.client.tui.showToast({
           title: "Team",
-          message: `Worktree creation failed for ${args.name}, using shared directory`,
-          variant: "warning",
+          message: `Worktree creation failed for ${args.name}; spawn was cancelled`,
+          variant: "error",
           duration: 4000,
         })
       } catch { /* TUI may not be available */ }
+      throw new Error(`Failed to create isolated worktree for teammate "${args.name}": ${detail}. Pass worktree: false only for intentionally read-only work.`)
     }
   }
 

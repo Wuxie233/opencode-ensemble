@@ -304,7 +304,7 @@ Teammate messages arrive in the lead's session as `[Team message from alice]: ..
 - **Overlap detection**: `team_merge` blocks when you have local changes to files the agent also modified, preventing silent overwrites
 - **Private lifecycle ledger**: immutable, privacy-safe lifecycle rows record selected transactional Team events after schema v13; they are never used for runtime decisions and are removed with explicit Team purge
 - **Spawn circuit breaker**: stops retrying after 3 consecutive spawn failures
-- **Provider retry breaker**: attempts one through five remain silent; the sixth distinct consecutive retry preserves the branch, awaits abort, releases in-progress tasks, and guides `resume_from` recovery
+- **Provider retry breaker**: without an alternate model, attempts one through five remain silent and the sixth distinct retry safely terminates; optional per-agent fallback chains can trigger an earlier preserved `resume_from` + model handoff
 - **Graceful shutdown**: busy teammates receive a shutdown message and finish their current work. Use `force: true` to abort immediately.
 - **Rate limiting**: token bucket (configurable via config file or `OPENCODE_ENSEMBLE_RATE_LIMIT`, default 10 tokens/sec)
 

@@ -228,11 +228,14 @@ export const MIGRATIONS: string[] = [
      time_created    INTEGER NOT NULL
    );
    CREATE INDEX team_event_team_time_idx ON team_event(team_id, time_created, id);
-   CREATE TRIGGER team_event_no_update
-     BEFORE UPDATE ON team_event
-     BEGIN
-       SELECT RAISE(ABORT, 'team_event rows are immutable');
-     END;`,
+    CREATE TRIGGER team_event_no_update
+      BEFORE UPDATE ON team_event
+      BEGIN
+        SELECT RAISE(ABORT, 'team_event rows are immutable');
+      END;`,
+  // Migration 14: Track model-fallback attempts during provider retry recovery.
+  `ALTER TABLE team_member ADD COLUMN retry_fallback_used INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE team_member ADD COLUMN retry_fallback_models TEXT;`,
 ]
 
 /**

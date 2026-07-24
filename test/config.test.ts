@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test"
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "node:fs"
 import path from "node:path"
 import os from "node:os"
-import { loadConfig, DEFAULT_CONFIG } from "../src/config"
+import { loadConfig, DEFAULT_CONFIG, resolveFallbackModel } from "../src/config"
 
 describe("config", () => {
   let tmpDir: string
@@ -61,6 +61,21 @@ describe("config", () => {
     expect(config.mergeOnCleanup).toBe(false)
     expect(config.rateLimitCapacity).toBe(5)
     expect(config.stallThresholdMs).toBe(300_000) // default preserved
+  })
+
+  test("loads ordered per-agent fallback models", () => {
+    const configDir = path.join(tmpDir, ".opencode")
+    mkdirSync(configDir, { recursive: true })
+    writeFileSync(path.join(configDir, "ensemble.json"), JSON.stringify({
+      modelFallbackByAgent: { build: ["provider/primary", "provider/backup"] },
+      retryFallbackStartAttempt: 4,
+      retryExhaustionAttempt: 6,
+    }))
+
+    const config = loadConfig(tmpDir)
+    expect(config.modelFallbackByAgent.build).toEqual(["provider/primary", "provider/backup"])
+    expect(resolveFallbackModel("build", "provider/primary", config)).toBe("provider/backup")
+    expect(resolveFallbackModel("build", "provider/primary", config, ["provider/backup"])).toBeUndefined()
   })
 
   test("invalid JSON logs warning and returns defaults", () => {

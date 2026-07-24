@@ -5,10 +5,26 @@ import { sendMessage } from "./messaging"
 import { recomputeCurrentPhase } from "./task-phase"
 
 const TEAM_TOOL_PREFIX = "team_"
-const RETRY_WARNING_THRESHOLD = 6
+/** @deprecated Prefer config.retryExhaustionAttempt; kept for tests and call sites. */
+export const RETRY_WARNING_THRESHOLD = 6
+const DEFAULT_FALLBACK_START = 4
+const DEFAULT_EXHAUSTION_ATTEMPT = 6
 
 /** Durable request returned when a teammate exhausts its retry allowance. */
 export interface RetryExhaustion {
+  kind: "exhaustion"
+  leadSessionId: string
+  memberName: string
+  sessionId: string
+  teamId: string
+  reason: string
+  attempts: number
+  fallbackModel?: string
+}
+
+/** Soft signal when a teammate should be replaced with a fallback model. */
+export interface RetryFallback {
+  kind: "fallback"
   leadSessionId: string
   memberName: string
   sessionId: string
@@ -17,9 +33,30 @@ export interface RetryExhaustion {
   attempts: number
 }
 
+/** Either terminal exhaustion or mid-sequence model fallback. */
+export type RetryAction = RetryExhaustion | RetryFallback
+
+/** Thresholds controlling when fallback and exhaustion fire. */
+export interface RetryPolicy {
+  fallbackEnabled: boolean
+  fallbackStartAttempt: number
+  exhaustionAttempt: number
+}
+
 /** Tracks and reports consecutive retries for teammate sessions. */
 export class RetryTracker {
   private readonly assistantMessages = new Map<string, Set<string>>()
+  private readonly policy: RetryPolicy
+
+  constructor(policy?: Partial<RetryPolicy>) {
+    const exhaustion = policy?.exhaustionAttempt ?? DEFAULT_EXHAUSTION_ATTEMPT
+    const fallbackStart = Math.min(policy?.fallbackStartAttempt ?? DEFAULT_FALLBACK_START, exhaustion)
+    this.policy = {
+      fallbackEnabled: policy?.fallbackEnabled ?? false,
+      fallbackStartAttempt: fallbackStart,
+      exhaustionAttempt: exhaustion,
+    }
+  }
 
   /** Observe a session status without treating retry-attempt busy transitions as progress. */
   observeStatus(
@@ -29,7 +66,7 @@ export class RetryTracker {
     status: "idle" | "busy" | "retry",
     message?: string,
     attempt?: number,
-  ): RetryExhaustion | undefined {
+  ): RetryAction | undefined {
     if (status === "busy") return
     if (status === "idle") {
       resetRetrySequence(db, sessionId)
@@ -42,10 +79,10 @@ export class RetryTracker {
     const memberName = teamInfo.memberName
     if (attempt === undefined) return
 
-    return db.transaction((): RetryExhaustion | undefined => {
+    return db.transaction((): RetryAction | undefined => {
       const row = db.query(
         `SELECT tm.retry_attempts, tm.retry_count, tm.retry_tripped, tm.status, tm.execution_status,
-                t.lead_session_id
+                tm.retry_fallback_used, t.lead_session_id
          FROM team_member tm
          JOIN team t ON t.id = tm.team_id
           WHERE tm.team_id = ? AND tm.name = ? AND tm.session_id = ?
@@ -60,25 +97,27 @@ export class RetryTracker {
         retry_tripped: number
         status: string
         execution_status: string
+        retry_fallback_used: number
         lead_session_id: string
       } | null
       if (!row) return
       if (row.retry_tripped === 1) {
         if (row.status !== "shutdown_requested" || row.execution_status !== "cancelling") return
         return {
+          kind: "exhaustion",
           leadSessionId: row.lead_session_id,
           memberName,
           sessionId,
           teamId: teamInfo.teamId,
           reason: message?.trim() || "unspecified retry reason",
-          attempts: RETRY_WARNING_THRESHOLD,
+          attempts: this.policy.exhaustionAttempt,
         }
       }
       const attempts = parseRetryAttempts(row.retry_attempts)
       if (attempts.has(attempt)) return
       attempts.add(attempt)
       const count = row.retry_count + 1
-      const tripped = count >= RETRY_WARNING_THRESHOLD ? 1 : 0
+      const tripped = count >= this.policy.exhaustionAttempt ? 1 : 0
       const updated = db.run(
         `UPDATE team_member SET retry_attempts = ?, retry_count = ?, retry_tripped = ?, time_updated = ?
          WHERE team_id = ? AND name = ? AND session_id = ? AND retry_tripped = 0
@@ -86,15 +125,37 @@ export class RetryTracker {
            AND execution_status IN ('idle', 'starting', 'running', 'cancel_requested')`,
         [JSON.stringify([...attempts]), count, tripped, Date.now(), teamInfo.teamId, memberName, sessionId],
       )
-      if (updated.changes !== 1 || tripped === 0) return
-      return {
-        leadSessionId: row.lead_session_id,
-        memberName,
-        sessionId,
-        teamId: teamInfo.teamId,
-        reason: message?.trim() || "unspecified retry reason",
-        attempts: count,
+      if (updated.changes !== 1) return
+      if (tripped === 1) {
+        return {
+          kind: "exhaustion",
+          leadSessionId: row.lead_session_id,
+          memberName,
+          sessionId,
+          teamId: teamInfo.teamId,
+          reason: message?.trim() || "unspecified retry reason",
+          attempts: count,
+        }
       }
+      // Mid-sequence model fallback: attempts in [fallbackStart, exhaustion).
+      // Only fire once per member lineage until a successful reset (new session).
+      if (
+        this.policy.fallbackEnabled
+        && count >= this.policy.fallbackStartAttempt
+        && count < this.policy.exhaustionAttempt
+        && row.retry_fallback_used === 0
+      ) {
+        return {
+          kind: "fallback",
+          leadSessionId: row.lead_session_id,
+          memberName,
+          sessionId,
+          teamId: teamInfo.teamId,
+          reason: message?.trim() || "unspecified retry reason",
+          attempts: count,
+        }
+      }
+      return
     })()
   }
 
@@ -135,7 +196,8 @@ function parseRetryAttempts(value: string | null): Set<number> {
 
 function resetRetrySequence(db: Database, sessionId: string, includeCancelling = false): void {
   db.run(
-    `UPDATE team_member SET retry_attempts = NULL, retry_count = 0, retry_tripped = 0
+    `UPDATE team_member SET retry_attempts = NULL, retry_count = 0, retry_tripped = 0,
+        retry_fallback_used = 0, retry_fallback_models = NULL
      WHERE session_id = ? AND retry_tripped = 0${includeCancelling ? "" : " AND execution_status != 'cancelling'"}`,
     [sessionId],
   )

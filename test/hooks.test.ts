@@ -304,6 +304,7 @@ describe("RetryTracker", () => {
     ).all("t1") as Array<{ content: string }>
     expect(messages).toHaveLength(0)
     expect(warning).toEqual({
+      kind: "exhaustion",
       leadSessionId: "lead-sess",
       memberName: "alice",
       sessionId: "sess-1",

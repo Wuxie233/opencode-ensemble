@@ -32,7 +32,7 @@ describe("team_event migration", () => {
 
     applyMigrations(db)
 
-    expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(13)
+    expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(14)
     expect(db.query("SELECT * FROM team_event").all()).toEqual([])
     const indexes = db.query("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'team_event'").all() as Array<{ name: string }>
     expect(indexes.map(row => row.name)).toEqual(expect.arrayContaining(["team_event_team_time_idx"]))

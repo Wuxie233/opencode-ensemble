@@ -60,7 +60,11 @@ const plugin: Plugin = async (input) => {
   const purgeApprovals = new PendingPurgeApprovals()
   const nudgedMembers = new Set<string>()
   const progressTracker = new ProgressTracker()
-  const retryTracker = new RetryTracker()
+  const retryTracker = new RetryTracker({
+    fallbackEnabled: Object.values(config.modelFallbackByAgent).some(models => models.length > 0),
+    fallbackStartAttempt: config.retryFallbackStartAttempt,
+    exhaustionAttempt: config.retryExhaustionAttempt,
+  })
   const wakeLeadTimestamps = new Map<string, number>()
   const WAKE_LEAD_COOLDOWN_MS = 5000
 
