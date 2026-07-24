@@ -57,7 +57,7 @@ Use these gates to prevent common coordination failures.
 ## Cleanup Checklist
 
 - All active teammates are complete, shut down, or intentionally force-stopped.
-- Relevant teammate branches have been merged or deliberately left out.
+- Every writer branch has been explicitly merged and its integration reviewed; cleanup must not archive a deliberately omitted writer branch.
 - Verification commands have passed or blockers are clearly reported.
 - `team_cleanup` has run after review and verification.
 - Repeated cleanup converges without duplicate merge effects.

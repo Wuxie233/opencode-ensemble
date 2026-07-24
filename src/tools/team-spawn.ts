@@ -465,20 +465,15 @@ async function executeTeamSpawnLocked(
   context.push("", "When you finish your task:")
   if (!isReadOnly && worktreeBranch) {
     context.push(`1. Commit your changes: git add -A && git commit -m "your summary"`)
-    context.push(
-      "2. If you claimed a task, call team_tasks_complete once with task_id and result: { summary, details, branch }. This atomically completes the task and reports the terminal result to the Lead.",
-      "3. If you did not claim a task, send ONE message to the lead using team_message with this format:",
-    )
-  } else if (!isReadOnly) {
-    context.push(
-      "1. If you claimed a task, call team_tasks_complete once with task_id and result: { summary, details }. This atomically completes the task and reports the terminal result to the Lead.",
-      "2. If you did not claim a task, send ONE message to the lead using team_message with this format:",
-    )
+    context.push(args.claim_task
+      ? "2. Call team_tasks_complete once with task_id and result: { summary, details, branch }. This atomically completes the claimed task and reports the terminal result to the Lead."
+      : "2. Send ONE message to the lead using team_message with the result format below.")
   } else {
-    context.push(
-      "1. Send ONE message to the lead using team_message with this format:",
-    )
+    context.push(args.claim_task
+      ? "1. Call team_tasks_complete once with task_id and result: { summary, details }. This atomically completes the claimed task and reports the terminal result to the Lead."
+      : "1. Send ONE message to the lead using team_message with the result format below.")
   }
+  context.push("For progress, blockers, or an unclaimed terminal result sent with team_message, use:")
   context.push(
     "<task-result>",
     "<kind>progress, result, or blocker</kind>",
@@ -491,7 +486,7 @@ async function executeTeamSpawnLocked(
     context.push(`<branch>${worktreeBranch}</branch>`)
   }
   context.push("</task-result>")
-  const lastStep = !isReadOnly && worktreeBranch ? "4" : !isReadOnly ? "3" : "2"
+  const lastStep = !isReadOnly && worktreeBranch ? "3" : "2"
   context.push(
     `${lastStep}. STOP. Do not send follow-up confirmations, status updates, or 'standing by' messages.`,
     "",
@@ -519,7 +514,7 @@ async function executeTeamSpawnLocked(
   )
 
   if (args.claim_task) {
-    context.push("", `You have been assigned task ${args.claim_task}. Mark it complete when done.`)
+    context.push("", `You have been assigned task ${args.claim_task}. Complete it with one team_tasks_complete call carrying the terminal result.`)
   }
 
   const contextStr = context.join("\n")

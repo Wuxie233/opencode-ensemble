@@ -77,7 +77,8 @@ export async function executeTeamStatus(
   if (tasks.length > 0) {
     const byStatus = new Map<string, number>()
     for (const t of tasks) {
-      byStatus.set(t.status, (byStatus.get(t.status) ?? 0) + 1)
+      const displayStatus = t.status === "blocked" ? "waiting" : t.status
+      byStatus.set(displayStatus, (byStatus.get(displayStatus) ?? 0) + 1)
     }
     const parts = Array.from(byStatus.entries()).map(([s, n]) => `${n} ${s}`)
     lines.push("")

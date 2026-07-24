@@ -206,10 +206,12 @@ describe("team_spawn", () => {
   })
 
   test("context message instructs teammate to atomically complete and report claimed tasks", async () => {
+    insertTask(deps, "t1", "task-atomic-result")
     await executeTeamSpawn(deps, {
       name: "alice",
       agent: "build",
       prompt: "Fix the tests",
+      claim_task: "task-atomic-result",
     }, "lead-sess")
 
     const promptCall = deps.client.calls.find(c => c.method === "session.promptAsync")
@@ -237,7 +239,7 @@ describe("team_spawn", () => {
     const text = (promptCall!.args[0] as { parts: Array<{ text: string }> }).parts[0]!.text
 
     expect(text).toContain("task-123")
-    expect(text).toContain("Mark it complete when done")
+    expect(text).toContain("Complete it with one team_tasks_complete call carrying the terminal result")
   })
 
   test("atomically claims a same-team pending task for the spawned teammate", async () => {
@@ -1030,6 +1032,26 @@ describe("team_spawn", () => {
     expect(text).toContain("team_tasks_add")
     expect(text).toContain("team_tasks_complete")
     expect(text).toContain("team_claim")
+  })
+
+  test("claimed read-only agent reports its terminal result atomically", async () => {
+    const taskId = "task-read-only-review"
+    insertTask(deps, "t1", taskId)
+
+    await executeTeamSpawn(deps, {
+      name: "reviewer",
+      agent: "explore",
+      prompt: "Review the change",
+      worktree: false,
+      claim_task: taskId,
+    }, "lead-sess")
+
+    const promptCall = deps.client.calls.find(call => call.method === "session.promptAsync")
+    const text = (promptCall!.args[0] as { parts: Array<{ text: string }> }).parts[0]!.text
+    expect(text).toContain("Call team_tasks_complete once with task_id and result")
+    expect(text).toContain("atomically completes the claimed task")
+    expect(text).not.toContain("If you claimed a task")
+    expect(text).not.toContain("Mark it complete when done")
   })
 
   // --- Worktree tests ---

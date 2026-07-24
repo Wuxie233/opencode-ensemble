@@ -211,8 +211,14 @@ describe("team_status", () => {
       "INSERT INTO team_task (id, team_id, content, status, priority, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?)",
       ["task2", "t1", "Write docs", "pending", "medium", now, now]
     )
+    deps.db.run(
+      "INSERT INTO team_task (id, team_id, content, status, priority, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      ["task3", "t1", "Wait for docs", "blocked", "medium", now, now]
+    )
 
     const result = await executeTeamStatus(deps, "lead-sess")
-    expect(result).toContain("2 total")
+    expect(result).toContain("3 total")
+    expect(result).toContain("1 waiting")
+    expect(result).not.toContain("1 blocked")
   })
 })
