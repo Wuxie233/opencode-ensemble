@@ -33,6 +33,9 @@ describe("opencode-ensemble agent skill", () => {
     expect(readme).toContain("plan_approval: true");
     expect(readme).toContain("depends_on");
     expect(readme).toContain("ready frontier contains pending tasks whose dependencies are complete");
+    expect(readme).toContain("Refuses cleanup while a writer branch is unmerged");
+    expect(readme).toContain("persist its structured terminal result in the same transaction");
+    expect(readme).not.toContain("Safety-net merges forgotten branches");
     expect(readme).toContain("returned key-to-ID mapping");
     expect(readme).toContain('key: "map-flow"');
     expect(readme).toContain("Lead Brief");
@@ -56,6 +59,8 @@ describe("opencode-ensemble agent skill", () => {
     expect(skill).toContain("Do not impose a Scout limit");
     expect(skill).toContain("batch-local `key`");
     expect(skill).toContain("ready frontier: pending tasks whose dependencies are complete");
+    expect(skill).toContain("Independent read-only `worktree: false` spawns may be issued concurrently");
+    expect(skill).toContain("terminal results atomically through `team_tasks_complete`");
     expect(skill).toContain("sixth distinct consecutive provider retry");
     expect(skill).toContain("resume_from");
     expect(skill).toContain("Do not invent task IDs");

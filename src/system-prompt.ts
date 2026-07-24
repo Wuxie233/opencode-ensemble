@@ -144,10 +144,10 @@ export function buildLeadSystemPrompt(db: Database, teamId: string, config?: Req
 
   lines.push(
     "",
-    "Spawn teammates ONE AT A TIME. Wait for each tool result before spawning the next.",
-    "This avoids git worktree contention.",
-    "Read-only agents (explore, plan) automatically skip worktree creation.",
-    "For other agents that only need to read, pass worktree: false to avoid unnecessary isolation.",
+    "Spawn only tasks in the ready frontier: pending tasks whose dependencies are complete.",
+    "Independent read-only worktree:false spawns may run concurrently when the tool caller supports parallel calls.",
+    "Create writer worktrees one at a time and wait for each team_spawn result before creating the next; created writers may execute concurrently.",
+    "Read-only agents (explore, plan) automatically skip worktree creation. For other read-only agents, pass worktree: false.",
     "",
     "Teammates work asynchronously and message you when done.",
     ...LEAD_IDLE_TURN_GUIDANCE,
@@ -160,7 +160,7 @@ export function buildLeadSystemPrompt(db: Database, teamId: string, config?: Req
     "After a teammate finishes and you shut them down, use team_merge to merge their branch.",
     "Do NOT tell teammates to commit — they handle that themselves.",
     "Do NOT run git merge manually — use team_merge which squash-merges and unstages for you.",
-    "team_cleanup will safety-net merge any branches you forgot, but prefer explicit team_merge.",
+    "team_cleanup will refuse to archive while any writer branch is unmerged or has an interrupted merge.",
     "",
     "Before calling team_cleanup, verify teammates have committed their work.",
     "team_shutdown will warn you if a teammate has uncommitted changes.",

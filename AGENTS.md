@@ -84,11 +84,13 @@ Key SDK primitives:
 ### Storage
 
 SQLite via the internal database adapter (zero external dependencies): `bun:sqlite`
-when running on Bun, `node:sqlite` when running on Node/Electron. Four tables:
+when running on Bun, `node:sqlite` when running on Node/Electron. Six tables:
+- project — directory identity, display name, and resource slug
 - team — team config (name, lead session, status, delegate mode)
 - team_member — member registry (name, session ID, agent, status)
 - team_task — shared task board (content, status, priority, assignee, deps)
 - team_message — message log (from, to, content, delivered flag)
+- team_event — privacy-safe immutable lifecycle rows retained until explicit Team purge; observation only, never a runtime source of truth
 
 The SQLite connection, dashboard listener, and `ActivityBuffer` are process-shared across directory plugin instances. Directory-local watchdogs, registries, trackers, and rate limiters remain isolated. Release shared resources only after the final directory and any in-flight recovery task finish.
 
@@ -167,10 +169,16 @@ teammate prompt as an automatic retry because it may repeat tool side effects.
 
 The task graph accepts existing same-Team task IDs and batch-local keys only.
 Reject missing, cross-Team, self, and cyclic dependencies transactionally.
+Dependency-waiting tasks remain internally `blocked` but are presented as normal
+waiting work and do not enter risk attention. `current_phase` is derived from the
+active ready frontier and recomputed in every task claim, completion, rollback,
+error, timeout, recovery, shutdown, and force-cleanup release transaction.
 Reuse one Team across research, implementation, review, verification, and
 recovery phases. Structured progress/result/blocker summaries and the bounded
 rolling Lead Brief keep raw evidence out of Lead context; full details remain
 available through `team_results` or the teammate session.
+Lead Brief and dashboard risk use the latest structured state per task/member,
+so later progress/result or task completion resolves an older blocker.
 
 After the Lead dispatches asynchronous work and has no actionable work left,
 it ends the current turn; teammate `team_message` delivery wakes a new turn via
@@ -213,12 +221,12 @@ member, the call is blocked. This covers sub-agents at arbitrary depth.
 | team_broadcast      | Any member  | Send message to all team members     |
 | team_tasks_list     | Any member  | View the shared team task board      |
 | team_tasks_add      | Any member  | Add tasks to the shared board        |
-| team_tasks_complete | Any member  | Mark a task complete, unblock deps   |
+| team_tasks_complete | Any member  | Atomically complete a task, persist an optional terminal result, and unblock deps |
 | team_claim          | Any member  | Atomically claim a pending task      |
 | team_results        | Any member  | Retrieve full message content        |
 | team_shutdown       | Lead only   | Request teammate shutdown, preserves branch |
 | team_merge          | Lead only   | Merge a shutdown teammate's branch   |
-| team_cleanup        | Lead only   | Archive team, safety-net merge remaining |
+| team_cleanup        | Lead only   | Archive only after every writer branch is explicitly merged and verified |
 | team_status         | Any member  | View members, statuses, task summary |
 | team_view           | Any member  | Navigate TUI to teammate's session   |
 
@@ -245,7 +253,8 @@ Three hooks wired in index.ts:
 6. tool.execute.before for sub-agent isolation — full descendant tracking via parent chain
 7. Worktree isolation on by default — each teammate gets their own git
    worktree via client.worktree.create(). Opt out with worktree: false
-   for read-only agents. Lead merges branches after cleanup.
+   for read-only agents. Lead explicitly merges and verifies writer branches
+   before cleanup.
 8. Plan approval is prompt-enforced, not permission-based — the teammate's
    context message tells it to send a plan and wait for approval. No tool-level
    gating.
@@ -298,9 +307,9 @@ that is not tied to any worktree. OpenCode cannot delete it.
 
 ### What goes wrong if you skip it
 
-The worktree branch is deleted by OpenCode's session cleanup. The
-safety-net merge in `team_cleanup` finds no branch to merge. The
-agent's committed work is permanently lost. This happened in v0.9.0
+The worktree branch is deleted by OpenCode's session cleanup. Without the
+preserved ref, the Lead has no branch to pass to `team_merge`, and cleanup
+correctly refuses archival. The agent's committed work is permanently lost. This happened in v0.9.0
 and earlier — agent work was silently destroyed on shutdown.
 
 ### How to verify
@@ -419,7 +428,8 @@ Keep it concise and include:
 3. The 6 tools they can use (team_message, team_broadcast,
    team_tasks_list, team_tasks_add, team_tasks_complete, team_claim)
    with a one-line description of each
-4. How to report completion (team_message to lead with findings)
+4. How to report completion (`team_tasks_complete` with `result` for a claimed
+   task; one `team_message` result only when no task was claimed)
 5. How to get unblocked (team_message to lead with the blocker)
 
 Add only short task-relevant coordination, plan-approval, worktree, structured

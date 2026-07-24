@@ -76,14 +76,17 @@ describe("buildLeadSystemPrompt", () => {
     expect(result).toContain("shutting down")
   })
 
-  test("includes one-at-a-time spawn guidance", () => {
+  test("allows read-only spawn concurrency while serializing writer creation", () => {
     const db = setupDb()
     insertTeam(db, "t5", "seq-team", "lead-sess")
 
     const result = buildLeadSystemPrompt(db, "t5")
 
-    expect(result).toMatch(/one.*at a time/i)
-    expect(result).toMatch(/worktree contention/i)
+    expect(result).toContain("ready frontier")
+    expect(result).toContain("read-only worktree:false spawns may run concurrently")
+    expect(result).toContain("Create writer worktrees one at a time")
+    expect(result).toContain("team_cleanup will refuse to archive")
+    expect(result).not.toContain("safety-net merge")
   })
 
   test("documents archived team purge through team_cleanup", () => {

@@ -61,7 +61,7 @@ team_tasks_add({
 //    regression=task_ghi789, review=task_jkl012
 ```
 
-Then it spawns teammates one at a time:
+It spawns only the ready frontier. Independent read-only teammates can be created concurrently; writer worktree creation remains serialized. After `map-flow` completes and unlocks `implement`, the lead starts the writer:
 
 ```ts
 team_spawn({
@@ -79,13 +79,13 @@ team_spawn({
   model: "anthropic/claude-opus-4-7",
   plan_approval: true,
   claim_task: "task_def456",
-  prompt: "After scout reports, implement the idempotency guard. Keep the change narrow. Commit your work and send a task-result message.",
+  prompt: "After scout reports, implement the idempotency guard. Keep the change narrow, commit it, and atomically complete the claimed task with its result.",
 })
 ```
 
 The same Team continues through implementation, verification, review, and recovery. The reviewer stays read-only (`worktree: false`) so it can inspect merged changes without producing another branch.
 
-Teammates coordinate without the lead polling. Structured `progress`, `result`, and `blocker` summaries feed a bounded Lead Brief; raw logs stay in teammate sessions unless the lead retrieves them with `team_results`:
+Teammates coordinate without the lead polling. Structured `progress` and `blocker` messages feed a bounded Lead Brief. A claimed task's terminal `result` is persisted atomically with completion through `team_tasks_complete`; raw logs stay in teammate sessions unless the lead retrieves them with `team_results`:
 
 ```xml
 <task-result>
@@ -248,7 +248,7 @@ Build with `bun run build`, then restart OpenCode to pick up changes.
 | `team_spawn` | Start a new teammate with a task. Supports `plan_approval` and `resume_from` handoff. |
 | `team_shutdown` | Ask a teammate to stop. Preserves their branch before aborting. Supports `force` flag. |
 | `team_merge` | Merge a shutdown teammate's branch into working directory (unstaged). Blocks overlapping local changes and converges safely on repeated calls. |
-| `team_cleanup` | Remove the current team when done. Safety-net merges forgotten branches. With `purge`, previews archived-team deletion and returns exact approval labels plus a confirmation token. |
+| `team_cleanup` | Archive a fully integrated team. Refuses cleanup while a writer branch is unmerged or has an interrupted merge. With `purge`, previews archived-team deletion and returns exact approval labels plus a confirmation token. |
 | `team_status` | See all members, their status, and a task summary. Session IDs are shown only to the lead. |
 | `team_view` | Switch the TUI to a teammate's session. |
 
@@ -268,7 +268,7 @@ Archived-team purge is intentionally two-step. First call `team_cleanup` with `p
 |------|-------------|
 | `team_tasks_list` | See all tasks with status and assignee. |
 | `team_tasks_add` | Add a transactional DAG using existing same-Team IDs or batch-local keys; rejects missing, cross-Team, self, and cyclic dependencies. Supports workflow phases. |
-| `team_tasks_complete` | Idempotently mark a task done, notify the Lead once, and unblock dependents. |
+| `team_tasks_complete` | Idempotently complete a task, optionally persist its structured terminal result in the same transaction, notify the Lead once, and unblock dependents. |
 | `team_claim` | Claim a pending task. Atomic, prevents double-claims. |
 
 ## What you see in the TUI
@@ -300,8 +300,9 @@ Teammate messages arrive in the lead's session as `[Team message from alice]: ..
 - **Timeout watchdog**: teammates stuck busy beyond the TTL are automatically timed out and aborted
 - **Stall detection**: detects teammates making no progress (low output tokens or no communication) and escalates to the lead
 - **Peer-to-peer communication**: teammates can message each other directly, with idle-flush delivery and chatty agent detection
-- **Auto-merge on cleanup**: worktree branches are squash-merged into your working directory as unstaged changes for review
+- **Explicit integration gate**: writer branches are merged with `team_merge`, reviewed, and verified before cleanup can archive the Team
 - **Overlap detection**: `team_merge` blocks when you have local changes to files the agent also modified, preventing silent overwrites
+- **Private lifecycle ledger**: immutable, privacy-safe lifecycle rows record selected transactional Team events after schema v13; they are never used for runtime decisions and are removed with explicit Team purge
 - **Spawn circuit breaker**: stops retrying after 3 consecutive spawn failures
 - **Provider retry breaker**: attempts one through five remain silent; the sixth distinct consecutive retry preserves the branch, awaits abort, releases in-progress tasks, and guides `resume_from` recovery
 - **Graceful shutdown**: busy teammates receive a shutdown message and finish their current work. Use `force: true` to abort immediately.
@@ -388,7 +389,7 @@ All fields are optional. Missing fields use defaults.
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `mergeOnCleanup` | `true` | Auto-merge worktree branches on cleanup (squash + unstage) |
+| `mergeOnCleanup` | `true` | Deprecated compatibility setting. Cleanup always requires explicit `team_merge`, review, and verification before archival. |
 | `stallThresholdMs` | `300000` (5 min) | Time without communication before stall escalation. `0` disables. |
 | `stallMinSteps` | `5` | Min model steps before token-based stall check kicks in |
 | `stallTokenThreshold` | `200` | Output tokens per step below which the agent is considered stalled |

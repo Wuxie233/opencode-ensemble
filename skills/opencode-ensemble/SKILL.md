@@ -21,7 +21,7 @@ Optimize in this order:
 - correctness through explicit contracts, write isolation, focused verification, and independent review; and
 - efficient recovery by replacing failed sessions without replaying completed side effects.
 
-Cost, token use, and teammate count are not optimization constraints. Do not impose a Scout limit or recommend a fixed team size. Spawn as many teammates as there are useful independent evidence domains or delivery boundaries. Every teammate still needs distinct ownership; more agents repeating the same search do not shorten the critical path. Never create nested teams.
+Cost, token use, and teammate count are not optimization constraints. Do not impose a Scout limit or recommend a fixed team size. Every spawn must shorten the critical path, isolate substantial context, own a distinct write boundary, or independently review a named risk. More agents repeating the same search do not qualify. Never create nested teams.
 
 ## Team Shape
 
@@ -38,12 +38,12 @@ Use `plan_approval: true` only for risky or costly-to-reverse writer work. Read-
 
 1. Create one Team for the confirmed request and reuse it across research, implementation, review, verification, and recovery.
 2. Build the coordination graph in `team_tasks_add`. One batch may assign local `key` values and use them in `depends_on`, including forward references. Use existing same-Team task IDs for later additions. Add `phase` when the workflow moves to a new phase.
-3. Maximize useful concurrency across the ready frontier: pending tasks whose dependencies are complete. Dependency-waiting tasks are normal queued work, not blockers. Spawn calls must be issued one at a time, but spawned teammates execute concurrently.
+3. Maximize useful concurrency across the ready frontier: pending tasks whose dependencies are complete. Dependency-waiting tasks are normal queued work, not blockers. Independent read-only `worktree: false` spawns may be issued concurrently; create writer worktrees one at a time, while created writers may execute concurrently.
 4. Delegate broad searches, raw logs, trial-and-error, and detailed evidence so the Lead receives concise decision-ready summaries.
 5. Use `worktree: false` for read-only teammates and exclusive write ownership for builders.
 6. Use `plan_approval: true` for risky implementation work.
 7. Wait for messages instead of polling status. Use `team_status` only for a requested snapshot or a concrete stall/recovery check.
-8. Ask for structured `progress`, `result`, or `blocker` messages tied to `task_id`. Keep raw evidence in the teammate session; use `team_results` when full detail is consequential.
+8. Ask for structured `progress` and `blocker` messages tied to `task_id`. Claimed tasks report terminal results atomically through `team_tasks_complete`; use one `team_message` result only for unclaimed work. Keep raw evidence in the teammate session; use `team_results` when full detail is consequential.
 9. Shut down completed teammates with `team_shutdown`, merge writer branches with `team_merge`, inspect the integrated diff, and run project verification.
 10. Use idempotent lifecycle calls freely when recovering from interrupted coordination; repeated completion, shutdown, merge, and cleanup calls should converge.
 11. On the sixth distinct consecutive provider retry, expect the plugin to preserve and abort the failed teammate before releasing its in-progress tasks. Start a fresh teammate with `resume_from`; require it to inspect actual state before continuing.
@@ -68,6 +68,8 @@ Use `plan_approval: true` only for risky or costly-to-reverse writer work. Read-
 - Do not merge a teammate branch without reading its result and inspecting the diff.
 - Do not call the work complete until the repository's verification commands pass or you have clearly reported the blocker.
 - Do not duplicate an evidence lane or write boundary without a concrete reason. Parallelism requires distinct ownership, not an arbitrary headcount.
+- Do not spawn or claim a dependency-waiting task. Wait until it enters the ready frontier.
+- Do not call `team_cleanup` until every writer branch has been explicitly merged, reviewed, and verified.
 - Do not create a new Team for each workflow phase. Add tasks and teammates to the active Team so its task graph, messages, and Lead Brief remain continuous.
 
 ## Minimal Example
@@ -98,6 +100,6 @@ team_spawn({
   agent: "build",
   plan_approval: true,
   claim_task: "task_def456",
-  prompt: "Use scout's findings to implement only the idempotency guard. Commit your work and send a task-result message with files changed and tests run.",
+  prompt: "Use scout's findings to implement only the idempotency guard. Commit your work and atomically complete the claimed task with its result.",
 })
 ```
