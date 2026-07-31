@@ -549,44 +549,21 @@ Each teammate now gets their own git worktree by default.
 - Race condition tests via Promise.all()
 - No mocks for business logic
 
-## TDD Workflow — Red/Green/Refactor
+## Testing Strategy
 
-Every feature is built test-first. No exceptions.
+Scale tests to the behavior and risk instead of requiring a fixed test-first
+sequence for every edit.
 
-### The cycle for each file:
-
-1. RED: Write the test first. It must fail with a meaningful error,
-   not a compile error. Run `bun test <file>` and confirm it fails.
-
-2. GREEN: Write the minimum implementation to make the test pass.
-   No gold-plating. Run `bun test <file>` and confirm it passes.
-
-3. REFACTOR: Clean up the implementation without changing behaviour.
-   Run `bun test <file>` again to confirm still green.
-
-### Test file first
-
-For every src/foo.ts, create test/foo.test.ts before writing
-src/foo.ts. The test file is the specification.
-
-### What "red" means
-
-A test that throws "cannot find module" is not red — it is a
-compile error. Write enough of the implementation file (empty
-functions, correct signatures) to make it compile, then confirm
-the test fails for the right reason before writing the real code.
-
-### Never write a passing test first
-
-If you write the implementation before the test, you will
-rationalise the test around the implementation. Always test first.
-
-### Spike exemption
-
-For open questions (Section 9 of architecture plan), write a
-spike test first that directly tests the unknown behaviour against
-a real OpenCode server. The spike result determines the
-implementation. Document the spike result in a comment.
+- Add or update tests for new behavior, bug regressions, public contracts,
+  concurrency, recovery, permissions, persistence, and security boundaries.
+- Mechanical documentation, formatting, and narrowly covered compatibility
+  edits may be implemented directly, then verified with the relevant checks.
+- Focus tests on observable behavior and failure modes rather than mirroring
+  implementation details.
+- Run focused checks while iterating and the repository completion gate before
+  marking work done. A visible Red/Green/Refactor transcript is not required.
+- For open questions, use the smallest experiment that resolves the unknown;
+  preserve a regression test when the result establishes a durable contract.
 
 ## Open Question Handling
 

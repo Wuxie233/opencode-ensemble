@@ -10,11 +10,10 @@ bun install
 
 ## Development Workflow
 
-This project follows strict TDD (Red/Green/Refactor):
-
-1. Write the test first in `test/`. It must fail for the right reason.
-2. Write the minimum implementation in `src/` to make it pass.
-3. Refactor without changing behavior. Confirm tests still pass.
+Use a risk-proportional testing workflow. Add or update tests for behavior,
+regressions, public contracts, concurrency, recovery, permissions, persistence,
+and security boundaries. Mechanical documentation, formatting, and narrowly
+covered compatibility edits may be implemented directly and then verified.
 
 Before submitting any change:
 
@@ -43,7 +42,7 @@ CI enforces a branch-name prefix on every PR via the `branch-name` check. Your P
 ## Submitting Changes
 
 1. Fork the repo and create a branch off `main` using a `bugfix/`, `feature/`, or `chore/` prefix (see above)
-2. Make your changes following TDD and the code standards below
+2. Make your changes with risk-appropriate tests and the code standards below
 3. Run `bun run typecheck && bun test && bun run build` — all must pass
 4. Open a PR against `main`
 5. The `check` CI status must pass on your PR (the `branch-name` check must pass too)
