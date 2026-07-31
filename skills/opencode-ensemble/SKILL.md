@@ -23,16 +23,34 @@ Optimize in this order:
 
 Cost, token use, and teammate count are not optimization constraints. Do not impose a Scout limit or recommend a fixed team size. Every spawn must shorten the critical path, isolate substantial context, own a distinct write boundary, or independently review a named risk. More agents repeating the same search do not qualify. Never create nested teams.
 
+## Proportional Workflow
+
+Use the lightest level that preserves correctness. Escalate when work develops more write boundaries, dependency stages, isolated context, or a named high-risk contract.
+
+| Level | Delivery shape | Coordination |
+| --- | --- | --- |
+| L0 | Exact lookup, pure Q&A, or one operational command | No Team |
+| L1 | Confirmed atomic change with one write boundary | Lead implements directly; one bounded read-only Scout is optional |
+| L2 | Nontrivial, multi-slice, or cross-context delivery | One Team, task DAG, broad profiles, isolated writers, terminal integration gate |
+| L3 | L2 plus a named high-risk contract or unresolved technical dependency | Add Planner consultation where needed and one risk-scoped Reviewer after full integration |
+
+Do not create a Team for ceremony. Once a task reaches L2, keep one Team across research, implementation, verification, review, and recovery instead of creating phase-specific Teams.
+
 ## Team Shape
 
-| Role | Agent | Worktree | Use for |
-| --- | --- | ---: | --- |
-| Scout | `explore` | `false` | One distinct evidence domain, subsystem, or external source |
-| Planner | `plan` | `false` | A genuinely unresolved dependency graph or contract |
-| Builder | `build` | `true` | One independent implementation slice |
-| Reviewer | `explore` | `false` | One named high-risk boundary after merge |
+| Profile | Agent | Access | Use for |
+| --- | --- | --- | --- |
+| `general` | `build` | write | Bounded delivery when no narrower profile fits |
+| `scout` | `explore` | read | One evidence domain, subsystem, or external source |
+| `researcher` | `build` | write | Durable research at one owned documentation path |
+| `planner` | `plan` | read | An unresolved dependency graph or technical contract |
+| `frontend` | `build` | write | One frontend implementation boundary |
+| `backend` | `build` | write | One backend or service boundary |
+| `platform` | `build` | write | One build, runtime, or platform boundary |
+| `qa` | `build` | write | One test implementation or system-verification boundary |
+| `reviewer` | `explore` | read | One named high-risk boundary after full integration |
 
-Use `plan_approval: true` only for risky or costly-to-reverse writer work. Read-only teammates never need worktrees. Every writer keeps the default `worktree: true`; use `worktree: false` only for intentionally read-only work. Writer worktree creation failure cancels the spawn instead of silently sharing the Lead directory. Writers need exclusive path or vertical-slice ownership. Use Planner, QA, and Reviewer roles when they remove a real dependency or observe a named risk; do not make them ceremonial stages.
+Use `general` only when no narrower profile fits. Unknown profiles never fall back silently. Use `plan_approval: true` only for risky or costly-to-reverse writer work. Read-only teammates never need worktrees. Every writer keeps the default `worktree: true`; use `worktree: false` only for intentionally read-only work. Writer worktree creation failure cancels the spawn instead of silently sharing the Lead directory. Writers need exclusive path or vertical-slice ownership. Use Planner, QA, and Reviewer profiles when they remove a real dependency or observe a named risk; do not make them ceremonial stages.
 
 ## Lead Workflow
 
@@ -40,14 +58,16 @@ Use `plan_approval: true` only for risky or costly-to-reverse writer work. Read-
 2. Build the coordination graph in `team_tasks_add`. One batch may assign local `key` values and use them in `depends_on`, including forward references. Use existing same-Team task IDs for later additions. Add `phase` when the workflow moves to a new phase.
 3. Maximize useful concurrency across the ready frontier: pending tasks whose dependencies are complete. Dependency-waiting tasks are normal queued work, not blockers. Independent read-only `worktree: false` spawns may be issued concurrently; create writer worktrees one at a time, while created writers may execute concurrently.
 4. Delegate broad searches, raw logs, trial-and-error, and detailed evidence so the Lead receives concise decision-ready summaries.
-5. Use `worktree: false` only for read-only teammates. Keep `worktree: true` and exclusive write ownership for every writer.
-6. Use `plan_approval: true` for risky implementation work.
-7. Wait for messages instead of polling status. Use `team_status` only for a requested snapshot or a concrete stall/recovery check.
-8. Ask for structured `progress` and `blocker` messages tied to `task_id`. Claimed tasks report terminal results atomically through `team_tasks_complete`; use one `team_message` result only for unclaimed work. Keep raw evidence in the teammate session; use `team_results` when full detail is consequential.
-9. Shut down completed teammates with `team_shutdown`, merge writer branches with `team_merge`, inspect the integrated diff, and run project verification.
-10. Use idempotent lifecycle calls freely when recovering from interrupted coordination; repeated completion, shutdown, merge, and cleanup calls should converge.
-11. On the sixth distinct consecutive provider retry, expect the plugin to preserve and abort the failed teammate before releasing its in-progress tasks. Start a fresh teammate with `resume_from`; require it to inspect actual state before continuing.
-12. Run `team_cleanup` only after integration and verification.
+5. Make Scout tasks explicit dependencies of the writer tasks that need their findings. Ensemble injects completed Scout conclusions into those dependent prompts.
+6. Use `worktree: false` only for read-only teammates. Keep `worktree: true` and exclusive write ownership for every writer.
+7. Use `plan_approval: true` for risky implementation work.
+8. When one owned task needs a technical contract, let its teammate call `team_consult`. The Planner answers with `team_consult_reply` or escalates a business decision to the Lead; unrelated ready work continues.
+9. Wait for messages instead of polling status. Use `team_status` only for a requested snapshot or a concrete stall/recovery check.
+10. Ask for structured `progress` and `blocker` messages tied to `task_id`. Claimed tasks report terminal results atomically through `team_tasks_complete`; use one `team_message` result only for unclaimed work. Keep raw evidence in the teammate session; use `team_results` when full detail is consequential.
+11. Shut down completed teammates with `team_shutdown`, merge writer branches with `team_merge`, inspect the integrated diff, and run project verification.
+12. Use idempotent lifecycle calls freely when recovering from interrupted coordination; repeated completion, shutdown, merge, and cleanup calls should converge.
+13. On the sixth distinct consecutive provider retry, expect the plugin to preserve and abort the failed teammate before releasing its in-progress tasks. Start a fresh teammate with `resume_from`; require it to inspect actual state before continuing.
+14. Run `team_cleanup` only after integration and verification.
 
 ## Load References As Needed
 
@@ -90,7 +110,7 @@ team_tasks_add({
 
 team_spawn({
   name: "scout",
-  agent: "explore",
+  profile: "scout",
   worktree: false,
   claim_task: "task_abc123",
   prompt: "Trace the checkout webhook flow. Report files, data model, existing tests, risks, and a smallest-safe-change plan. Do not edit files.",
@@ -98,7 +118,7 @@ team_spawn({
 
 team_spawn({
   name: "api-dev",
-  agent: "build",
+  profile: "backend",
   plan_approval: true,
   claim_task: "task_def456",
   prompt: "Use scout's findings to implement only the idempotency guard. Commit your work and atomically complete the claimed task with its result.",

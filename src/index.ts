@@ -32,6 +32,8 @@ import { executeTeamClaim } from "./tools/team-claim"
 import { executeTeamResults } from "./tools/team-results"
 import { executeTeamStatus } from "./tools/team-status"
 import { executeTeamView } from "./tools/team-view"
+import { executeTeamConsult } from "./tools/team-consult"
+import { executeTeamConsultReply } from "./tools/team-consult-reply"
 import type { ToolDeps, } from "./types"
 import { TokenBucket } from "./rate-limit"
 import { Watchdog } from "./watchdog"
@@ -413,7 +415,8 @@ const plugin: Plugin = async (input) => {
           "Teammates work asynchronously and will message you when done. Do not poll for their status.",
         args: {
           name: tool.schema.string().describe("Teammate name (lowercase alphanumeric with hyphens)"),
-          agent: tool.schema.string().default("build").describe("Agent type (e.g. 'build', 'plan', 'explore')"),
+          profile: tool.schema.enum(["general", "scout", "researcher", "planner", "frontend", "backend", "platform", "qa", "reviewer"]).optional().describe("Broad capability profile. Use general only when no narrower profile fits."),
+          agent: tool.schema.string().optional().describe("Legacy explicit runtime agent. Must match the selected profile when both are provided."),
           prompt: tool.schema.string().describe("Task instructions for the teammate"),
           model: tool.schema.string().optional().describe("Model in provider/model format (optional, uses default)"),
           claim_task: tool.schema.string().optional().describe("Task ID to auto-claim for this teammate (optional)"),
@@ -424,6 +427,36 @@ const plugin: Plugin = async (input) => {
         async execute(args, ctx) {
           const result = await executeTeamSpawn(deps, args, ctx.sessionID)
           ctx.metadata({ title: `Spawned ${args.name} (${args.agent})` })
+          return result
+        },
+      }),
+
+      team_consult: tool({
+        description: "Ask a Planner to resolve a technical contract. Only the requesting task boundary waits; unrelated ready work continues.",
+        args: {
+          task_id: tool.schema.string().describe("In-progress task owned by the requesting teammate"),
+          question: tool.schema.string().describe("Technical contract question for the Planner"),
+          planner: tool.schema.string().optional().describe("Planner teammate name; defaults to the first active Planner"),
+        },
+        async execute(args, ctx) {
+          const result = await executeTeamConsult(deps, args, ctx.sessionID)
+          progressTracker.recordMessage(ctx.sessionID)
+          ctx.metadata({ title: `Consult Planner for ${args.task_id}` })
+          return result
+        },
+      }),
+
+      team_consult_reply: tool({
+        description: "Reply to a pending technical consultation or escalate a business-level decision to the Lead.",
+        args: {
+          consult_id: tool.schema.string().describe("Consultation ID from team_consult"),
+          reply: tool.schema.string().describe("Technical resolution or escalation summary"),
+          escalate_to_lead: tool.schema.boolean().default(false).describe("Keep the requester waiting and escalate the business decision to the Lead"),
+        },
+        async execute(args, ctx) {
+          const result = await executeTeamConsultReply(deps, args, ctx.sessionID)
+          progressTracker.recordMessage(ctx.sessionID)
+          ctx.metadata({ title: `Reply to ${args.consult_id}` })
           return result
         },
       }),

@@ -6,13 +6,14 @@ import { executeTeamMessage } from "../src/tools/team-message"
 import { executeTeamShutdown } from "../src/tools/team-shutdown"
 import { executeTeamCleanup } from "../src/tools/team-cleanup"
 import { executeTeamMerge } from "../src/tools/team-merge"
-import type { MergeBranchFn, DeleteBranchFn } from "../src/tools/merge-helper"
+import type { MergeBranchFn, DeleteBranchFn, PreserveBranchFn } from "../src/tools/merge-helper"
 import { buildLeadSystemPrompt } from "../src/system-prompt"
 import { recoverStaleMembers } from "../src/recovery"
 import { isWorktreeInstance } from "../src/util"
 import type { ToolDeps } from "../src/types"
 
 type Deps = ReturnType<typeof setupDeps>
+const noopPreserve: PreserveBranchFn = async () => true
 
 describe("integration: full team lifecycle", () => {
   let deps: Deps
@@ -80,7 +81,7 @@ describe("integration: full team lifecycle", () => {
     // Set members to ready so shutdown works without force
     deps.db.run("UPDATE team_member SET status = 'ready', execution_status = 'idle' WHERE team_id = ?", [team.id])
     for (const name of names) {
-      await executeTeamShutdown(deps, { member: name, force: true }, leadSession, undefined, async () => true)
+      await executeTeamShutdown(deps, { member: name, force: true }, leadSession, undefined, noopPreserve)
     }
     const noopMerge: MergeBranchFn = async () => ({ ok: true })
     const noopDelete: DeleteBranchFn = async () => true
@@ -110,10 +111,10 @@ describe("integration: parallel spawn race", () => {
 
     const start = Date.now()
     const results = await Promise.all([
-      executeTeamSpawn(deps, { name: "a", agent: "build", prompt: "task a", worktree: false }, leadSession),
-      executeTeamSpawn(deps, { name: "b", agent: "build", prompt: "task b", worktree: false }, leadSession),
-      executeTeamSpawn(deps, { name: "c", agent: "build", prompt: "task c", worktree: false }, leadSession),
-      executeTeamSpawn(deps, { name: "d", agent: "build", prompt: "task d", worktree: false }, leadSession),
+      executeTeamSpawn(deps, { name: "a", agent: "build", prompt: "task a" }, leadSession),
+      executeTeamSpawn(deps, { name: "b", agent: "build", prompt: "task b" }, leadSession),
+      executeTeamSpawn(deps, { name: "c", agent: "build", prompt: "task c" }, leadSession),
+      executeTeamSpawn(deps, { name: "d", agent: "build", prompt: "task d" }, leadSession),
     ])
     const elapsed = Date.now() - start
 
@@ -290,8 +291,8 @@ describe("integration: message delivery pipeline end-to-end", () => {
 
   test("member-to-member messages deliver via promptAsync with full content", async () => {
     await executeTeamCreate(deps, { name: "m2m-team" }, leadSession)
-    await executeTeamSpawn(deps, { name: "alice", agent: "build", prompt: "task", worktree: false }, leadSession)
-    await executeTeamSpawn(deps, { name: "bob", agent: "build", prompt: "task", worktree: false }, leadSession)
+    await executeTeamSpawn(deps, { name: "alice", agent: "build", prompt: "task" }, leadSession)
+    await executeTeamSpawn(deps, { name: "bob", agent: "build", prompt: "task" }, leadSession)
 
     const aliceSession = (deps.db.query("SELECT session_id FROM team_member WHERE name = 'alice'").get() as { session_id: string }).session_id
     const bobSession = (deps.db.query("SELECT session_id FROM team_member WHERE name = 'bob'").get() as { session_id: string }).session_id
@@ -323,7 +324,7 @@ describe("integration: race conditions and edge cases", () => {
     const names = ["x", "y", "z"]
     const sessions: string[] = []
     for (const name of names) {
-      await executeTeamSpawn(deps, { name, agent: "build", prompt: "task", worktree: false }, leadSession)
+      await executeTeamSpawn(deps, { name, agent: "build", prompt: "task" }, leadSession)
       sessions.push((deps.db.query("SELECT session_id FROM team_member WHERE name = ?").get(name) as { session_id: string }).session_id)
     }
     deps.client.calls.length = 0
@@ -353,7 +354,7 @@ describe("integration: race conditions and edge cases", () => {
   test("buildLeadSystemPrompt called twice — second call sees no messages (no duplication)", async () => {
     await executeTeamCreate(deps, { name: "double-call-team" }, leadSession)
     const team = deps.db.query("SELECT id FROM team WHERE name = 'double-call-team'").get() as { id: string }
-    await executeTeamSpawn(deps, { name: "worker", agent: "build", prompt: "task", worktree: false }, leadSession)
+    await executeTeamSpawn(deps, { name: "worker", agent: "build", prompt: "task" }, leadSession)
     const workerSession = (deps.db.query("SELECT session_id FROM team_member WHERE name = 'worker'").get() as { session_id: string }).session_id
 
     await executeTeamMessage(deps, { to: "lead", text: "important finding" }, workerSession)
@@ -388,9 +389,9 @@ describe("integration: race conditions and edge cases", () => {
 
     const start = Date.now()
     const results = await Promise.all([
-      executeTeamSpawn(deps, { name: "fast1", agent: "build", prompt: "t", worktree: false }, leadSession),
-      executeTeamSpawn(deps, { name: "fast2", agent: "build", prompt: "t", worktree: false }, leadSession),
-      executeTeamSpawn(deps, { name: "slow", agent: "build", prompt: "t", worktree: false }, leadSession),
+      executeTeamSpawn(deps, { name: "fast1", agent: "build", prompt: "t" }, leadSession),
+      executeTeamSpawn(deps, { name: "fast2", agent: "build", prompt: "t" }, leadSession),
+      executeTeamSpawn(deps, { name: "slow", agent: "build", prompt: "t" }, leadSession),
     ])
     const elapsed = Date.now() - start
 
@@ -403,13 +404,29 @@ describe("integration: race conditions and edge cases", () => {
 
   test("teammate messaging lead after team cleanup throws — team no longer active", async () => {
     await executeTeamCreate(deps, { name: "late-msg-team" }, leadSession)
-    await executeTeamSpawn(deps, { name: "straggler", agent: "build", prompt: "task", worktree: false }, leadSession)
+    await executeTeamSpawn(deps, { name: "straggler", agent: "build", prompt: "task" }, leadSession)
     const stragglerSession = (deps.db.query("SELECT session_id FROM team_member WHERE name = 'straggler'").get() as { session_id: string }).session_id
 
     // Force cleanup while teammate is still "working"
     const noopMerge2: MergeBranchFn = async () => ({ ok: true })
     const noopDelete2: DeleteBranchFn = async () => true
-    await executeTeamCleanup(deps, { force: true }, leadSession, undefined, noopMerge2, noopDelete2, false)
+    const forceResult = await executeTeamCleanup(
+      deps,
+      { force: true },
+      leadSession,
+      undefined,
+      noopMerge2,
+      noopDelete2,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      noopPreserve,
+    )
+    expect(forceResult).toContain("team_merge")
+    await executeTeamMerge(deps, { member: "straggler" }, leadSession, noopMerge2, noopDelete2, async () => [])
+    await executeTeamCleanup(deps, { force: false }, leadSession, undefined, noopMerge2, noopDelete2, false)
 
     // Teammate tries to message lead after cleanup — team is archived
     await expect(

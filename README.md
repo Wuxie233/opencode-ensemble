@@ -6,7 +6,7 @@
 
 [![npm version](https://img.shields.io/npm/v/@hueyexe/opencode-ensemble.svg)](https://www.npmjs.com/package/@hueyexe/opencode-ensemble)
 [![npm downloads](https://img.shields.io/npm/dm/@hueyexe/opencode-ensemble.svg)](https://www.npmjs.com/package/@hueyexe/opencode-ensemble)
-[![tests](https://img.shields.io/badge/tests-666%20passing-brightgreen.svg)]()
+[![tests](https://img.shields.io/badge/tests-964%20passing-brightgreen.svg)]()
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue.svg)]()
 [![OpenCode SDK](https://img.shields.io/badge/deps-OpenCode%20SDK%20only-blue.svg)]()
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
@@ -39,11 +39,11 @@ The lead agent:
 1. Creates a team called "checkout-idempotency".
 2. Adds one task DAG with batch-local keys, real dependencies, and workflow phases.
 3. Records the returned key-to-ID mapping for assignment and later task batches.
-4. Spawns teammates with distinct evidence or delivery ownership:
-   - scout: explore agent, worktree disabled, model openai/gpt-5.3-codex-spark
-   - api-dev: build agent, own worktree, model anthropic/claude-opus-4-7, plan_approval: true
-   - qa: build agent, own worktree, model anthropic/claude-sonnet-4-6
-   - reviewer: explore agent, worktree disabled, model openai/gpt-5.3-codex-spark
+4. Spawns teammates with broad capability profiles and distinct evidence or delivery ownership:
+   - scout: read-only reconnaissance, worktree disabled, model openai/gpt-5.3-codex-spark
+   - api-dev: backend writer, own worktree, model anthropic/claude-opus-4-7, plan_approval: true
+   - qa: test writer, own worktree, model anthropic/claude-sonnet-4-6
+   - reviewer: read-only risk review, worktree disabled, model openai/gpt-5.3-codex-spark
 ```
 
 The lead uses the task board to make sequencing visible. A single batch can use local keys, including forward references:
@@ -66,7 +66,7 @@ It spawns only the ready frontier. Independent read-only teammates can be create
 ```ts
 team_spawn({
   name: "scout",
-  agent: "explore",
+  profile: "scout",
   worktree: false,
   model: "openai/gpt-5.3-codex-spark",
   claim_task: "task_abc123",
@@ -75,7 +75,7 @@ team_spawn({
 
 team_spawn({
   name: "api-dev",
-  agent: "build",
+  profile: "backend",
   model: "anthropic/claude-opus-4-7",
   plan_approval: true,
   claim_task: "task_def456",
@@ -83,7 +83,27 @@ team_spawn({
 })
 ```
 
-The same Team continues through implementation, verification, review, and recovery. The reviewer stays read-only (`worktree: false`) so it can inspect merged changes without producing another branch.
+The same Team continues through implementation, verification, review, and recovery. A completed Scout task result is injected into dependent teammate prompts, so evidence crosses the dependency edge without copying raw session history. The reviewer stays read-only (`worktree: false`) so it can inspect merged changes without producing another branch.
+
+## Capability profiles
+
+`team_spawn` accepts a broad `profile` and maps it to OpenCode's existing runtime agents. Profiles describe ownership and access; they do not add a second scheduler or restrict how many specialists a Team can create.
+
+| Profile | Runtime agent | Access | Intended boundary |
+|---------|---------------|--------|-------------------|
+| `general` | `build` | write | Bounded work when no narrower profile fits |
+| `scout` | `explore` | read | Code and evidence reconnaissance |
+| `researcher` | `build` | write | Durable research at an explicitly owned documentation path |
+| `planner` | `plan` | read | Dependency planning and technical contract consultation |
+| `frontend` | `build` | write | Frontend implementation and browser-facing contracts |
+| `backend` | `build` | write | Backend implementation and service contracts |
+| `platform` | `build` | write | Build, runtime, and platform integration without deployment activation |
+| `qa` | `build` | write | Test implementation and system verification |
+| `reviewer` | `explore` | read | Named-risk review of an integrated delivery |
+
+Omitting both `profile` and the legacy `agent` selects `general`. Legacy `agent: "explore"` and `agent: "plan"` infer `scout` and `planner`; an explicit agent must match its profile. Unknown profiles, malformed models, writer `worktree: false`, and nested writer worktrees fail before task claim, session creation, or worktree creation. Read-only profiles never create worktrees; every writer uses an isolated worktree.
+
+A teammate that owns an in-progress task can call `team_consult` when a technical contract blocks only that boundary. An active `planner` replies with `team_consult_reply`; it may escalate a business decision to the Lead while the requester remains waiting, then close the same consultation after the Lead decides. Unrelated ready tasks continue throughout.
 
 Teammates coordinate without the lead polling. Structured `progress` and `blocker` messages feed a bounded Lead Brief. A claimed task's terminal `result` is persisted atomically with completion through `team_tasks_complete`; raw logs stay in teammate sessions unless the lead retrieves them with `team_results`:
 
@@ -116,7 +136,7 @@ team_results({ from: "qa" })
 team_shutdown({ member: "qa" })
 team_merge({ member: "qa" })
 
-team_spawn({ name: "reviewer", agent: "explore", worktree: false, claim_task: "task_jkl012", prompt: "Review the merged diff for correctness, missed tests, and risky behavior. Do not edit files." })
+team_spawn({ name: "reviewer", profile: "reviewer", worktree: false, claim_task: "task_jkl012", prompt: "Review the merged diff for correctness, missed tests, and risky behavior. Do not edit files." })
 ```
 
 The lead runs the repository verification commands, summarizes the result, and only then cleans up the team. All merged teammate changes remain in your working directory as unstaged changes for review with `git diff`.
@@ -129,12 +149,12 @@ Install the companion skill to teach your AI how to form useful Ensemble teams, 
 npx skills@latest add hueyexe/opencode-ensemble --skill opencode-ensemble
 ```
 
-The skill is useful when you want the agent to decide whether parallel work is appropriate, split work into independent slices, use `depends_on` correctly, or pick a safe mix of `explore` and `build` teammates. The ready frontier contains pending tasks whose dependencies are complete; dependency-waiting tasks are normal queued work, not blockers.
+The skill is useful when you want the agent to choose a proportional workflow, split work into independent slices, use `depends_on` correctly, or pick a safe mix of capability profiles. The ready frontier contains pending tasks whose dependencies are complete; dependency-waiting tasks are normal queued work, not blockers.
 
 Good team shapes:
 
-- **Scout, builder, reviewer**: one read-only `explore` agent maps the code, one `build` agent changes it, one read-only `explore` agent reviews the diff.
-- **Parallel slices**: multiple `build` agents own independent files or vertical slices, then a reviewer checks the combined result.
+- **Scout, builder, reviewer**: one `scout` maps the code, one writer profile changes it, and one `reviewer` checks a named risk after integration.
+- **Parallel slices**: multiple writer profiles own independent files or vertical slices, then one risk-triggered reviewer checks the combined result when warranted.
 - **Risky change**: use `plan_approval: true` on the implementing teammate, then approve or reject the plan through `team_message` before edits begin.
 
 ## Dashboard
@@ -238,7 +258,7 @@ Build with `bun run build`, then restart OpenCode to pick up changes.
 
 ## Tools
 
-14 tools. The lead has all of them. Teammates get 6 (messaging + tasks).
+16 tools. The lead can coordinate with all of them. Teammate sessions explicitly allow 8 communication, task, and consultation tools.
 
 **Team lifecycle** (lead only, except archived-team purge may also be run from the main session)
 
@@ -261,6 +281,8 @@ Archived-team purge is intentionally two-step. First call `team_cleanup` with `p
 | `team_message` | Send a direct message to a teammate or the lead. Also handles plan approval/rejection. |
 | `team_broadcast` | Message everyone on the team. |
 | `team_results` | Atomically retrieve up to 20 unread messages for the caller without consuming another member's inbox. Repeat for the next batch or pass `message_id` for one specific unread message. |
+| `team_consult` | Ask an active Planner to resolve a technical contract for the caller's owned in-progress task. |
+| `team_consult_reply` | Let the assigned Planner answer the requester or escalate a business decision to the Lead. |
 
 **Task board** (everyone)
 
@@ -430,7 +452,7 @@ STALL_THRESHOLD_MS=0
 
 - Maximize useful parallelism across distinct evidence domains and delivery boundaries. Do not impose a fixed teammate or Scout count.
 - Give each teammate specific, self-contained tasks. Vague prompts produce vague results.
-- Spawn an explore agent first to understand the codebase, then spawn build agents with that context.
+- Spawn a `scout` profile first to understand the codebase, then spawn writer profiles with that context.
 - Use `worktree: false` for read-only agents (research, review, code analysis).
 - Use `plan_approval: true` for risky changes. The teammate sends a plan first, you review and approve before they write any code.
 - Don't micromanage. Teammates message you when done or when they're blocked.

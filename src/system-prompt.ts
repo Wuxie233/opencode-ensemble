@@ -184,9 +184,34 @@ export function buildTeammateSystemPrompt(db: Database, teamId: string, memberNa
   const team = db.query("SELECT name FROM team WHERE id = ?").get(teamId) as { name: string } | null
   if (!team) return ""
 
+  const consultation = db.query(
+    "SELECT consult_id, consult_state, consult_task_id, consult_planner, consult_question, consult_reply FROM team_member WHERE team_id = ? AND name = ?",
+  ).get(teamId, memberName) as {
+    consult_id: string | null
+    consult_state: string
+    consult_task_id: string | null
+    consult_planner: string | null
+    consult_question: string | null
+    consult_reply: string | null
+  } | null
   const lines = [
     `You are "${memberName}", a teammate in team "${team.name}". Use team_message to communicate. You MUST send your results to the lead via team_message before stopping.`,
   ]
+  if (consultation?.consult_state === "waiting" || consultation?.consult_state === "escalated") {
+    lines.push(
+      `Consultation ${consultation.consult_id} for task ${consultation.consult_task_id} is ${consultation.consult_state}.`,
+      `Question: ${consultation.consult_question}`,
+      `Planner: ${consultation.consult_planner}`,
+      "Pause only this affected task boundary. Do not guess or replay side effects while waiting.",
+    )
+  }
+  if (consultation?.consult_state === "answered") {
+    lines.push(
+      `Consultation ${consultation.consult_id} for task ${consultation.consult_task_id} was answered by ${consultation.consult_planner}.`,
+      `Technical reply: ${consultation.consult_reply}`,
+      "Verify the current source state, then resume the affected boundary.",
+    )
+  }
 
   // Deliver pending peer messages addressed to this teammate
   const pendingMessages = db.query(

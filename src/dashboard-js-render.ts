@@ -87,7 +87,7 @@ function rAgents(t){
         '<span class="font-mono font-semibold text-[14px] break-words min-w-0">'+E(m.name)+'</span>'+
         '<span class="text-[10px] px-1.5 py-[1px] rounded '+s.t+' bg-base-800/80 shrink-0">'+s.l+'</span>'+
         spark+
-        '<span class="max-w-[7rem] truncate text-[10px] text-txt-500 ml-auto shrink">'+E(m.agent)+'</span>'+
+        '<span class="max-w-[7rem] truncate text-[10px] text-txt-500 ml-auto shrink">'+E(m.profile||m.agent)+'</span>'+
       '</div>'+
       (tr?'<div class="mt-2 text-[13px] text-txt-200 leading-snug break-words">'+(waiting?'<span class="text-txt-400">等待依赖：</span>':'当前任务：')+E(tr)+'</div>':'<div class="mt-2 text-[13px] text-txt-500 leading-snug">无进行中任务</div>')+
       (mp?'<div class="mt-1 text-[12px] text-txt-400 line-clamp-2 break-words">最新消息：'+E(mp)+'</div><div class="mt-1 text-[10px] text-txt-500">打开智能体详情查看完整消息</div>':'')+
@@ -114,7 +114,8 @@ function openDrawer(name,opener){
   h+='</div>';
   // Meta chips
   var meta=[];
-  meta.push(chip(E(m.agent),'gray'));
+  meta.push(chip(E(m.profile||m.agent),'gray'));
+  if(m.profile&&m.profile!==m.agent)meta.push(chip('runtime '+E(m.agent),'muted'));
   if(m.model)meta.push(chip(E(m.model),'gray'));
   meta.push(chip(E(enumLabel(m.executionStatus||m.status)),m.status==='busy'?'blue':m.status==='error'?'red':'muted'));
   if(m.planApproval&&m.planApproval!=='none')meta.push(chip(E(enumLabel(m.planApproval)),m.planApproval==='approved'?'green':m.planApproval==='rejected'?'red':'amber'));

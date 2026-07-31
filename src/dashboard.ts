@@ -34,6 +34,7 @@ interface ProjectRow {
 interface MemberRow {
   name: string
   agent: string
+  profile: string
   status: string
   execution_status: string
   session_id: string
@@ -84,7 +85,7 @@ function parseDependsOn(value: string | null): string[] {
 function buildState(db: Database): { projects: unknown[]; teams: unknown[] } {
   const projects = db.query("SELECT id, name, path, status, time_created, time_updated FROM project ORDER BY time_updated DESC").all() as ProjectRow[]
   const teams = db.query("SELECT id, name, project_id, status, lead_agent, time_created, time_updated FROM team ORDER BY time_created DESC").all() as TeamRow[]
-  const memberStmt = db.query("SELECT name, agent, status, execution_status, session_id, worktree_branch, prompt, model, plan_approval, time_created, time_updated FROM team_member WHERE team_id = ?")
+  const memberStmt = db.query("SELECT name, agent, profile, status, execution_status, session_id, worktree_branch, prompt, model, plan_approval, time_created, time_updated FROM team_member WHERE team_id = ?")
   const taskStmt = db.query("SELECT id, content, status, priority, assignee, depends_on, time_created, time_updated FROM team_task WHERE team_id = ?")
   const msgStmt = db.query("SELECT id, from_name, to_name, content, delivered, read, time_created FROM team_message WHERE team_id = ? ORDER BY time_created DESC LIMIT 50")
 
@@ -92,6 +93,7 @@ function buildState(db: Database): { projects: unknown[]; teams: unknown[] } {
     const members = (memberStmt.all(t.id) as MemberRow[]).map((m) => ({
       name: m.name,
       agent: m.agent,
+      profile: m.profile,
       status: m.status,
       executionStatus: m.execution_status,
       sessionId: m.session_id,

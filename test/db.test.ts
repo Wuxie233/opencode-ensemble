@@ -81,6 +81,38 @@ describe("schema migrations", () => {
       .toEqual({ slug: "project" })
   })
 
+  test("migration 15 backfills profiles from existing runtime agents", () => {
+    for (let i = 0; i < 14; i++) {
+      db.exec(MIGRATIONS[i]!)
+      db.exec(`PRAGMA user_version = ${i + 1}`)
+    }
+    db.run(
+      "INSERT INTO project (id, name, path, status, time_created, time_updated) VALUES ('project-1', 'project-1', '/tmp/project-1', 'active', 1, 1)",
+    )
+    db.run(
+      "INSERT INTO team (id, name, project_id, lead_session_id, status, delegate, time_created, time_updated) VALUES ('team-1', 'team-1', 'project-1', 'lead', 'active', 0, 1, 1)",
+    )
+    const legacyMembers: Array<[string, string]> = [
+      ["legacy-scout", "explore"],
+      ["legacy-planner", "plan"],
+      ["legacy-builder", "build"],
+    ]
+    for (const [name, agent] of legacyMembers) {
+      db.run(
+        "INSERT INTO team_member (team_id, name, session_id, agent, status, execution_status, time_created, time_updated) VALUES ('team-1', ?, ?, ?, 'ready', 'idle', 1, 1)",
+        [name, `${name}-session`, agent],
+      )
+    }
+
+    applyMigrations(db)
+
+    expect(db.query("SELECT name, profile FROM team_member ORDER BY name").all()).toEqual([
+      { name: "legacy-builder", profile: "general" },
+      { name: "legacy-planner", profile: "planner" },
+      { name: "legacy-scout", profile: "scout" },
+    ])
+  })
+
   test("creates team_task table", () => {
     applyMigrations(db)
     const row = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='team_task'").get()

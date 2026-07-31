@@ -24,8 +24,8 @@ describe("opencode-ensemble agent skill", () => {
     const readme = read(readmePath);
 
     expect(readme).toContain("npx skills@latest add hueyexe/opencode-ensemble --skill opencode-ensemble");
-    expect(readme).toContain("scout: explore agent, worktree disabled");
-    expect(readme).toContain("reviewer: explore agent, worktree disabled");
+    expect(readme).toContain("scout: read-only reconnaissance, worktree disabled");
+    expect(readme).toContain("reviewer: read-only risk review, worktree disabled");
     expect(readme).toContain("openai/gpt-5.3-codex-spark");
     expect(readme).toContain("anthropic/claude-opus-4-7");
     expect(readme).not.toContain("opencode/gpt-5-nano");

@@ -8,7 +8,7 @@ Install from this repository:
 npx skills@latest add hueyexe/opencode-ensemble --skill opencode-ensemble
 ```
 
-Use this skill to split work into independent evidence and delivery slices, create task DAGs, isolate raw evidence from the Lead, recover failed sessions, review results, and clean up safely. It does not impose a teammate or Scout limit; each teammate must own a distinct useful boundary.
+Use this skill to choose a proportional L0-L3 workflow, split Team work into independent evidence and delivery slices, select broad capability profiles, create task DAGs, isolate raw evidence from the Lead, recover failed sessions, review results, and clean up safely. It does not impose a teammate or Scout limit; each teammate must own a distinct useful boundary.
 
 ## Structure
 

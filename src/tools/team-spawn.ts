@@ -9,6 +9,8 @@ import type { PreserveBranchFn } from "./merge-helper"
 import { recomputeCurrentPhase } from "../task-phase"
 import { appendTeamEvent } from "../team-event"
 import { immediateTransaction } from "../db"
+import { resolveProfile } from "../profiles"
+import { parseTaskResult } from "../result-parser"
 
 /** Tracks consecutive spawn failures per team for circuit breaker. */
 export const spawnFailures = new Map<string, { count: number; lastError: string }>()
@@ -19,7 +21,8 @@ const RESUME_SAFETY_INSTRUCTION = "Inspect actual repository, task, and runtime 
 
 interface SpawnArgs {
   name: string
-  agent: string
+  profile?: string
+  agent?: string
   prompt: string
   model?: string
   claim_task?: string
@@ -192,6 +195,22 @@ async function executeTeamSpawnLocked(
     .get(teamInfo.teamId, args.name)
   if (existing) throw new Error(`Teammate "${args.name}" already exists in team "${teamInfo.teamName}"`)
 
+  const profile = resolveProfile(args.profile, args.agent)
+  const runtimeAgent = profile.agent
+  const isReadOnly = profile.access === "read"
+  if (!isReadOnly && args.worktree === false) {
+    throw new Error(`Ensemble profile "${profile.name}" is a writer and requires an isolated worktree`)
+  }
+  if (!isReadOnly && isWorktreeDirectory(deps.directory)) {
+    throw new Error(`Ensemble profile "${profile.name}" cannot create an isolated writer worktree from ${deps.directory}`)
+  }
+  const memberCount = (deps.db.query("SELECT COUNT(*) as c FROM team_member WHERE team_id = ?").get(teamInfo.teamId) as { c: number }).c
+  const resolvedModel = resolveModel(args.model, runtimeAgent, memberCount, deps.config)
+  const modelParam = resolvedModel ? parseModelId(resolvedModel) : undefined
+  if (resolvedModel && !modelParam) {
+    throw new Error(`Invalid model "${resolvedModel}" for Ensemble profile "${profile.name}"; expected provider/model format`)
+  }
+
   const resumeContext = args.resume_from
     ? await buildResumeContext(deps, teamInfo.teamId, args.resume_from)
     : undefined
@@ -200,11 +219,10 @@ async function executeTeamSpawnLocked(
     ? claimSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name)
     : undefined
 
-  const isReadOnly = args.agent === "plan" || args.agent === "explore"
   const useWorktree = args.worktree !== false && !isReadOnly && !isWorktreeDirectory(deps.directory)
   const usePlanApproval = args.plan_approval === true
 
-  log(`spawn:start name=${args.name} agent=${args.agent} worktree=${useWorktree}`)
+  log(`spawn:start name=${args.name} profile=${profile.name} agent=${runtimeAgent} worktree=${useWorktree}`)
 
   // Create worktree if enabled
   let worktreeDir: string | null = null
@@ -262,7 +280,16 @@ async function executeTeamSpawnLocked(
   // Permission rules on session.create are the hard gate (server-enforced).
   // For read-only agents, deny write tools and explicitly allow team tools.
   // For all agents with worktrees, allowlist the worktree path for edit/bash.
-  const TEAM_TOOLS = ["team_message", "team_broadcast", "team_tasks_list", "team_tasks_add", "team_tasks_complete", "team_claim"] as const
+  const TEAM_TOOLS = [
+    "team_message",
+    "team_broadcast",
+    "team_tasks_list",
+    "team_tasks_add",
+    "team_tasks_complete",
+    "team_claim",
+    "team_consult",
+    "team_consult_reply",
+  ] as const
   const permission: PermissionRule[] = []
 
   if (worktreeDir) {
@@ -293,7 +320,7 @@ async function executeTeamSpawnLocked(
     const createResult = await withTimeout(
       deps.client.session.create({
         parentID: sessionId,
-        title: `${args.name} (@${args.agent} teammate)`,
+        title: `${args.name} (@${profile.name} teammate)`,
         permission,
         ...(workspaceId ? { workspaceID: workspaceId } : {}),
       }),
@@ -332,17 +359,15 @@ async function executeTeamSpawnLocked(
   // Register in DB
   const planApproval = usePlanApproval ? "pending" : "none"
   const now = Date.now()
-  // Resolve model before DB insert so the stored value matches what promptAsync uses
-  const memberCount = (deps.db.query("SELECT COUNT(*) as c FROM team_member WHERE team_id = ?").get(teamInfo.teamId) as { c: number }).c
-  const resolvedModel = resolveModel(args.model, args.agent, memberCount, deps.config)
+  // The model was validated before task claims or external resource creation.
   if (resolvedModel) log(`spawn:model name=${args.name} model=${resolvedModel}`)
 
   try {
     immediateTransaction(deps.db, () => {
       deps.db.run(
-        `INSERT INTO team_member (team_id, name, session_id, agent, status, execution_status, model, prompt, worktree_dir, worktree_branch, workspace_id, plan_approval, time_created, time_updated)
-         VALUES (?, ?, ?, ?, 'busy', 'starting', ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [teamInfo.teamId, args.name, childSessionId, args.agent, resolvedModel ?? null, args.prompt, worktreeDir, worktreeBranch, workspaceId, planApproval, now, now]
+        `INSERT INTO team_member (team_id, name, session_id, agent, profile, status, execution_status, model, prompt, worktree_dir, worktree_branch, workspace_id, plan_approval, time_created, time_updated)
+         VALUES (?, ?, ?, ?, ?, 'busy', 'starting', ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [teamInfo.teamId, args.name, childSessionId, runtimeAgent, profile.name, resolvedModel ?? null, args.prompt, worktreeDir, worktreeBranch, workspaceId, planApproval, now, now]
       )
       appendTeamEvent(deps.db, {
         teamId: teamInfo.teamId,
@@ -396,7 +421,9 @@ async function executeTeamSpawnLocked(
   // Build teammate context message
   const context = [
     `You are "${args.name}", a teammate in team "${teamInfo.teamName}".`,
-    `Your agent type is "${args.agent}".`,
+    `Your Ensemble profile is "${profile.name}" using runtime agent "${runtimeAgent}".`,
+    `Mission: ${profile.mission}`,
+    `Capabilities: ${profile.capabilities.join(", ")}.`,
   ]
 
   // Show other teammates so this agent knows who to message
@@ -449,6 +476,8 @@ async function executeTeamSpawnLocked(
     "- team_tasks_add: add tasks to the shared board",
     "- team_tasks_complete: atomically complete a claimed task and report its terminal result to the Lead",
     "- team_claim: claim a pending task from the shared board",
+    "- team_consult: ask a Planner to resolve a technical contract for your owned task boundary",
+    "- team_consult_reply: Planner-only reply or escalation for a pending consultation",
   )
 
   // Collaboration guidance for peer-to-peer communication
@@ -517,22 +546,18 @@ async function executeTeamSpawnLocked(
 
   if (args.claim_task) {
     context.push("", `You have been assigned task ${args.claim_task}. Complete it with one team_tasks_complete call carrying the terminal result.`)
+    const scoutContext = buildScoutDependencyContext(deps, teamInfo.teamId, args.claim_task)
+    if (scoutContext) context.push("", scoutContext)
   }
 
   const contextStr = context.join("\n")
-
-  // Model was already resolved before DB insert — just parse for promptAsync
-  const modelParam = resolvedModel ? parseModelId(resolvedModel) : undefined
-  if (resolvedModel && !modelParam) {
-    log(`spawn:model:invalid name=${args.name} model=${resolvedModel} — expected "provider/model" format, falling back to default`)
-  }
 
   // Fire-and-forget: send prompt to teammate session.
   log(`spawn:promptAsync:fire name=${args.name} sessionId=${childSessionId}`)
   deps.client.session.promptAsync({
     sessionID: childSessionId,
     parts: [{ type: "text", text: contextStr }],
-    agent: args.agent,
+    agent: runtimeAgent,
     ...(modelParam ? { model: modelParam } : {}),
   }).catch((err) => {
     const errMsg = err instanceof Error ? err.message : String(err)
@@ -681,7 +706,35 @@ async function executeTeamSpawnLocked(
   const resumeInfo = resumeContext
     ? `, resuming from "${resumeContext.predecessor}" (${resumeContext.truncated ? "truncated context" : "complete context"})`
     : ""
-  return `Teammate "${args.name}" spawned (agent: ${args.agent}${resumeInfo})${branchInfo}${planInfo}. They are working on: ${args.prompt.slice(0, 120)}${args.prompt.length > 120 ? "..." : ""}`
+  return `Teammate "${args.name}" spawned (profile: ${profile.name}, agent: ${runtimeAgent}${resumeInfo})${branchInfo}${planInfo}. They are working on: ${args.prompt.slice(0, 120)}${args.prompt.length > 120 ? "..." : ""}`
+}
+
+function buildScoutDependencyContext(deps: ToolDeps, teamId: string, taskId: string): string | undefined {
+  const task = deps.db.query("SELECT depends_on FROM team_task WHERE id = ? AND team_id = ?")
+    .get(taskId, teamId) as { depends_on: string | null } | null
+  const dependencies = task?.depends_on ? JSON.parse(task.depends_on) as string[] : []
+  const conclusions = dependencies.flatMap(dependencyId => {
+    const dependency = deps.db.query(
+      `SELECT task.assignee
+       FROM team_task task
+       JOIN team_member member ON member.team_id = task.team_id AND member.name = task.assignee
+       WHERE task.id = ? AND task.team_id = ? AND task.status = 'completed' AND member.profile = 'scout'`,
+    ).get(dependencyId, teamId) as { assignee: string } | null
+    if (!dependency) return []
+    const messages = deps.db.query(
+      "SELECT content FROM team_message WHERE team_id = ? AND from_name = ? AND to_name = 'lead' ORDER BY time_created DESC, id DESC LIMIT 20",
+    ).all(teamId, dependency.assignee) as Array<{ content: string }>
+    const result = messages
+      .map(message => parseTaskResult(message.content))
+      .find(parsed => parsed?.kind === "result" && parsed.taskId === dependencyId)
+    return result ? [`- ${result.summary}\n  ${result.details}`] : []
+  })
+  if (conclusions.length === 0) return undefined
+  return [
+    "Relevant Scout conclusions from completed task dependencies:",
+    ...conclusions,
+    "Treat these as evidence and boundaries; verify implementation-critical relationships against current source.",
+  ].join("\n")
 }
 
 async function buildResumeContext(deps: ToolDeps, teamId: string, predecessorName: string): Promise<ResumeContext> {

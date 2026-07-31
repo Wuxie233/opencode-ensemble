@@ -22,7 +22,7 @@ Recommended spawn:
 ```ts
 team_spawn({
   name: "scout",
-  agent: "explore",
+  profile: "scout",
   worktree: false,
   model: "openai/gpt-5.3-codex-spark",
   prompt: "<scout prompt>",
@@ -85,7 +85,7 @@ Recommended spawn:
 ```ts
 team_spawn({
   name: "reviewer",
-  agent: "explore",
+  profile: "reviewer",
   worktree: false,
   model: "openai/gpt-5.3-codex-spark",
   prompt: "<reviewer prompt>",

@@ -30,9 +30,9 @@ export async function executeTeamStatus(
   lastCallTime.set(teamInfo.teamId, now)
 
   const members = deps.db.query(
-    "SELECT name, session_id, agent, status, execution_status, worktree_branch, worktree_dir, plan_approval, time_updated FROM team_member WHERE team_id = ? ORDER BY time_created ASC"
+    "SELECT name, session_id, agent, profile, status, execution_status, worktree_branch, worktree_dir, plan_approval, time_updated FROM team_member WHERE team_id = ? ORDER BY time_created ASC"
   ).all(teamInfo.teamId) as Array<{
-    name: string; session_id: string; agent: string; status: string; execution_status: string; worktree_branch: string | null; worktree_dir: string | null; plan_approval: string; time_updated: number
+    name: string; session_id: string; agent: string; profile: string; status: string; execution_status: string; worktree_branch: string | null; worktree_dir: string | null; plan_approval: string; time_updated: number
   }>
 
   const tasks = deps.db.query(
@@ -59,7 +59,7 @@ export async function executeTeamStatus(
       const msgInfo = lastMsg?.last_msg ? `last msg: ${formatDuration(now - lastMsg.last_msg)} ago` : "no messages yet"
 
       const session = teamInfo.role === "lead" ? `  session: ${m.session_id}` : ""
-      lines.push(`  ${m.name}  [${statusIcon} ${duration}, ${msgInfo}${plan}]  agent: ${m.agent}${branch}${session}`)
+      lines.push(`  ${m.name}  [${statusIcon} ${duration}, ${msgInfo}${plan}]  profile: ${m.profile}  agent: ${m.agent}${branch}${session}`)
 
       // Current task
       const task = deps.db.query("SELECT content FROM team_task WHERE team_id = ? AND assignee = ? AND status = 'in_progress' LIMIT 1")

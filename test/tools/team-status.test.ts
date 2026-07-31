@@ -31,6 +31,17 @@ describe("team_status", () => {
     expect(result).toContain("build")
   })
 
+  test("shows the capability profile separately from the runtime agent", async () => {
+    insertMember(deps.db, "t1", "alice", "sess-alice", "busy", "running")
+    deps.db.run("UPDATE team_member SET profile = 'backend' WHERE team_id = 't1' AND name = 'alice'")
+    deps.registry.register("t1", "alice", "sess-alice")
+
+    const result = await executeTeamStatus(deps, "lead-sess")
+
+    expect(result).toContain("profile: backend")
+    expect(result).toContain("agent: build")
+  })
+
   test("works for teammates too", async () => {
     insertMember(deps.db, "t1", "alice", "sess-alice", "busy", "running")
     deps.registry.register("t1", "alice", "sess-alice")

@@ -78,7 +78,7 @@ Key SDK primitives:
 - client.session.abort() — cancel/shutdown teammates
 - client.session.status() — poll session idle/busy state
 - event hook — subscribe to session.status events for state transitions
-- tool hook — register the 14 team tools
+- tool hook — register the 16 team tools
 - tool.execute.before hook — rate limiting + sub-agent isolation
 
 ### Storage
@@ -222,7 +222,7 @@ populated from session events. When a team tool call arrives from an unknown
 session, walks the parent chain (max depth 10). If any ancestor is a team
 member, the call is blocked. This covers sub-agents at arbitrary depth.
 
-## The 14 Tools
+## The 16 Tools
 
 | Tool                | Who Can Use | Purpose                              |
 |---------------------|-------------|--------------------------------------|
@@ -235,6 +235,8 @@ member, the call is blocked. This covers sub-agents at arbitrary depth.
 | team_tasks_complete | Any member  | Atomically complete a task, persist an optional terminal result, and unblock deps |
 | team_claim          | Any member  | Atomically claim a pending task      |
 | team_results        | Any member  | Retrieve full message content        |
+| team_consult        | Member only | Ask a Planner about an owned task's technical contract |
+| team_consult_reply  | Planner only | Resolve a consultation or escalate it to the Lead |
 | team_shutdown       | Lead only   | Request teammate shutdown, preserves branch |
 | team_merge          | Lead only   | Merge a shutdown teammate's branch   |
 | team_cleanup        | Lead only   | Archive only after every writer branch is explicitly merged and verified |
@@ -258,7 +260,7 @@ Three hooks wired in index.ts:
 
 1. SQLite via the internal database adapter — not file JSON, not in-memory-only, not external native packages
 2. promptAsync for message delivery — not session injection, not polling
-3. 14 separate tools — not a unified action tool, no exceptions
+3. 16 separate tools — not a unified action tool, no exceptions
 4. Fire-and-forget spawn — not blocking, not tmux
 5. tool.execute.before for rate limiting — token bucket, in-memory
 6. tool.execute.before for sub-agent isolation — full descendant tracking via parent chain
@@ -437,8 +439,9 @@ Keep it concise and include:
 
 1. Their name and role in the team
 2. The task they are working on
-3. The 6 tools they can use (team_message, team_broadcast,
-   team_tasks_list, team_tasks_add, team_tasks_complete, team_claim)
+3. The 8 tools they can use (team_message, team_broadcast,
+   team_tasks_list, team_tasks_add, team_tasks_complete, team_claim,
+   team_consult, team_consult_reply)
    with a one-line description of each
 4. How to report completion (`team_tasks_complete` with `result` for a claimed
    task; one `team_message` result only when no task was claimed)

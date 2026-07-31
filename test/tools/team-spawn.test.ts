@@ -100,7 +100,7 @@ describe("team_spawn", () => {
 
     const result = await executeTeamSpawn(deps, {
       name: "bob",
-      agent: "build",
+      profile: "scout",
       prompt: "Continue the fix",
       resume_from: "alice",
       worktree: false,
@@ -124,7 +124,7 @@ describe("team_spawn", () => {
 
     await expect(executeTeamSpawn(deps, {
       name: "bob",
-      agent: "build",
+      profile: "scout",
       prompt: "Continue the fix",
       resume_from: "missing",
       claim_task: "task-123",
@@ -147,7 +147,7 @@ describe("team_spawn", () => {
 
     await expect(executeTeamSpawn(deps, {
       name: "bob",
-      agent: "build",
+      profile: "scout",
       prompt: "Continue the fix",
       resume_from: "alice",
     }, "lead-sess")).rejects.toThrow("messages unavailable")
@@ -165,7 +165,7 @@ describe("team_spawn", () => {
 
     const result = await executeTeamSpawn(deps, {
       name: "bob",
-      agent: "build",
+      profile: "scout",
       prompt: "Continue the fix",
       resume_from: "alice",
       worktree: false,
@@ -189,7 +189,7 @@ describe("team_spawn", () => {
 
     await executeTeamSpawn(deps, {
       name: "bob",
-      agent: "build",
+      profile: "scout",
       prompt: "Continue the fix",
       resume_from: "alice",
       worktree: false,
@@ -240,6 +240,32 @@ describe("team_spawn", () => {
 
     expect(text).toContain("task-123")
     expect(text).toContain("Complete it with one team_tasks_complete call carrying the terminal result")
+  })
+
+  test("injects completed Scout dependency conclusions into the claimed Builder prompt", async () => {
+    insertMember(deps.db, "t1", "scout", "scout-sess", "shutdown", "completed")
+    deps.db.run("UPDATE team_member SET profile = 'scout', agent = 'explore' WHERE team_id = 't1' AND name = 'scout'")
+    insertTask(deps, "t1", "task-scout", "completed", "scout")
+    insertTask(deps, "t1", "task-build")
+    deps.db.run("UPDATE team_task SET depends_on = ? WHERE id = 'task-build'", [JSON.stringify(["task-scout"])])
+    deps.db.run(
+      "INSERT INTO team_message (id, team_id, from_name, to_name, content, delivered, read, time_created) VALUES ('scout-result', 't1', 'scout', 'lead', ?, 1, 0, 1)",
+      [
+        "<task-result><kind>result</kind><task_id>task-scout</task_id><status>completed</status><summary>Route evidence mapped</summary><details>Use src/router.ts; auth remains out of scope.</details></task-result>",
+      ],
+    )
+
+    await executeTeamSpawn(
+      deps,
+      { name: "builder", profile: "backend", prompt: "Implement route", claim_task: "task-build" },
+      "lead-sess",
+    )
+
+    const promptCall = deps.client.calls.find((call) => call.method === "session.promptAsync")
+    const text = (promptCall!.args[0] as { parts: Array<{ text: string }> }).parts[0]!.text
+    expect(text).toContain("Relevant Scout conclusions")
+    expect(text).toContain("Route evidence mapped")
+    expect(text).toContain("Use src/router.ts; auth remains out of scope.")
   })
 
   test("atomically claims a same-team pending task for the spawned teammate", async () => {
@@ -1094,15 +1120,15 @@ describe("team_spawn", () => {
     expect(result).toContain("spawned")
   })
 
-  test("skips worktree creation when already inside a worktree", async () => {
+  test("rejects nested writer spawn before creating resources", async () => {
     deps.directory = "/home/user/.local/share/opencode/worktree/abc123/some-worktree"
-    const result = await executeTeamSpawn(deps, {
+    await expect(executeTeamSpawn(deps, {
       name: "alice", agent: "build", prompt: "Fix tests",
-    }, "lead-sess", async () => true)
+    }, "lead-sess", async () => true)).rejects.toThrow("cannot create an isolated writer worktree")
     const wtCalls = deps.client.calls.filter(c => c.method === "worktree.create")
     expect(wtCalls).toHaveLength(0)
-    expect(result).toContain("alice")
-    expect(result).toContain("spawned")
+    expect(deps.client.calls).toHaveLength(0)
+    expect(deps.db.query("SELECT name FROM team_member WHERE name = 'alice'").get()).toBeNull()
   })
 
   test("creates a worktree by default and stores dir/branch in DB", async () => {
@@ -1465,6 +1491,8 @@ describe("team_spawn — agent mode enforcement", () => {
     { permission: "team_tasks_add", pattern: "*", action: "allow" },
     { permission: "team_tasks_complete", pattern: "*", action: "allow" },
     { permission: "team_claim", pattern: "*", action: "allow" },
+    { permission: "team_consult", pattern: "*", action: "allow" },
+    { permission: "team_consult_reply", pattern: "*", action: "allow" },
   ]
 
   test("plan agent gets deny rules + team tool allow (no worktree) on session.create", async () => {

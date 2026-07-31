@@ -236,6 +236,21 @@ export const MIGRATIONS: string[] = [
   // Migration 14: Track model-fallback attempts during provider retry recovery.
   `ALTER TABLE team_member ADD COLUMN retry_fallback_used INTEGER NOT NULL DEFAULT 0;
    ALTER TABLE team_member ADD COLUMN retry_fallback_models TEXT;`,
+  // Migration 15: Broad Profile identity and one recoverable technical consultation per member.
+  `ALTER TABLE team_member ADD COLUMN profile TEXT NOT NULL DEFAULT 'general';
+   UPDATE team_member SET profile = CASE agent
+     WHEN 'explore' THEN 'scout'
+     WHEN 'plan' THEN 'planner'
+     ELSE 'general'
+   END;
+   ALTER TABLE team_member ADD COLUMN consult_id TEXT;
+   ALTER TABLE team_member ADD COLUMN consult_state TEXT NOT NULL DEFAULT 'none'
+     CHECK(consult_state IN ('none', 'waiting', 'answered', 'escalated'));
+   ALTER TABLE team_member ADD COLUMN consult_task_id TEXT;
+   ALTER TABLE team_member ADD COLUMN consult_planner TEXT;
+   ALTER TABLE team_member ADD COLUMN consult_question TEXT;
+   ALTER TABLE team_member ADD COLUMN consult_reply TEXT;
+   CREATE UNIQUE INDEX team_member_consult_id_idx ON team_member(consult_id) WHERE consult_id IS NOT NULL;`,
 ]
 
 /**

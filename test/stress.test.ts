@@ -6,7 +6,8 @@ import { spawnFailures } from "../src/tools/team-spawn"
 import { executeTeamMessage } from "../src/tools/team-message"
 import { executeTeamShutdown } from "../src/tools/team-shutdown"
 import { executeTeamCleanup } from "../src/tools/team-cleanup"
-import type { MergeBranchFn, DeleteBranchFn } from "../src/tools/merge-helper"
+import { executeTeamMerge } from "../src/tools/team-merge"
+import type { MergeBranchFn, DeleteBranchFn, PreserveBranchFn } from "../src/tools/merge-helper"
 import { executeTeamTasksAdd } from "../src/tools/team-tasks-add"
 import { executeTeamTasksComplete } from "../src/tools/team-tasks-complete"
 import { executeTeamClaim } from "../src/tools/team-claim"
@@ -28,6 +29,7 @@ type Deps = ReturnType<typeof setupDeps>
 /** Noop merge for tests that don't need real git. */
 const noopMerge: MergeBranchFn = async () => ({ ok: true })
 const noopDelete: DeleteBranchFn = async () => true
+const noopPreserve: PreserveBranchFn = async () => true
 
 /** Failing merge for conflict tests. */
 const failMerge: MergeBranchFn = async () => ({ ok: false, error: "conflict" })
@@ -208,7 +210,7 @@ describe("stress: spawn circuit breaker", () => {
     spawnFailures.set(teamId, { count: 2, lastError: "prev error" })
 
     // Successful spawn resets
-    const result = await executeTeamSpawn(deps, { name: "ok", agent: "build", prompt: "t", worktree: false }, lead)
+    const result = await executeTeamSpawn(deps, { name: "ok", agent: "build", prompt: "t" }, lead)
     expect(result).toContain("spawned")
     expect(spawnFailures.has(teamId)).toBe(false)
   })
@@ -223,7 +225,7 @@ describe("stress: spawn circuit breaker", () => {
     await executeTeamCreate(deps, { name: "team-b" }, lead2)
 
     // team-b can still spawn fine
-    const result = await executeTeamSpawn(deps, { name: "fine", agent: "build", prompt: "t", worktree: false }, lead2)
+    const result = await executeTeamSpawn(deps, { name: "fine", agent: "build", prompt: "t" }, lead2)
     expect(result).toContain("spawned")
   })
 
@@ -253,7 +255,7 @@ describe("stress: stall detection via watchdog", () => {
   test("token-stalled member gets nudged and lead notified", async () => {
     await executeTeamCreate(deps, { name: "stall-team" }, lead)
     const teamId = getTeamId(deps, "stall-team")
-    await executeTeamSpawn(deps, { name: "stuck", agent: "build", prompt: "do work", worktree: false }, lead)
+    await executeTeamSpawn(deps, { name: "stuck", agent: "build", prompt: "do work" }, lead)
     const stuckSess = getSession(deps, "stuck")
 
     // Simulate 3 low-token steps
@@ -294,7 +296,7 @@ describe("stress: stall detection via watchdog", () => {
   test("stall is not re-reported until activity clears it", async () => {
     await executeTeamCreate(deps, { name: "dedup-team" }, lead)
     const teamId = getTeamId(deps, "dedup-team")
-    await executeTeamSpawn(deps, { name: "dup", agent: "build", prompt: "t", worktree: false }, lead)
+    await executeTeamSpawn(deps, { name: "dup", agent: "build", prompt: "t" }, lead)
     const sess = getSession(deps, "dup")
 
     pt.recordStep(sess, 10)
@@ -332,7 +334,7 @@ describe("stress: stall detection via watchdog", () => {
 
   test("active member is not flagged as stalled", async () => {
     await executeTeamCreate(deps, { name: "active-team" }, lead)
-    await executeTeamSpawn(deps, { name: "busy", agent: "build", prompt: "t", worktree: false }, lead)
+    await executeTeamSpawn(deps, { name: "busy", agent: "build", prompt: "t" }, lead)
     const sess = getSession(deps, "busy")
 
     // High-token steps — not stalled
@@ -356,7 +358,7 @@ describe("stress: stall detection via watchdog", () => {
   test("shutdown members are not checked for stalls", async () => {
     await executeTeamCreate(deps, { name: "shut-team" }, lead)
     const teamId = getTeamId(deps, "shut-team")
-    await executeTeamSpawn(deps, { name: "done", agent: "build", prompt: "t", worktree: false }, lead)
+    await executeTeamSpawn(deps, { name: "done", agent: "build", prompt: "t" }, lead)
     const sess = getSession(deps, "done")
 
     pt.recordStep(sess, 10)
@@ -394,7 +396,7 @@ describe("stress: system prompt inline tasks + compaction", () => {
   test("lead system prompt shows in-progress and completed tasks", async () => {
     await executeTeamCreate(deps, { name: "prompt-team" }, lead)
     const teamId = getTeamId(deps, "prompt-team")
-    await executeTeamSpawn(deps, { name: "w1", agent: "build", prompt: "t", worktree: false }, lead)
+    await executeTeamSpawn(deps, { name: "w1", agent: "build", prompt: "t" }, lead)
     const w1Sess = getSession(deps, "w1")
 
     // Add tasks and complete one
@@ -420,7 +422,7 @@ describe("stress: system prompt inline tasks + compaction", () => {
   test("task content is truncated at 120 chars in lead prompt", async () => {
     await executeTeamCreate(deps, { name: "trunc-team" }, lead)
     const teamId = getTeamId(deps, "trunc-team")
-    await executeTeamSpawn(deps, { name: "w", agent: "build", prompt: "t", worktree: false }, lead)
+    await executeTeamSpawn(deps, { name: "w", agent: "build", prompt: "t" }, lead)
     const wSess = getSession(deps, "w")
 
     const longContent = "x".repeat(200)
@@ -446,7 +448,7 @@ describe("stress: system prompt inline tasks + compaction", () => {
   test("compaction context includes recent messages for members", async () => {
     await executeTeamCreate(deps, { name: "msg-compact" }, lead)
     const teamId = getTeamId(deps, "msg-compact")
-    await executeTeamSpawn(deps, { name: "bob", agent: "build", prompt: "task", worktree: false }, lead)
+    await executeTeamSpawn(deps, { name: "bob", agent: "build", prompt: "task" }, lead)
     const bobSess = getSession(deps, "bob")
 
     await executeTeamMessage(deps, { to: "lead", text: "Found a bug in auth" }, bobSess)
@@ -459,7 +461,7 @@ describe("stress: system prompt inline tasks + compaction", () => {
   test("compaction context includes completed tasks for lead", async () => {
     await executeTeamCreate(deps, { name: "lead-compact" }, lead)
     const teamId = getTeamId(deps, "lead-compact")
-    await executeTeamSpawn(deps, { name: "w", agent: "build", prompt: "t", worktree: false }, lead)
+    await executeTeamSpawn(deps, { name: "w", agent: "build", prompt: "t" }, lead)
     const wSess = getSession(deps, "w")
 
     await executeTeamTasksAdd(deps, { tasks: [{ content: "Setup database", priority: "high" }] }, wSess)
@@ -488,7 +490,7 @@ describe("stress: richer team_status output", () => {
   test("shows duration, last message time, and current task", async () => {
     await executeTeamCreate(deps, { name: "status-team" }, lead)
     const teamId = getTeamId(deps, "status-team")
-    await executeTeamSpawn(deps, { name: "alice", agent: "build", prompt: "t", worktree: false }, lead)
+    await executeTeamSpawn(deps, { name: "alice", agent: "build", prompt: "t" }, lead)
     const aliceSess = getSession(deps, "alice")
 
     // Alice sends a message and claims a task
@@ -507,7 +509,7 @@ describe("stress: richer team_status output", () => {
 
   test("shows 'no messages yet' for members who haven't messaged", async () => {
     await executeTeamCreate(deps, { name: "quiet-team" }, lead)
-    await executeTeamSpawn(deps, { name: "silent", agent: "build", prompt: "t", worktree: false }, lead)
+    await executeTeamSpawn(deps, { name: "silent", agent: "build", prompt: "t" }, lead)
 
     const result = await executeTeamStatus(deps, lead)
     expect(result).toContain("no messages yet")
@@ -516,7 +518,7 @@ describe("stress: richer team_status output", () => {
   test("truncates long task content at 80 chars", async () => {
     await executeTeamCreate(deps, { name: "long-task-team" }, lead)
     const teamId = getTeamId(deps, "long-task-team")
-    await executeTeamSpawn(deps, { name: "w", agent: "build", prompt: "t", worktree: false }, lead)
+    await executeTeamSpawn(deps, { name: "w", agent: "build", prompt: "t" }, lead)
     const wSess = getSession(deps, "w")
 
     const longTask = "a".repeat(120)
@@ -550,7 +552,7 @@ describe("stress: full lifecycle with all v0.8.0 features", () => {
 
     // 2. Spawn 3 teammates
     for (const name of ["alice", "bob", "carol"]) {
-      const result = await executeTeamSpawn(deps, { name, agent: "build", prompt: `Task for ${name}`, worktree: false }, lead)
+      const result = await executeTeamSpawn(deps, { name, agent: "build", prompt: `Task for ${name}` }, lead)
       expect(result).toContain("spawned")
     }
     expect(deps.db.query("SELECT COUNT(*) as c FROM team_member WHERE team_id = ?").get(teamId)).toEqual({ c: 3 })
@@ -611,16 +613,19 @@ describe("stress: full lifecycle with all v0.8.0 features", () => {
     // 8. Shutdown all
     deps.db.run("UPDATE team_member SET status = 'ready', execution_status = 'idle' WHERE team_id = ?", [teamId])
     for (const name of ["alice", "bob", "carol"]) {
-      await executeTeamShutdown(deps, { member: name, force: true }, lead)
+      await executeTeamShutdown(deps, { member: name, force: true }, lead, undefined, noopPreserve)
     }
 
-    // 9. Cleanup with auto-merge
+    // 9. Explicitly integrate every writer branch, then clean up
     const mergedBranches: string[] = []
     const trackMerge: MergeBranchFn = async (branch) => {
       mergedBranches.push(branch)
       return { ok: true }
     }
-    // Members don't have worktree branches (worktree: false), so no merge happens
+    for (const name of ["alice", "bob", "carol"]) {
+      await executeTeamMerge(deps, { member: name }, lead, trackMerge, noopDelete, async () => [])
+    }
+    expect(mergedBranches).toHaveLength(3)
     const result = await executeTeamCleanup(deps, { force: false }, lead, undefined, trackMerge, noopDelete, true)
     expect(result).toContain("cleaned up")
 
@@ -646,7 +651,7 @@ describe("stress: model resolution", () => {
   test("explicit model param takes priority over config", async () => {
     deps.config = { ...deps.config, defaultModel: "anthropic/claude-sonnet-4-6", modelsByAgent: { build: "openai/gpt-5.4" } }
     await executeTeamCreate(deps, { name: "model-explicit" }, lead)
-    await executeTeamSpawn(deps, { name: "a", agent: "build", prompt: "t", model: "google/gemini-3.1-pro-preview", worktree: false }, lead)
+    await executeTeamSpawn(deps, { name: "a", agent: "build", prompt: "t", model: "google/gemini-3.1-pro-preview" }, lead)
 
     const member = deps.db.query("SELECT model FROM team_member WHERE name = 'a'").get() as { model: string | null }
     expect(member.model).toBe("google/gemini-3.1-pro-preview")
@@ -668,9 +673,9 @@ describe("stress: model resolution", () => {
   test("rotation cycles through modelPool", async () => {
     deps.config = { ...deps.config, modelPool: ["anthropic/claude-opus-4-6", "openai/gpt-5.4", "google/gemini-3.1-pro-preview"], modelAssignment: "rotate" }
     await executeTeamCreate(deps, { name: "model-rotate" }, lead)
-    await executeTeamSpawn(deps, { name: "a", agent: "build", prompt: "t", worktree: false }, lead)
-    await executeTeamSpawn(deps, { name: "b", agent: "build", prompt: "t", worktree: false }, lead)
-    await executeTeamSpawn(deps, { name: "c", agent: "build", prompt: "t", worktree: false }, lead)
+    await executeTeamSpawn(deps, { name: "a", agent: "build", prompt: "t" }, lead)
+    await executeTeamSpawn(deps, { name: "b", agent: "build", prompt: "t" }, lead)
+    await executeTeamSpawn(deps, { name: "c", agent: "build", prompt: "t" }, lead)
 
     const promptCalls = deps.client.calls.filter(c => c.method === "session.promptAsync")
     const models = promptCalls.map(c => (c.args[0] as { model?: { providerID: string; modelID: string } }).model)
@@ -683,7 +688,7 @@ describe("stress: model resolution", () => {
   test("random picks from modelPool", async () => {
     deps.config = { ...deps.config, modelPool: ["anthropic/claude-opus-4-6", "openai/gpt-5.4"], modelAssignment: "random" }
     await executeTeamCreate(deps, { name: "model-random" }, lead)
-    await executeTeamSpawn(deps, { name: "a", agent: "build", prompt: "t", worktree: false }, lead)
+    await executeTeamSpawn(deps, { name: "a", agent: "build", prompt: "t" }, lead)
 
     const promptCalls = deps.client.calls.filter(c => c.method === "session.promptAsync")
     const model = (promptCalls[0]!.args[0] as { model?: { providerID: string; modelID: string } }).model
@@ -696,7 +701,7 @@ describe("stress: model resolution", () => {
   test("defaultModel used when no other config matches", async () => {
     deps.config = { ...deps.config, defaultModel: "opencode/zen-sonnet-4-6" }
     await executeTeamCreate(deps, { name: "model-default" }, lead)
-    await executeTeamSpawn(deps, { name: "a", agent: "build", prompt: "t", worktree: false }, lead)
+    await executeTeamSpawn(deps, { name: "a", agent: "build", prompt: "t" }, lead)
 
     const promptCalls = deps.client.calls.filter(c => c.method === "session.promptAsync")
     const model = (promptCalls[0]!.args[0] as { model?: { providerID: string; modelID: string } }).model
@@ -705,7 +710,7 @@ describe("stress: model resolution", () => {
 
   test("no model config results in no model param on promptAsync", async () => {
     await executeTeamCreate(deps, { name: "model-none" }, lead)
-    await executeTeamSpawn(deps, { name: "a", agent: "build", prompt: "t", worktree: false }, lead)
+    await executeTeamSpawn(deps, { name: "a", agent: "build", prompt: "t" }, lead)
 
     const promptCalls = deps.client.calls.filter(c => c.method === "session.promptAsync")
     const model = (promptCalls[0]!.args[0] as { model?: unknown }).model
@@ -729,7 +734,7 @@ describe("stress: completion loop prevention (issue #3)", () => {
     await executeTeamCreate(deps, { name: "loop-stress" }, lead)
     const teamId = getTeamId(deps, "loop-stress")
     for (const name of ["alice", "bob", "carol"]) {
-      await executeTeamSpawn(deps, { name, agent: "build", prompt: `Task for ${name}`, worktree: false }, lead)
+      await executeTeamSpawn(deps, { name, agent: "build", prompt: `Task for ${name}` }, lead)
     }
 
     const aliceSess = getSession(deps, "alice")
@@ -781,7 +786,7 @@ describe("stress: completion loop prevention (issue #3)", () => {
 
     // 7. Shutdown and cleanup still works
     for (const name of ["alice", "bob", "carol"]) {
-      await executeTeamShutdown(deps, { member: name, force: true }, lead)
+      await executeTeamShutdown(deps, { member: name, force: true }, lead, undefined, noopPreserve)
     }
     const result = await executeTeamCleanup(deps, { force: false }, lead, undefined, noopMerge, noopDelete, false)
     expect(result).toContain("cleaned up")
@@ -790,7 +795,7 @@ describe("stress: completion loop prevention (issue #3)", () => {
   test("re-activated teammate can receive messages again", async () => {
     await executeTeamCreate(deps, { name: "reactivate" }, lead)
     const teamId = getTeamId(deps, "reactivate")
-    await executeTeamSpawn(deps, { name: "dave", agent: "build", prompt: "task", worktree: false }, lead)
+    await executeTeamSpawn(deps, { name: "dave", agent: "build", prompt: "task" }, lead)
     const daveSess = getSession(deps, "dave")
 
     // Dave reports and goes idle

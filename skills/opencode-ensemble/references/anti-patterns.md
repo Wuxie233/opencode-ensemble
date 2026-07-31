@@ -89,7 +89,7 @@ Why it fails:
 - Read-only roles create extra branches and blur ownership.
 
 Better approach:
-- Use `agent: "explore"` and `worktree: false` for scouts, reviewers, researchers, and auditors.
+- Use `profile: "scout"` or `profile: "reviewer"` with `worktree: false`. Use `researcher` only for durable Markdown output in an isolated writer worktree.
 
 ## Anti-Pattern: Hiding Plan Approval In The Prompt
 

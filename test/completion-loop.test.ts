@@ -21,7 +21,7 @@ describe("issue #3: completion loop prevention", () => {
   async function spawnAndComplete(teamName: string, memberName: string): Promise<{ teamId: string; memberSession: string }> {
     await executeTeamCreate(deps, { name: teamName }, leadSession)
     const team = deps.db.query("SELECT id FROM team WHERE name = ?").get(teamName) as { id: string }
-    await executeTeamSpawn(deps, { name: memberName, agent: "build", prompt: "task", worktree: false }, leadSession)
+    await executeTeamSpawn(deps, { name: memberName, agent: "build", prompt: "task" }, leadSession)
     const memberSession = (deps.db.query("SELECT session_id FROM team_member WHERE name = ?").get(memberName) as { session_id: string }).session_id
 
     // Teammate messages lead
@@ -37,7 +37,7 @@ describe("issue #3: completion loop prevention", () => {
   test("hasReportedCompletion is false after messaging lead but BEFORE going idle", async () => {
     await executeTeamCreate(deps, { name: "report-team" }, leadSession)
     const team = deps.db.query("SELECT id FROM team WHERE name = 'report-team'").get() as { id: string }
-    await executeTeamSpawn(deps, { name: "alice", agent: "build", prompt: "task", worktree: false }, leadSession)
+    await executeTeamSpawn(deps, { name: "alice", agent: "build", prompt: "task" }, leadSession)
     const aliceSession = (deps.db.query("SELECT session_id FROM team_member WHERE name = 'alice'").get() as { session_id: string }).session_id
 
     expect(hasReportedCompletion(deps.db, team.id, "alice")).toBe(false)
@@ -55,7 +55,7 @@ describe("issue #3: completion loop prevention", () => {
   test("hasReportedCompletion stays false if teammate goes idle WITHOUT messaging lead", async () => {
     await executeTeamCreate(deps, { name: "no-msg-team" }, leadSession)
     const team = deps.db.query("SELECT id FROM team WHERE name = 'no-msg-team'").get() as { id: string }
-    await executeTeamSpawn(deps, { name: "bob", agent: "build", prompt: "task", worktree: false }, leadSession)
+    await executeTeamSpawn(deps, { name: "bob", agent: "build", prompt: "task" }, leadSession)
     const bobSession = (deps.db.query("SELECT session_id FROM team_member WHERE name = 'bob'").get() as { session_id: string }).session_id
 
     // Bob goes idle without ever messaging lead
@@ -143,7 +143,7 @@ describe("issue #3: completion loop prevention", () => {
   test("teammate can still receive messages BEFORE going idle (Q&A works)", async () => {
     await executeTeamCreate(deps, { name: "qa-team" }, leadSession)
     const team = deps.db.query("SELECT id FROM team WHERE name = 'qa-team'").get() as { id: string }
-    await executeTeamSpawn(deps, { name: "grace", agent: "build", prompt: "task", worktree: false }, leadSession)
+    await executeTeamSpawn(deps, { name: "grace", agent: "build", prompt: "task" }, leadSession)
     const graceSession = (deps.db.query("SELECT session_id FROM team_member WHERE name = 'grace'").get() as { session_id: string }).session_id
 
     // Grace asks lead a question (messages lead, but is still busy)

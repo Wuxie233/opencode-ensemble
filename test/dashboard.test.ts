@@ -69,6 +69,7 @@ describe("dashboard", () => {
     test("returns team with members, tasks, messages", async () => {
       insertTeam(db, "t1", "alpha", "lead-sess")
       insertMember(db, "t1", "alice", "sess-a", "busy", "running")
+      db.run("UPDATE team_member SET profile = 'backend' WHERE team_id = 't1' AND name = 'alice'")
       insertTask(db, "t1", "task-1", "Fix auth", "in_progress", "high", "alice")
       insertMessage(db, "t1", "msg-1", "alice", "lead", "Done with auth fix")
 
@@ -88,6 +89,7 @@ describe("dashboard", () => {
       expect(team.members).toHaveLength(1)
       expect(team.members[0]!.name).toBe("alice")
       expect(team.members[0]!.agent).toBe("build")
+      expect(team.members[0]!.profile).toBe("backend")
       expect(team.members[0]!.status).toBe("busy")
       expect(team.members[0]!.executionStatus).toBe("running")
 

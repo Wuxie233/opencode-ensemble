@@ -9,7 +9,7 @@ Use these gates to prevent common coordination failures.
 - Each teammate has one clear owner area.
 - Every Scout has a distinct evidence domain; there is no fixed Scout limit.
 - No two builders are expected to edit the same files.
-- Read-only work uses `agent: "explore"` and `worktree: false`.
+- Read-only work uses `scout`, `planner`, or `reviewer` profiles and `worktree: false`.
 - Every writer uses `worktree: true`; a writer never falls back to the Lead directory after worktree creation failure.
 - Risky implementation work uses `plan_approval: true`.
 - Task dependencies are represented with `depends_on`.
