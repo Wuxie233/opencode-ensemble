@@ -1,12 +1,14 @@
-import type { ToolDeps } from "../types"
-import { requireLead, checkWorktreeDirty, countBranchCommits } from "./shared"
-import type { IsDirtyFn, CommitCountFn } from "./shared"
-import { getTeamResourceParts, preserveBranch, preservedBranchName, resolveWorktreeBranch } from "./merge-helper"
-import type { PreserveBranchFn, ResolveWorktreeBranchFn } from "./merge-helper"
+import { resolveAbortBranch } from "../abort-preservation"
 import { log } from "../log"
 import { sendLeadAlert } from "../messaging"
 import { recomputeCurrentPhase } from "../task-phase"
-import { resolveAbortBranch } from "../abort-preservation"
+import type { ToolDeps } from "../types"
+import type { PreserveBranchFn, ResolveWorktreeBranchFn } from "./merge-helper"
+import { getTeamResourceParts, preserveBranch, preservedBranchName, resolveWorktreeBranch } from "./merge-helper"
+import type { CommitCountFn, IsDirtyFn } from "./shared"
+import { checkWorktreeDirty, countBranchCommits, requireLead } from "./shared"
+
+const TERMINAL_EXECUTION_STATUSES = new Set(["completed", "cancelled", "failed", "timed_out"])
 
 /**
  * Execute the team_shutdown tool. Requests a teammate to shut down.
@@ -25,8 +27,8 @@ export async function executeTeamShutdown(
 ): Promise<string> {
   const teamInfo = requireLead(deps, sessionId)
 
-  const member = deps.db.query("SELECT session_id, status, worktree_branch, worktree_dir FROM team_member WHERE team_id = ? AND name = ?")
-    .get(teamInfo.teamId, args.member) as { session_id: string; status: string; worktree_branch: string | null; worktree_dir: string | null } | null
+  const member = deps.db.query("SELECT session_id, status, execution_status, worktree_branch, worktree_dir FROM team_member WHERE team_id = ? AND name = ?")
+    .get(teamInfo.teamId, args.member) as { session_id: string; status: string; execution_status: string; worktree_branch: string | null; worktree_dir: string | null } | null
   if (!member) throw new Error(`Teammate "${args.member}" not found in team "${teamInfo.teamName}"`)
   if (member.status === "shutdown") return `Teammate "${args.member}" is already shut down. No action was needed.`
 
@@ -37,6 +39,14 @@ export async function executeTeamShutdown(
     await preserveAndAbort(deps, teamInfo.teamId, args.member, member.session_id, member.worktree_branch, member.worktree_dir, preserve, resolveBranch)
     const status = await getBranchStatus(deps, teamInfo.teamId, args.member, member.worktree_dir, isDirty, commitCount)
     return `Force shut down "${args.member}".${status}`
+  }
+
+  // A terminal result is already authoritative. Do not wake the teammate into
+  // another turn even if OpenCode still reports its session as busy.
+  if (TERMINAL_EXECUTION_STATUSES.has(member.execution_status)) {
+    await preserveAndAbort(deps, teamInfo.teamId, args.member, member.session_id, member.worktree_branch, member.worktree_dir, preserve, resolveBranch)
+    const status = await getBranchStatus(deps, teamInfo.teamId, args.member, member.worktree_dir, isDirty, commitCount)
+    return `Teammate "${args.member}" has been shut down.${status}`
   }
 
   // Determine if member is idle or busy
@@ -212,7 +222,7 @@ async function preserveAndAbort(
   // can emit MessageAbortedError.
   const recorded = deps.db.run(
     `UPDATE team_member SET status = 'shutdown_requested', worktree_branch = COALESCE(?, worktree_branch), time_updated = ?
-     WHERE team_id = ? AND name = ? AND status NOT IN ('shutdown', 'error')`,
+     WHERE team_id = ? AND name = ? AND status != 'shutdown'`,
     [preservedBranch, Date.now(), teamId, memberName],
   )
   if (recorded.changes !== 1) {
@@ -240,7 +250,14 @@ function settleShutdown(deps: ToolDeps, teamId: string, memberName: string): voi
   deps.db.transaction(() => {
     const now = Date.now()
     const transitioned = deps.db.run(
-      "UPDATE team_member SET status = 'shutdown', execution_status = 'idle', time_updated = ? WHERE team_id = ? AND name = ? AND status = 'shutdown_requested'",
+      `UPDATE team_member
+       SET status = 'shutdown',
+           execution_status = CASE
+             WHEN execution_status IN ('completed', 'cancelled', 'failed', 'timed_out') THEN execution_status
+             ELSE 'idle'
+           END,
+           time_updated = ?
+       WHERE team_id = ? AND name = ? AND status = 'shutdown_requested'`,
       [now, teamId, memberName],
     )
     if (transitioned.changes !== 1) return

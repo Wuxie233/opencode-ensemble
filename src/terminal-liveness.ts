@@ -24,14 +24,17 @@ export class TerminalLivenessGuard {
   /** Return true when a terminal teammate owns the observed session. */
   async handle(sessionId: string, status: "busy" | "retry"): Promise<boolean> {
     const member = this.deps.db.query(
-      `SELECT tm.team_id, tm.name, tm.status, tm.worktree_branch, tm.worktree_dir
+      `SELECT tm.team_id, tm.name, tm.status, tm.execution_status, tm.worktree_branch, tm.worktree_dir
        FROM team_member tm
        JOIN team t ON t.id = tm.team_id
-       WHERE tm.session_id = ? AND t.status = 'active' AND tm.status IN ('shutdown', 'error')`,
+       WHERE tm.session_id = ? AND t.status = 'active'
+         AND (tm.status IN ('shutdown', 'error')
+           OR tm.execution_status IN ('cancelled', 'completed', 'failed', 'timed_out'))`,
     ).get(sessionId) as {
       team_id: string
       name: string
       status: string
+      execution_status: string
       worktree_branch: string | null
       worktree_dir: string | null
     } | null
@@ -55,6 +58,7 @@ export class TerminalLivenessGuard {
       team_id: string
       name: string
       status: string
+      execution_status: string
       worktree_branch: string | null
       worktree_dir: string | null
     },
@@ -79,8 +83,11 @@ export class TerminalLivenessGuard {
         return true
       }
       const recorded = this.deps.db.run(
-        "UPDATE team_member SET worktree_branch = ? WHERE team_id = ? AND name = ? AND status IN ('shutdown', 'error')",
-        [safeBranch, member.team_id, member.name],
+        `UPDATE team_member SET worktree_branch = ?
+         WHERE team_id = ? AND name = ? AND session_id = ?
+           AND (status IN ('shutdown', 'error')
+             OR execution_status IN ('cancelled', 'completed', 'failed', 'timed_out'))`,
+        [safeBranch, member.team_id, member.name, sessionId],
       )
       if (recorded.changes !== 1) return true
     }
@@ -91,7 +98,7 @@ export class TerminalLivenessGuard {
       const detail = error instanceof Error ? error.message : String(error)
       sendLeadAlert(this.deps.db, this.deps.client, {
         teamId: member.team_id,
-        content: `Terminal teammate "${member.name}" emitted a late ${status} event and could not be re-aborted (${detail}). Its ${member.status} state was retained; a later event will retry termination.`,
+        content: `Terminal teammate "${member.name}" emitted a late ${status} event and could not be re-aborted (${detail}). Its ${member.status}/${member.execution_status} state was retained; a later event will retry termination.`,
         wakeText: `[System: Terminal teammate ${member.name} resumed unexpectedly; retry guidance is available in team messages]`,
       })
     }
@@ -99,13 +106,13 @@ export class TerminalLivenessGuard {
   }
 
   private alertPreservationFailure(
-    member: { team_id: string; name: string; status: string },
+    member: { team_id: string; name: string; status: string; execution_status: string },
     status: "busy" | "retry",
     reason: string,
   ): void {
     sendLeadAlert(this.deps.db, this.deps.client, {
       teamId: member.team_id,
-      content: `Terminal teammate "${member.name}" emitted a late ${status} event, but ${reason}. No re-abort was attempted; its ${member.status} state and branch reference were retained for a later retry.`,
+      content: `Terminal teammate "${member.name}" emitted a late ${status} event, but ${reason}. No re-abort was attempted; its ${member.status}/${member.execution_status} state and branch reference were retained for a later retry.`,
       wakeText: `[System: Terminal teammate ${member.name} resumed but branch preservation blocked re-abort; guidance is available in team messages]`,
     })
   }

@@ -1,9 +1,11 @@
 import { describe, test, expect, beforeEach } from "bun:test"
-import { setupDeps, insertTeam, insertMember } from "../helpers"
-import { abortShutdownRequestedMember, executeTeamShutdown } from "../../src/tools/team-shutdown"
-import { executeTeamCleanup } from "../../src/tools/team-cleanup"
-import type { MergeBranchFn, DeleteBranchFn } from "../../src/tools/merge-helper"
 import { handleSessionErrorEvent } from "../../src/hooks"
+import type { DeleteBranchFn, MergeBranchFn } from "../../src/tools/merge-helper"
+import { executeTeamClaim } from "../../src/tools/team-claim"
+import { executeTeamCleanup } from "../../src/tools/team-cleanup"
+import { abortShutdownRequestedMember, executeTeamShutdown } from "../../src/tools/team-shutdown"
+import { executeTeamTasksComplete } from "../../src/tools/team-tasks-complete"
+import { insertMember, insertTeam, setupDeps } from "../helpers"
 
 /** Noop merge fn for tests that don't need real git. */
 const noopMerge: MergeBranchFn = async () => ({ ok: true })
@@ -84,6 +86,81 @@ describe("team_shutdown", () => {
     const row = deps.db.query("SELECT status FROM team_member WHERE name = ?").get("alice") as Record<string, string>
     expect(row.status).toBe("shutdown_requested")
   })
+
+  test("directly aborts a busy member after an atomic terminal result without releasing completed work", async () => {
+    deps.db.run("UPDATE team_member SET worktree_branch = 'live-alice' WHERE name = 'alice'")
+    insertTask(deps.db, "t1", "task-alice")
+    await executeTeamClaim(deps, { task_id: "task-alice" }, "sess-alice")
+    await executeTeamTasksComplete(deps, {
+      task_id: "task-alice",
+      result: {
+        summary: "Implemented the lifecycle fix",
+        details: "Verified terminal task completion before shutdown.",
+        branch: "live-alice",
+      },
+    }, "sess-alice")
+    deps.client.calls.length = 0
+    const lifecycle: string[] = []
+    deps.client.session.status = async () => {
+      lifecycle.push("status")
+      return { data: { "sess-alice": { type: "busy" } } }
+    }
+    deps.client.session.abort = async options => {
+      lifecycle.push("abort")
+      deps.client.calls.push({ method: "session.abort", args: [options] })
+      expect(deps.db.query("SELECT status, execution_status FROM team_member WHERE name = 'alice'").get())
+        .toEqual({ status: "shutdown_requested", execution_status: "completed" })
+      return {}
+    }
+
+    const result = await executeTeamShutdown(
+      deps,
+      { member: "alice" },
+      "lead-sess",
+      async () => false,
+      async () => { lifecycle.push("preserve"); return true },
+      async () => 1,
+    )
+
+    expect(result).toContain("shut down")
+    expect(lifecycle).toEqual(["preserve", "abort"])
+    expect(deps.client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(0)
+    expect(deps.db.query("SELECT status, execution_status FROM team_member WHERE name = 'alice'").get())
+      .toEqual({ status: "shutdown", execution_status: "completed" })
+    expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-alice'").get())
+      .toEqual({ status: "completed", assignee: "alice" })
+
+    const repeated = await executeTeamShutdown(deps, { member: "alice" }, "lead-sess", undefined, noopPreserve)
+    expect(repeated).toContain("already shut down")
+    expect(lifecycle).toEqual(["preserve", "abort"])
+    expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(1)
+  })
+
+  test.each(["cancelled", "failed", "timed_out"])(
+    "retains terminal execution status %s while directly aborting",
+    async executionStatus => {
+      deps.db.run(
+        "UPDATE team_member SET status = ?, execution_status = ?, worktree_branch = 'live-alice' WHERE name = 'alice'",
+        [executionStatus === "cancelled" ? "busy" : "error", executionStatus],
+      )
+      deps.client.calls.length = 0
+
+      await executeTeamShutdown(
+        deps,
+        { member: "alice" },
+        "lead-sess",
+        undefined,
+        noopPreserve,
+        async () => 0,
+      )
+
+      expect(deps.client.calls.filter(call => call.method === "session.status")).toHaveLength(0)
+      expect(deps.client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(0)
+      expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(1)
+      expect(deps.db.query("SELECT status, execution_status FROM team_member WHERE name = 'alice'").get())
+        .toEqual({ status: "shutdown", execution_status: executionStatus })
+    },
+  )
 
   test("records graceful shutdown intent before prompting the member", async () => {
     deps.client.session.status = async () => ({ data: { "sess-alice": { type: "busy" } } })

@@ -4,6 +4,7 @@ import type { RetryExhaustion } from "../src/hooks"
 import type { ToolDeps } from "../src/types"
 import { breakRetryLoop, handleRetryStatus } from "../src/retry-breaker"
 import { TerminalLivenessGuard } from "../src/terminal-liveness"
+import { executeTeamTasksComplete } from "../src/tools/team-tasks-complete"
 import { insertMember, insertTeam, setupDeps } from "./helpers"
 
 function insertAssignedTask(deps: ReturnType<typeof setupDeps>) {
@@ -281,6 +282,70 @@ describe("retry breaker", () => {
 })
 
 describe("terminal liveness guard", () => {
+  test.each(["busy", "retry"] as const)("protects a terminal task result from late %s activity", async eventStatus => {
+    const deps = setupRetryingMember()
+    deps.db.run(
+      `UPDATE team_member
+       SET retry_attempts = '[1,2,3,4,5]', retry_count = 5, worktree_branch = 'live-alice'
+       WHERE name = 'alice'`,
+    )
+    await executeTeamTasksComplete(deps, {
+      task_id: "task-retry",
+      result: {
+        summary: "Completed provider work",
+        details: "The assigned implementation and verification are complete.",
+        branch: "live-alice",
+      },
+    }, "sess-alice")
+    expect(deps.db.query(
+      "SELECT status, execution_status, retry_count, retry_tripped FROM team_member WHERE name = 'alice'",
+    ).get()).toEqual({ status: "busy", execution_status: "completed", retry_count: 5, retry_tripped: 0 })
+
+    if (eventStatus === "retry") {
+      let terminationCalls = 0
+      expect(await handleRetryStatus(
+        deps,
+        new RetryTracker(),
+        "sess-alice",
+        "retry",
+        "provider retried after terminal result",
+        7,
+        async () => {
+          terminationCalls += 1
+          return true
+        },
+      )).toBeUndefined()
+      expect(terminationCalls).toBe(0)
+      expect(deps.db.query(
+        "SELECT retry_attempts, retry_count, retry_tripped FROM team_member WHERE name = 'alice'",
+      ).get()).toEqual({ retry_attempts: "[1,2,3,4,5]", retry_count: 5, retry_tripped: 0 })
+    }
+
+    const order: string[] = []
+    deps.client.session.abort = async () => {
+      expect(deps.db.query(
+        "SELECT status, execution_status, worktree_branch FROM team_member WHERE name = 'alice'",
+      ).get()).toEqual({
+        status: "busy",
+        execution_status: "completed",
+        worktree_branch: expect.stringMatching(/^ensemble\/preserved\//),
+      })
+      order.push("abort")
+      return {}
+    }
+    const guard = new TerminalLivenessGuard(deps, async (source, target) => {
+      order.push(`preserve:${source}:${target}`)
+      return true
+    })
+
+    expect(await guard.handle("sess-alice", eventStatus)).toBe(true)
+    expect(order[0]).toStartWith("preserve:live-alice:ensemble/preserved/")
+    expect(order[1]).toBe("abort")
+    expect(deps.db.query(
+      "SELECT status, execution_status, retry_count, retry_tripped FROM team_member WHERE name = 'alice'",
+    ).get()).toEqual({ status: "busy", execution_status: "completed", retry_count: 5, retry_tripped: 0 })
+  })
+
   test("preserves a live branch before re-aborting a terminal member", async () => {
     const deps = setupDeps()
     insertTeam(deps.db, "t1", "my-team", "lead-sess")
