@@ -549,22 +549,6 @@ Each teammate now gets their own git worktree by default.
 - Race condition tests via Promise.all()
 - No mocks for business logic
 
-## Testing Strategy
-
-Scale tests to the behavior and risk instead of requiring a fixed test-first
-sequence for every edit.
-
-- Add or update tests for new behavior, bug regressions, public contracts,
-  concurrency, recovery, permissions, persistence, and security boundaries.
-- Mechanical documentation, formatting, and narrowly covered compatibility
-  edits may be implemented directly, then verified with the relevant checks.
-- Focus tests on observable behavior and failure modes rather than mirroring
-  implementation details.
-- Run focused checks while iterating and the repository completion gate before
-  marking work done. A visible Red/Green/Refactor transcript is not required.
-- For open questions, use the smallest experiment that resolves the unknown;
-  preserve a regression test when the result establishes a durable contract.
-
 ## Open Question Handling
 
 For open questions (Section 9 of .opencode/plans/architecture-plan.md):
