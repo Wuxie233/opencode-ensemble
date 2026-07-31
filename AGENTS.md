@@ -148,6 +148,12 @@ idle/busy events. Every Ensemble-initiated abort must first record
 an unexpected failure. Only transition a member to `shutdown` after
 `session.abort()` resolves; preservation or abort failures must leave it
 `shutdown_requested`, persist guidance for the Lead, and remain retryable.
+Graceful shutdown records `shutdown_requested` before asking the member to
+finish its current turn. When the session becomes idle, the controller refreshes
+branch preservation, aborts the session, and settles the terminal state; a
+Child is never told to stop itself. Ordinary peer, idle, stall, and chatty
+prompts are allowed only for active `ready`/`busy` members outside cancelling
+or terminal execution states.
 
 OpenCode owns ordinary provider retry policy. Without an alternate model in
 `modelFallbackByAgent`, keep attempts one through five silent and preserve the
@@ -205,7 +211,9 @@ alert and task-release path.
 The hard-timeout watchdog must honor recent process-shared `ActivityBuffer`
 activity before claiming a busy member, including a second check after branch
 preservation. A claimed timeout persists recovery guidance and wakes the Lead
-with fire-and-forget `promptAsync` before aborting the teammate.
+with fire-and-forget `promptAsync` before aborting the teammate. A writer branch
+without the project directory needed to preserve it fails closed and remains
+owned; the same rule applies during startup recovery.
 
 ### Sub-Agent Isolation
 
@@ -261,8 +269,9 @@ Three hooks wired in index.ts:
 8. Plan approval is prompt-enforced, not permission-based — the teammate's
    context message tells it to send a plan and wait for approval. No tool-level
    gating.
-9. Graceful shutdown with manual force — team_shutdown requests graceful stop
-   by default. Pass force: true to abort immediately.
+9. Controller-owned graceful shutdown — team_shutdown asks a busy teammate to
+   report and end its current turn. The controller settles it when idle. Pass
+   force: true to abort immediately after preservation.
 10. Never await promptAsync — all promptAsync calls are fire-and-forget.
     Awaiting blocks the caller if the transport is slow or broken. Messages
     are persisted in the DB first; the idle-flush backstop handles delivery.
@@ -303,8 +312,8 @@ that is not tied to any worktree. OpenCode cannot delete it.
    stale busy members on crash recovery
 5. `watchdog.ts` → timeout abort — preserves before aborting
    timed-out members
-6. `index.ts` → `busy_while_shutdown` event — verifies/re-preserves
-   before re-aborting a session that went busy after shutdown request
+6. `index.ts` → `idle_while_shutdown` / `busy_while_shutdown` events —
+   verify/re-preserve before controller settlement or a late re-abort
 7. `team-spawn.ts` → prompt or post-create registration failure — preserves
    any created worktree branch before aborting the child session
 

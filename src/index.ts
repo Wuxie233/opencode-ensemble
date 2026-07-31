@@ -10,7 +10,7 @@ import { MemberRegistry, DescendantTracker, PendingPurgeApprovals } from "./stat
 import { isWorktreeInstance } from "./util"
 import { handleSessionStatusEvent, handleSessionCreatedEvent, checkToolIsolation, shouldNudgeIdleMember, handleSessionErrorEvent, RetryTracker, shouldReleaseShutdownTracking } from "./hooks"
 import { notifyTeamEvent, notifyWorkingProgress } from "./notify"
-import { sendLeadAlert, hasReportedCompletion, flushPendingPeerMessage, releasePendingPeerDelivery } from "./messaging"
+import { sendLeadAlert, hasReportedCompletion, flushPendingPeerMessage, releasePendingPeerDelivery, isMemberPromptEligible } from "./messaging"
 import { buildLeadSystemPrompt, buildTeammateSystemPrompt, buildTeamCompactionContext } from "./system-prompt"
 import { log, initLog } from "./log"
 import { findTeamBySession } from "./types"
@@ -222,7 +222,7 @@ const plugin: Plugin = async (input) => {
             // Nudge teammate if they went idle without reporting to the lead (once only)
             // Skip if they already reported completion (issue #3 — prevents re-waking completed teammates)
             const nudgeKey = `${transition.teamId}:${transition.memberName}`
-            if (!nudgedMembers.has(nudgeKey) && shouldNudgeIdleMember(db, transition.teamId, transition.memberName) && !hasReportedCompletion(db, transition.teamId, transition.memberName)) {
+            if (!nudgedMembers.has(nudgeKey) && shouldNudgeIdleMember(db, transition.teamId, transition.memberName) && !hasReportedCompletion(db, transition.teamId, transition.memberName) && isMemberPromptEligible(db, transition.teamId, transition.memberName, ["ready"])) {
               nudgedMembers.add(nudgeKey)
               log(`nudge:idle-without-report name=${transition.memberName}`)
               client.session.promptAsync({
@@ -232,12 +232,12 @@ const plugin: Plugin = async (input) => {
             }
           } else if (transition.to === "error") {
             notifyTeamEvent(client, "error", { memberName: transition.memberName })
-          } else if (transition.to === "busy_while_shutdown") {
+          } else if (transition.to === "busy_while_shutdown" || transition.to === "idle_while_shutdown") {
             const member = deps.db.query(
               "SELECT worktree_branch, worktree_dir, name, team_id FROM team_member WHERE session_id = ?"
             ).get(sessionID) as { worktree_branch: string | null; worktree_dir: string | null; name: string; team_id: string } | null
             if (member) {
-              await abortShutdownRequestedMember(
+              const settled = await abortShutdownRequestedMember(
                 deps,
                 member.team_id,
                 member.name,
@@ -245,6 +245,7 @@ const plugin: Plugin = async (input) => {
                 member.worktree_branch,
                 member.worktree_dir,
               )
+              if (settled) notifyTeamEvent(client, "shutdown", { memberName: member.name })
             }
           }
 

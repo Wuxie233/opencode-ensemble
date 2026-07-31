@@ -232,3 +232,24 @@ export function hasReportedCompletion(db: Database, teamId: string, memberName: 
   ).get(teamId, memberName) as { reported_to_lead: number } | null
   return row?.reported_to_lead === 1
 }
+
+/** Return whether a teammate can safely receive a normal peer or liveness prompt. */
+export function isMemberPromptEligible(
+  db: Database,
+  teamId: string,
+  memberName: string,
+  allowedStatuses: readonly string[] = ["ready", "busy"],
+): boolean {
+  if (allowedStatuses.length === 0) return false
+  const placeholders = allowedStatuses.map(() => "?").join(", ")
+  const row = db.query(
+    `SELECT 1 AS eligible
+     FROM team_member tm
+     JOIN team t ON t.id = tm.team_id
+     WHERE tm.team_id = ? AND tm.name = ? AND t.status = 'active'
+       AND tm.status IN (${placeholders})
+       AND tm.execution_status NOT IN ('cancel_requested', 'cancelling', 'cancelled', 'completing', 'completed', 'failed', 'timed_out')
+       AND tm.reported_to_lead = 0`,
+  ).get(teamId, memberName, ...allowedStatuses) as { eligible: number } | null
+  return row?.eligible === 1
+}

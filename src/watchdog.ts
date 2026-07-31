@@ -3,10 +3,11 @@ import type { PluginClient } from "./types"
 import type { MemberRegistry } from "./state"
 import type { ProgressTracker } from "./progress"
 import type { ActivityBuffer } from "./activity"
-import { preserveBranch, preservedBranchName, resolveWorktreeBranch } from "./tools/merge-helper"
-import { sendLeadAlert, sendMessage, wakeTeamLead } from "./messaging"
+import { preserveBranch, preservedBranchName } from "./tools/merge-helper"
+import { sendLeadAlert, isMemberPromptEligible } from "./messaging"
 import { log } from "./log"
 import { recomputeCurrentPhase } from "./task-phase"
+import { resolveAbortBranch } from "./abort-preservation"
 
 interface WatchdogOpts {
   db: Database
@@ -126,6 +127,7 @@ export class Watchdog {
       const timeStalled = this.progressTracker.isTimeStalled(member.session_id, this.stallThresholdMs)
 
       if (!tokenStalled && !timeStalled) continue
+      if (!isMemberPromptEligible(this.db, member.team_id, member.name, ["busy"])) continue
 
       this.progressTracker.markReported(member.session_id)
       const reason = tokenStalled ? "low output tokens" : "no communication"
@@ -170,6 +172,7 @@ export class Watchdog {
     for (const member of busy) {
       if (this.progressTracker.isChattyReported(member.session_id)) continue
       if (!this.progressTracker.isChatty(member.session_id, this.peerMessageLimit, this.peerMessageWindowMs)) continue
+      if (!isMemberPromptEligible(this.db, member.team_id, member.name, ["busy"])) continue
 
       this.progressTracker.markChattyReported(member.session_id)
 
@@ -230,20 +233,27 @@ export class Watchdog {
 
       // Preserve branch BEFORE abort — session.abort() may destroy the worktree + branch
       let preservedBranch: string | null = null
-      let sourceBranch = member.worktree_branch
-      if (sourceBranch?.startsWith("ensemble/preserved/") && member.worktree_dir) {
-        sourceBranch = await resolveWorktreeBranch(member.worktree_dir)
-        if (!sourceBranch || sourceBranch.startsWith("ensemble/preserved/")) {
-          sendLeadAlert(this.db, this.client, {
-            teamId: member.team_id,
-            content: `Teammate "${member.name}" exceeded its timeout, but its live branch could not be resolved from worktree ${member.worktree_dir}. No abort was attempted; inspect the worktree and retry.`,
-            wakeText: `[System: Watchdog could not resolve ${member.name}'s live worktree branch; guidance is available in team messages]`,
-          })
-          this.abortingSessions.delete(member.session_id)
-          continue
-        }
+      const resolution = await resolveAbortBranch(member.worktree_branch, member.worktree_dir)
+      if (!resolution.ok) {
+        sendLeadAlert(this.db, this.client, {
+          teamId: member.team_id,
+          content: `Teammate "${member.name}" exceeded its timeout, but ${resolution.reason}. No abort was attempted; inspect the worktree and retry.`,
+          wakeText: `[System: Watchdog could not resolve ${member.name}'s live worktree branch; guidance is available in team messages]`,
+        })
+        this.abortingSessions.delete(member.session_id)
+        continue
       }
-      if (this.cwd && sourceBranch && !sourceBranch.startsWith("ensemble/preserved/")) {
+      const sourceBranch = resolution.sourceBranch
+      if (sourceBranch && !this.cwd) {
+        sendLeadAlert(this.db, this.client, {
+          teamId: member.team_id,
+          content: `Teammate "${member.name}" exceeded its timeout with writer branch "${sourceBranch}", but no project directory was available to preserve it. No abort was attempted.`,
+          wakeText: `[System: Watchdog could not preserve ${member.name} without its project directory; guidance is available in team messages]`,
+        })
+        this.abortingSessions.delete(member.session_id)
+        continue
+      }
+      if (this.cwd && sourceBranch) {
         const safeBranch = preservedBranchName(member.project_name, member.team_name, member.team_id, member.name)
         const ok = await preserveBranch(sourceBranch, safeBranch, this.cwd)
         if (!ok) {
@@ -284,15 +294,19 @@ export class Watchdog {
           continue
         }
       }
+      const timeoutAlertId = sendLeadAlert(this.db, this.client, {
+        teamId: member.team_id,
+        content: `Teammate "${member.name}" exceeded its timeout and termination is in progress. Its task remains owned until abort settles; inspect the preserved branch and use resume_from: "${member.name}" only after a terminal result.`,
+        wakeText: `[System: Teammate ${member.name} timed out and termination is in progress; guidance is available in team messages]`,
+      })
       try {
         await this.client.session.abort({ sessionID: member.session_id })
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
-        sendLeadAlert(this.db, this.client, {
-          teamId: member.team_id,
-          content: `Teammate "${member.name}" exceeded its timeout, but the session could not abort. The durable cancelling claim and in-progress task remain owned; retry startup recovery or use team_shutdown with force: true. Error: ${message}.`,
-          wakeText: `[System: Watchdog could not abort ${member.name}; retry guidance is available in team messages]`,
-        })
+        this.db.run(
+          "UPDATE team_message SET content = ? WHERE id = ? AND team_id = ? AND from_name = 'system' AND to_name = 'lead'",
+          [`Teammate "${member.name}" exceeded its timeout, but the session could not abort. The durable cancelling claim and in-progress task remain owned; retry startup recovery or use team_shutdown with force: true. Error: ${message}.`, timeoutAlertId, member.team_id],
+        )
         continue
       } finally {
         this.abortingSessions.delete(member.session_id)
@@ -313,22 +327,13 @@ export class Watchdog {
           [now, member.team_id, member.name],
         )
         recomputeCurrentPhase(this.db, member.team_id, now)
-        sendMessage(this.db, {
-          teamId: member.team_id,
-          from: "system",
-          to: "lead",
-          content: `Teammate "${member.name}" (${member.session_id}) timed out and was stopped. Inspect its session and preserved branch, then replace it with team_spawn using resume_from: "${member.name}" if needed.`,
-        })
+        this.db.run(
+          "UPDATE team_message SET content = ? WHERE id = ? AND team_id = ? AND from_name = 'system' AND to_name = 'lead'",
+          [`Teammate "${member.name}" (${member.session_id}) timed out and was stopped. Inspect its session and preserved branch, then replace it with team_spawn using resume_from: "${member.name}" if needed.`, timeoutAlertId, member.team_id],
+        )
         return true
       })()
       if (!transitioned) continue
-
-      wakeTeamLead(
-        this.db,
-        this.client,
-        member.team_id,
-        `[System: Teammate ${member.name} timed out; recovery guidance is available in team messages]`,
-      )
 
       // Notify
       try {

@@ -9,6 +9,7 @@ import {
   type PreserveBranchFn,
   type ResolveWorktreeBranchFn,
 } from "./tools/merge-helper"
+import { resolveAbortBranch } from "./abort-preservation"
 
 const activeReaborts = new Map<string, Promise<boolean>>()
 
@@ -58,20 +59,19 @@ export class TerminalLivenessGuard {
       worktree_dir: string | null
     },
   ): Promise<boolean> {
-    let sourceBranch = member.worktree_branch
-    if (sourceBranch?.startsWith("ensemble/preserved/") && member.worktree_dir) {
-      try {
-        sourceBranch = await this.resolveBranch(member.worktree_dir)
-      } catch {
-        this.alertPreservationFailure(member, status, "its live source branch could not be resolved")
-        return true
-      }
-      if (!sourceBranch || sourceBranch.startsWith("ensemble/preserved/")) {
-        this.alertPreservationFailure(member, status, "its live source branch could not be resolved")
-        return true
-      }
+    let resolution
+    try {
+      resolution = await resolveAbortBranch(member.worktree_branch, member.worktree_dir, this.resolveBranch)
+    } catch {
+      this.alertPreservationFailure(member, status, "its live source branch could not be resolved")
+      return true
     }
-    if (sourceBranch && !sourceBranch.startsWith("ensemble/preserved/")) {
+    if (!resolution.ok) {
+      this.alertPreservationFailure(member, status, resolution.reason)
+      return true
+    }
+    const sourceBranch = resolution.sourceBranch
+    if (sourceBranch) {
       const resource = getTeamResourceParts(this.deps.db, member.team_id)
       const safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, member.name)
       if (!await this.preserve(sourceBranch, safeBranch, this.deps.directory)) {

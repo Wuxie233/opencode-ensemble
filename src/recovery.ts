@@ -11,11 +11,13 @@ import {
   sendLeadAlert,
   sendMessage,
   wakeTeamLead,
+  isMemberPromptEligible,
 } from "./messaging"
-import { preserveBranch, preservedBranchName, resolveWorktreeBranch, teamResourceSegment } from "./tools/merge-helper"
+import { preserveBranch, preservedBranchName, teamResourceSegment } from "./tools/merge-helper"
 import { log } from "./log"
 import { runCommand } from "./process"
 import { recomputeCurrentPhase } from "./task-phase"
+import { resolveAbortBranch } from "./abort-preservation"
 
 /**
  * Scan for team members stuck in 'busy' status (stale from a crash)
@@ -78,19 +80,25 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
     if (liveSessions[member.session_id] && kind === "stale") continue
     // Preserve branch BEFORE abort — session.abort() may destroy the worktree + branch
     let preservedBranch: string | null = null
-    let sourceBranch = member.worktree_branch
-    if (sourceBranch?.startsWith("ensemble/preserved/") && member.worktree_dir) {
-      sourceBranch = await resolveWorktreeBranch(member.worktree_dir)
-      if (!sourceBranch || sourceBranch.startsWith("ensemble/preserved/")) {
-        sendLeadAlert(db, client, {
-          teamId: member.team_id,
-          content: `Startup recovery found orphaned teammate "${member.name}", but its live branch could not be resolved from worktree ${member.worktree_dir}. No abort was attempted; inspect the worktree and retry.`,
-          wakeText: `[System: Startup recovery could not resolve ${member.name}'s live worktree branch; guidance is available in team messages]`,
-        })
-        continue
-      }
+    const resolution = await resolveAbortBranch(member.worktree_branch, member.worktree_dir)
+    if (!resolution.ok) {
+      sendLeadAlert(db, client, {
+        teamId: member.team_id,
+        content: `Startup recovery found orphaned teammate "${member.name}", but ${resolution.reason}. No abort was attempted; inspect the worktree and retry.`,
+        wakeText: `[System: Startup recovery could not resolve ${member.name}'s live worktree branch; guidance is available in team messages]`,
+      })
+      continue
     }
-    if (cwd && sourceBranch && !sourceBranch.startsWith("ensemble/preserved/")) {
+    const sourceBranch = resolution.sourceBranch
+    if (sourceBranch && !cwd) {
+      sendLeadAlert(db, client, {
+        teamId: member.team_id,
+        content: `Startup recovery found orphaned teammate "${member.name}" with writer branch "${sourceBranch}", but no project directory was available to preserve it. No abort was attempted.`,
+        wakeText: `[System: Startup recovery could not preserve ${member.name} without its project directory; guidance is available in team messages]`,
+      })
+      continue
+    }
+    if (cwd && sourceBranch) {
       const safeBranch = preservedBranchName(member.project_name, member.team_name, member.team_id, member.name)
       const ok = await preserveBranch(sourceBranch, safeBranch, cwd)
       if (!ok) {
@@ -277,6 +285,8 @@ export async function recoverUndeliveredMessages(
         markDelivered(db, msg.id)
         continue
       }
+
+      if (!isMemberPromptEligible(db, team.id, msg.to_name!)) continue
 
       if (!claimPeerMessageDelivery(db, msg.id, Date.now() - MESSAGE_DELIVERY_LEASE_MS)) continue
 

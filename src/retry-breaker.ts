@@ -6,6 +6,7 @@ import { getTeamResourceParts, preserveBranch, preservedBranchName, resolveWorkt
 import type { PreserveBranchFn, ResolveWorktreeBranchFn } from "./tools/merge-helper"
 import { sendLeadAlert, sendMessage, wakeTeamLead } from "./messaging"
 import { log } from "./log"
+import { resolveAbortBranch } from "./abort-preservation"
 import { recomputeCurrentPhase } from "./task-phase"
 
 const activeTerminations = new Map<string, Promise<RetryExhaustion | undefined>>()
@@ -74,24 +75,17 @@ export async function breakRetryLoop(
 
   let preservedBranch: string | null = null
   try {
-    let sourceBranch = member.worktree_branch
-    if (sourceBranch?.startsWith("ensemble/preserved/")) {
-      preservedBranch = sourceBranch
-      if (member.worktree_dir) {
-        sourceBranch = await resolveBranch(member.worktree_dir)
-        if (!sourceBranch || sourceBranch.startsWith("ensemble/preserved/")) {
-          restoreRetryOwnership(deps, request)
-          sendLeadAlert(deps.db, deps.client, {
-            teamId: request.teamId,
-            content: `Teammate "${request.memberName}" exhausted ${request.attempts} consecutive retries, but its live branch could not be resolved from ${member.worktree_dir}. No abort was attempted; the member and task remain owned.`,
-            wakeText: `[System: Retry breaker could not resolve ${request.memberName}'s live branch; guidance is available in team messages]`,
-          })
-          return false
-        }
-      } else {
-        sourceBranch = null
-      }
+    const resolution = await resolveAbortBranch(member.worktree_branch, member.worktree_dir, resolveBranch)
+    if (!resolution.ok) {
+      restoreRetryOwnership(deps, request)
+      sendLeadAlert(deps.db, deps.client, {
+        teamId: request.teamId,
+        content: `Teammate "${request.memberName}" exhausted ${request.attempts} consecutive retries, but ${resolution.reason}. No abort was attempted; the member and task remain owned.`,
+        wakeText: `[System: Retry breaker could not resolve ${request.memberName}'s live branch; guidance is available in team messages]`,
+      })
+      return false
     }
+    const sourceBranch = resolution.sourceBranch
     if (sourceBranch) {
       const resource = getTeamResourceParts(deps.db, request.teamId)
       const safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, request.memberName)

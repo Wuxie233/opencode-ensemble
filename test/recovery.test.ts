@@ -271,6 +271,19 @@ describe("recoverStaleMembers", () => {
     expect((db.query("SELECT content FROM team_message WHERE team_id = 't1' AND to_name = 'lead'").get() as { content: string }).content).toContain("could not be preserved")
   })
 
+  test("fails closed when an orphaned writer has a branch but recovery cwd is missing", async () => {
+    insertTeam(db, "t1", "my-team", "lead-sess")
+    insertMember(db, "t1", "alice", "sess-1", "busy", "running")
+    db.run("UPDATE team_member SET worktree_branch = 'live-alice' WHERE team_id = 't1' AND name = 'alice'")
+
+    expect((await recoverStaleMembers(db, client)).interrupted).toBe(0)
+    expect(client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
+    expect(db.query("SELECT status, execution_status FROM team_member WHERE name = 'alice'").get())
+      .toEqual({ status: "busy", execution_status: "running" })
+    expect((db.query("SELECT content FROM team_message WHERE team_id = 't1' AND to_name = 'lead'").get() as { content: string }).content)
+      .toContain("project directory")
+  })
+
   test("does not mark an orphan terminal or release its task before abort resolves", async () => {
     insertTeam(db, "t1", "my-team", "lead-sess")
     insertMember(db, "t1", "alice", "sess-1", "busy", "running")

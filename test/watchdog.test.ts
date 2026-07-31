@@ -150,13 +150,38 @@ describe("Watchdog", () => {
     expect(prompts).toHaveLength(1)
     expect(prompts[0]?.args[0]).toEqual({
       sessionID: "lead-sess",
-      parts: [{ type: "text", text: "[System: Teammate alice timed out; recovery guidance is available in team messages]" }],
+      parts: [{ type: "text", text: "[System: Teammate alice timed out and termination is in progress; guidance is available in team messages]" }],
     })
     const alert = deps.db.query(
       "SELECT content, delivered FROM team_message WHERE team_id = ? AND from_name = 'system' AND to_name = 'lead'",
     ).get("t1") as { content: string; delivered: number }
     expect(alert.content).toContain('resume_from: "alice"')
     expect(alert.delivered).toBe(0)
+  })
+
+  test("persists and wakes timeout guidance before an abort that hangs", async () => {
+    const pastTime = Date.now() - 60_000
+    deps.db.run(
+      "INSERT INTO team_member (team_id, name, session_id, agent, status, execution_status, time_created, time_updated) VALUES (?, ?, ?, 'build', 'busy', 'running', ?, ?)",
+      ["t1", "alice", "sess-a", pastTime, pastTime],
+    )
+    deps.client.session.abort = async options => {
+      deps.client.calls.push({ method: "session.abort", args: [options] })
+      return new Promise(() => { /* hangs */ })
+    }
+    const watchdog = new Watchdog({ db: deps.db, client: deps.client, registry: deps.registry, ttlMs: 30_000 })
+    void watchdog.check()
+    await Bun.sleep(10)
+
+    const message = deps.db.query(
+      "SELECT content FROM team_message WHERE team_id = 't1' AND from_name = 'system' AND to_name = 'lead'",
+    ).get() as { content: string } | null
+    expect(message?.content).toContain("termination is in progress")
+    const prompts = deps.client.calls.filter(call => call.method === "session.promptAsync")
+    expect(prompts).toHaveLength(1)
+    expect((prompts[0]!.args[0] as { sessionID: string }).sessionID).toBe("lead-sess")
+    expect(deps.db.query("SELECT status, execution_status FROM team_member WHERE name = 'alice'").get())
+      .toEqual({ status: "busy", execution_status: "cancelling" })
   })
 
   test("does not time out non-busy members", async () => {
@@ -437,6 +462,22 @@ describe("Watchdog", () => {
     expect((deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-a'").get() as { status: string; assignee: string })).toEqual({ status: "in_progress", assignee: "alice" })
     expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
     expect((deps.db.query("SELECT content FROM team_message WHERE team_id = 't1' AND to_name = 'lead'").get() as { content: string }).content).toContain("could not be preserved")
+  })
+
+  test("fails closed when a timed-out writer has a branch but watchdog cwd is missing", async () => {
+    const pastTime = Date.now() - 60_000
+    deps.db.run(
+      "INSERT INTO team_member (team_id, name, session_id, agent, status, execution_status, worktree_branch, time_created, time_updated) VALUES ('t1', 'alice', 'sess-a', 'build', 'busy', 'running', 'live-alice', ?, ?)",
+      [pastTime, pastTime],
+    )
+
+    await new Watchdog({ db: deps.db, client: deps.client, registry: deps.registry, ttlMs: 30_000 }).check()
+
+    expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
+    expect(deps.db.query("SELECT status, execution_status FROM team_member WHERE name = 'alice'").get())
+      .toEqual({ status: "busy", execution_status: "running" })
+    expect((deps.db.query("SELECT content FROM team_message WHERE team_id = 't1' AND to_name = 'lead'").get() as { content: string }).content)
+      .toContain("project directory")
   })
 
   test("start and stop control the interval", () => {

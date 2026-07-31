@@ -252,7 +252,9 @@ export function handleSessionStatusEvent(
   if (status === "idle" && member.execution_status === "cancelling") return undefined
 
   if (status === "idle") {
-    if (member.status === "shutdown_requested") return undefined
+    if (member.status === "shutdown_requested") {
+      return { memberName: entry.memberName, teamId: entry.teamId, from: "shutdown_requested", to: "idle_while_shutdown" }
+    }
     const newStatus = "ready"
     if (member.status === newStatus) return undefined
     db.run(

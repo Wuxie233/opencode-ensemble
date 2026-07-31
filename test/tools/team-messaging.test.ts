@@ -38,6 +38,17 @@ describe("team_message", () => {
     expect(promptCalls).toHaveLength(1)
   })
 
+  test("stores but does not wake a shutdown_requested teammate", async () => {
+    deps.db.run("UPDATE team_member SET status = 'shutdown_requested', execution_status = 'cancelling' WHERE team_id = 't1' AND name = 'bob'")
+
+    const result = await executeTeamMessage(deps, { to: "bob", text: "late detail" }, "sess-alice")
+
+    expect(result).toContain("stored")
+    expect(deps.client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(0)
+    expect((deps.db.query("SELECT content, delivered FROM team_message WHERE to_name = 'bob'").get() as { content: string; delivered: number }))
+      .toEqual({ content: "late detail", delivered: 0 })
+  })
+
   test("lead sends message to teammate", async () => {
     const result = await executeTeamMessage(deps, { to: "alice", text: "check this" }, "lead-sess")
     expect(result).toContain("alice")
@@ -139,6 +150,17 @@ describe("team_broadcast", () => {
     // Should call promptAsync for alice + bob (not lead)
     const promptCalls = deps.client.calls.filter(c => c.method === "session.promptAsync")
     expect(promptCalls).toHaveLength(2)
+  })
+
+  test("broadcast does not wake shutdown_requested teammates", async () => {
+    deps.db.run("UPDATE team_member SET status = 'shutdown_requested', execution_status = 'cancelling' WHERE team_id = 't1' AND name = 'bob'")
+
+    await executeTeamBroadcast(deps, { text: "late broadcast" }, "sess-alice")
+
+    const targets = deps.client.calls
+      .filter(call => call.method === "session.promptAsync")
+      .map(call => (call.args[0] as { sessionID: string }).sessionID)
+    expect(targets).toEqual(["lead-sess"])
   })
 
   test("rejects if sender is not in a team", async () => {

@@ -1,6 +1,6 @@
 import type { ToolDeps } from "../types"
 import { requireTeamMember } from "./shared"
-import { sendMessage, markDelivered, hasReportedCompletion } from "../messaging"
+import { sendMessage, markDelivered, hasReportedCompletion, isMemberPromptEligible } from "../messaging"
 import { log } from "../log"
 
 /**
@@ -37,16 +37,22 @@ export async function executeTeamBroadcast(
   // cannot hide another recipient's failed delivery.
   let skipped = 0
   for (const recipient of recipients) {
-    if (recipient.name !== "lead" && hasReportedCompletion(deps.db, teamInfo.teamId, recipient.name)) {
-      skipped++
-      continue
-    }
     const msgId = sendMessage(deps.db, {
       teamId: teamInfo.teamId,
       from: senderName,
       to: recipient.name,
       content: args.text,
     })
+    if (
+      recipient.name !== "lead"
+      && (
+        hasReportedCompletion(deps.db, teamInfo.teamId, recipient.name)
+        || !isMemberPromptEligible(deps.db, teamInfo.teamId, recipient.name)
+      )
+    ) {
+      skipped++
+      continue
+    }
     const text = recipient.name === "lead"
       ? `[System: New team broadcast from ${senderName}]`
       : `[Team broadcast from ${senderName}]: ${args.text}`

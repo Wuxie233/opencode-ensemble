@@ -257,6 +257,16 @@ describe("retry breaker", () => {
     expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
   })
 
+  test("does not abort a preserved retry branch without live worktree metadata", async () => {
+    const deps = setupRetryingMember()
+    deps.db.run("UPDATE team_member SET worktree_branch = 'ensemble/preserved/project/team/alice', worktree_dir = NULL WHERE name = 'alice'")
+
+    expect(await breakRetryLoop(deps, requestFor(deps), async () => true)).toBe(false)
+    expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
+    expect((deps.db.query("SELECT content FROM team_message WHERE team_id = 't1' AND to_name = 'lead'").get() as { content: string }).content)
+      .toContain("no live worktree metadata")
+  })
+
   test("only one tracker instance can claim the sixth retry", () => {
     const deps = setupRetryingMember()
     const first = new RetryTracker()
@@ -337,6 +347,18 @@ describe("terminal liveness guard", () => {
     expect(await guard.handle("sess-alice", "busy")).toBe(true)
     expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
     expect((deps.db.query("SELECT status FROM team_member WHERE name = 'alice'").get() as { status: string }).status).toBe("shutdown")
+  })
+
+  test("does not re-abort a preserved terminal branch without live worktree metadata", async () => {
+    const deps = setupDeps()
+    insertTeam(deps.db, "t1", "my-team", "lead-sess")
+    insertMember(deps.db, "t1", "alice", "sess-alice", "shutdown", "idle")
+    deps.db.run("UPDATE team_member SET worktree_branch = 'ensemble/preserved/default/my-team#t1/alice', worktree_dir = NULL WHERE name = 'alice'")
+
+    expect(await new TerminalLivenessGuard(deps).handle("sess-alice", "busy")).toBe(true)
+    expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
+    expect((deps.db.query("SELECT content FROM team_message WHERE team_id = 't1' AND to_name = 'lead'").get() as { content: string }).content)
+      .toContain("no live worktree metadata")
   })
 
   test.each([

@@ -85,6 +85,38 @@ describe("team_shutdown", () => {
     expect(row.status).toBe("shutdown_requested")
   })
 
+  test("records graceful shutdown intent before prompting the member", async () => {
+    deps.client.session.status = async () => ({ data: { "sess-alice": { type: "busy" } } })
+    deps.client.session.promptAsync = async options => {
+      deps.client.calls.push({ method: "session.promptAsync", args: [options] })
+      expect(deps.db.query("SELECT status FROM team_member WHERE name = 'alice'").get())
+        .toEqual({ status: "shutdown_requested" })
+      return {}
+    }
+
+    await executeTeamShutdown(deps, { member: "alice" }, "lead-sess", undefined, noopPreserve)
+  })
+
+  test("resolves and preserves a writer branch from worktree metadata before graceful prompt", async () => {
+    deps.db.run("UPDATE team_member SET worktree_dir = '/tmp/wt-alice', worktree_branch = NULL WHERE name = 'alice'")
+    deps.client.session.status = async () => ({ data: { "sess-alice": { type: "busy" } } })
+    const preserved: string[] = []
+
+    await executeTeamShutdown(
+      deps,
+      { member: "alice" },
+      "lead-sess",
+      undefined,
+      async source => { preserved.push(source); return true },
+      undefined,
+      async () => "live-alice",
+    )
+
+    expect(preserved).toEqual(["live-alice"])
+    expect(deps.db.query("SELECT status FROM team_member WHERE name = 'alice'").get())
+      .toEqual({ status: "shutdown_requested" })
+  })
+
   test("idle member is aborted immediately, no promptAsync", async () => {
     deps.client.session.status = async () => {
       deps.client.calls.push({ method: "session.status", args: [] })
@@ -312,6 +344,29 @@ describe("team_shutdown", () => {
     const text = (promptCalls[0]!.args[0] as { parts: Array<{ text: string }> }).parts[0]!.text
     expect(text).toContain("[Shutdown requested]")
     expect(text).toContain("team_message")
+    expect(text).toContain("end your current turn")
+    expect(text).toContain("controller")
+    expect(text).not.toContain("then stop")
+  })
+
+  test("controller settles graceful shutdown after the member reaches idle", async () => {
+    deps.db.run("UPDATE team_member SET status = 'shutdown_requested', execution_status = 'running' WHERE name = 'alice'")
+    insertTask(deps.db, "t1", "task-alice")
+    deps.db.run("UPDATE team_task SET status = 'in_progress', assignee = 'alice' WHERE id = 'task-alice'")
+
+    const transition = (await import("../../src/hooks")).handleSessionStatusEvent(
+      deps.db,
+      deps.registry,
+      "sess-alice",
+      "idle",
+    )
+    expect(transition?.to).toBe("idle_while_shutdown")
+    expect(await abortShutdownRequestedMember(deps, "t1", "alice", "sess-alice", null, null, noopPreserve)).toBe(true)
+    expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(1)
+    expect(deps.db.query("SELECT status, execution_status FROM team_member WHERE name = 'alice'").get())
+      .toEqual({ status: "shutdown", execution_status: "idle" })
+    expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-alice'").get())
+      .toEqual({ status: "pending", assignee: null })
   })
 
   // --- Dirty worktree warning tests ---
@@ -556,6 +611,32 @@ describe("team_cleanup", () => {
       `preserve:ensemble-my-team-alice:${preservedBranch}`,
       "abort",
     ])
+  })
+
+  test("force cleanup resolves a missing branch from writer worktree metadata before abort", async () => {
+    insertMember(deps.db, "t1", "alice", "sess-alice", "busy", "running")
+    deps.db.run("UPDATE team_member SET worktree_dir = '/tmp/wt-alice', worktree_branch = NULL WHERE name = 'alice'")
+    const preserved: string[] = []
+
+    const result = await executeTeamCleanup(
+      deps,
+      { force: true },
+      "lead-sess",
+      undefined,
+      noopMerge,
+      noopDelete,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      async source => { preserved.push(source); return true },
+      async () => "live-alice",
+    )
+
+    expect(result).toContain("require explicit merge verification")
+    expect(preserved).toEqual(["live-alice"])
+    expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(1)
   })
 
   test("force cleanup blocks abort and retains ownership when a legacy live branch cannot be resolved", async () => {

@@ -74,7 +74,7 @@ describe("handleSessionStatusEvent", () => {
     })
   })
 
-  test("keeps shutdown_requested member nonterminal when session becomes idle", () => {
+  test("signals controller settlement when a shutdown_requested member becomes idle", () => {
     insertTeam(db, "t1", "my-team", "lead-sess")
     insertMember(db, "t1", "alice", "sess-1", "shutdown_requested", "running")
     registry.register("t1", "alice", "sess-1")
@@ -84,7 +84,12 @@ describe("handleSessionStatusEvent", () => {
     const row = db.query("SELECT status, execution_status FROM team_member WHERE session_id = ?").get("sess-1") as Record<string, string>
     expect(row.status).toBe("shutdown_requested")
     expect(row.execution_status).toBe("running")
-    expect(result).toBeUndefined()
+    expect(result).toEqual({
+      memberName: "alice",
+      teamId: "t1",
+      from: "shutdown_requested",
+      to: "idle_while_shutdown",
+    })
   })
 
   test("transitions ready member to busy when session becomes busy", () => {
@@ -244,14 +249,21 @@ describe("handleSessionStatusEvent", () => {
     })
   })
 
-  test("does not report shutdown transition from an idle event alone", () => {
+  test("reports shutdown settlement from an idle event without mutating terminal state", () => {
     insertTeam(db, "t1", "my-team", "lead-sess")
     insertMember(db, "t1", "alice", "sess-1", "shutdown_requested", "running")
     registry.register("t1", "alice", "sess-1")
 
     const result = handleSessionStatusEvent(db, registry, "sess-1", "idle")
 
-    expect(result).toBeUndefined()
+    expect(result).toEqual({
+      memberName: "alice",
+      teamId: "t1",
+      from: "shutdown_requested",
+      to: "idle_while_shutdown",
+    })
+    expect(db.query("SELECT status, execution_status FROM team_member WHERE session_id = 'sess-1'").get())
+      .toEqual({ status: "shutdown_requested", execution_status: "running" })
   })
 
   test("returns undefined for unknown sessions", () => {

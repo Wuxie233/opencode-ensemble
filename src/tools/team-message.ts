@@ -1,7 +1,7 @@
 import type { ToolDeps } from "../types"
 import { resolveRecipientSession } from "../types"
 import { requireTeamMember } from "./shared"
-import { sendMessage, markDelivered, hasReportedCompletion } from "../messaging"
+import { sendMessage, markDelivered, hasReportedCompletion, isMemberPromptEligible } from "../messaging"
 import { log } from "../log"
 import { immediateTransaction } from "../db"
 import { appendTeamEvent } from "../team-event"
@@ -181,6 +181,9 @@ export async function executeTeamMessage(
   // Guard: skip promptAsync delivery to teammates who have already reported completion (issue #3)
   if (hasReportedCompletion(deps.db, teamInfo.teamId, args.to)) {
     return `Message stored for ${args.to} (teammate has completed their task — message will not wake them).`
+  }
+  if (!isMemberPromptEligible(deps.db, teamInfo.teamId, args.to)) {
+    return `Message stored for ${args.to} (their current lifecycle state does not allow a wake-up).`
   }
 
   // For member-to-member messages, fire-and-forget delivery is safe.

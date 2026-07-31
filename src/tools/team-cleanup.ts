@@ -9,6 +9,7 @@ import { log } from "../log"
 import { runCommand } from "../process"
 import { sendLeadAlert } from "../messaging"
 import { recomputeCurrentPhase } from "../task-phase"
+import { resolveAbortBranch } from "../abort-preservation"
 
 type PurgeApprovalFn = (preview: string) => Promise<void>
 type ListBranchesFn = (namespace: string, cwd: string) => Promise<string[]>
@@ -500,32 +501,23 @@ export async function executeTeamCleanup(
   if (args.force) {
     const preserved = new Map<string, string>()
     for (const member of abortable) {
-      if (!member.worktree_branch) continue
-      let sourceBranch = member.worktree_branch
-      if (sourceBranch.startsWith("ensemble/preserved/")) {
-        if (!member.worktree_dir) {
-          sendLeadAlert(deps.db, deps.client, {
-            teamId: teamInfo.teamId,
-            content: `Force cleanup for team "${teamInfo.teamName}" was blocked because ${member.name}'s live branch cannot be verified without a worktree path. No sessions were aborted and the team remains active. Inspect the session resources and retry force cleanup.`,
-            wakeText: `[System: Force cleanup for ${teamInfo.teamName} could not verify ${member.name}'s live branch; guidance is available in team messages]`,
-          })
-          throw new Error(`Cannot clean up team "${teamInfo.teamName}": ${member.name} references a preserved branch but has no live worktree path. No sessions were aborted; recover the live branch before retrying.`)
-        }
-        try {
-          sourceBranch = await resolveBranch(member.worktree_dir) ?? ""
-        } catch (error) {
-          log(`cleanup:branch:resolve-failed name=${member.name} err=${error instanceof Error ? error.message : String(error)}`)
-          sourceBranch = ""
-        }
-        if (!sourceBranch || sourceBranch.startsWith("ensemble/preserved/")) {
-          sendLeadAlert(deps.db, deps.client, {
-            teamId: teamInfo.teamId,
-            content: `Force cleanup for team "${teamInfo.teamName}" was blocked because ${member.name}'s live source branch could not be resolved from worktree ${member.worktree_dir}. No sessions were aborted and the team remains active. Inspect the worktree and retry force cleanup.`,
-            wakeText: `[System: Force cleanup for ${teamInfo.teamName} could not resolve ${member.name}'s live worktree branch; guidance is available in team messages]`,
-          })
-          throw new Error(`Cannot clean up team "${teamInfo.teamName}": failed to resolve the live branch for ${member.name} from ${member.worktree_dir}. No sessions were aborted; retry after resolving the worktree branch.`)
-        }
+      let resolution
+      try {
+        resolution = await resolveAbortBranch(member.worktree_branch, member.worktree_dir, resolveBranch)
+      } catch (error) {
+        log(`cleanup:branch:resolve-failed name=${member.name} err=${error instanceof Error ? error.message : String(error)}`)
+        resolution = { ok: false as const, reason: "its live source branch could not be resolved" }
       }
+      if (!resolution.ok) {
+        sendLeadAlert(deps.db, deps.client, {
+          teamId: teamInfo.teamId,
+          content: `Force cleanup for team "${teamInfo.teamName}" was blocked because ${member.name} ${resolution.reason}. No sessions were aborted and the team remains active. Inspect the worktree and retry force cleanup.`,
+          wakeText: `[System: Force cleanup for ${teamInfo.teamName} could not verify ${member.name}'s live branch; guidance is available in team messages]`,
+        })
+        throw new Error(`Cannot clean up team "${teamInfo.teamName}": failed to resolve the live branch for ${member.name}: ${resolution.reason}. No sessions were aborted; retry after resolving the worktree branch.`)
+      }
+      const sourceBranch = resolution.sourceBranch
+      if (!sourceBranch) continue
       const resource = getTeamResourceParts(deps.db, teamInfo.teamId)
       const safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, member.name)
       const ok = await preserve(sourceBranch, safeBranch, deps.directory)
