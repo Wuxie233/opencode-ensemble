@@ -1507,6 +1507,7 @@ describe("team_spawn — agent mode enforcement", () => {
     { permission: "team_claim", pattern: "*", action: "allow" },
     { permission: "team_consult", pattern: "*", action: "allow" },
     { permission: "team_consult_reply", pattern: "*", action: "allow" },
+    { permission: "team_metrics", pattern: "*", action: "allow" },
   ]
 
   test("plan agent gets deny rules + team tool allow (no worktree) on session.create", async () => {

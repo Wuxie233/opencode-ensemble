@@ -258,7 +258,7 @@ Build with `bun run build`, then restart OpenCode to pick up changes.
 
 ## Tools
 
-16 tools. The lead can coordinate with all of them. Teammate sessions explicitly allow 8 communication, task, and consultation tools.
+17 tools. The lead can coordinate with all of them. Teammate sessions explicitly allow 9 communication, task, consultation, and metrics tools.
 
 **Team lifecycle** (lead only, except archived-team purge may also be run from the main session)
 
@@ -271,6 +271,7 @@ Build with `bun run build`, then restart OpenCode to pick up changes.
 | `team_cleanup` | Archive a fully integrated team. Refuses cleanup while a writer branch is unmerged or has an interrupted merge. With `purge`, previews archived-team deletion and returns exact approval labels plus a confirmation token. |
 | `team_status` | See all members, their status, and a task summary. Session IDs are shown only to the lead. |
 | `team_view` | Switch the TUI to a teammate's session. |
+| `team_metrics` | Read bounded, privacy-safe aggregate telemetry. Leads can query the same project's active or archived Teams; members can query only their own Team. |
 
 Archived-team purge is intentionally two-step. First call `team_cleanup` with `purge` to get a preview, exact approval and denial option labels, and `confirm_token`; no data is deleted. Stale archived worktree/workspace references and stale Ensemble-owned branches are counted in the preview and cleaned during confirmed purge. Arbitrary non-Ensemble branches still block purge for safety. The lead must then use the question tool with those exact options. Only after the user selects the exact approval option should it call `team_cleanup` again with the same `purge`, `confirm_purge: true`, and the preview token.
 
@@ -292,6 +293,10 @@ Archived-team purge is intentionally two-step. First call `team_cleanup` with `p
 | `team_tasks_add` | Add a transactional DAG using existing same-Team IDs or batch-local keys; rejects missing, cross-Team, self, and cyclic dependencies. Supports workflow phases. |
 | `team_tasks_complete` | Idempotently complete a task, optionally persist its structured terminal result in the same transaction, notify the Lead once, and unblock dependents. |
 | `team_claim` | Claim a pending task. Atomic, prevents double-claims. |
+
+**Metrics contract**
+
+`team_metrics` accepts a strict request object with `summary`, `funnel`, `timeline`, or `compare` views. Windows are UTC ISO timestamps, default to the previous 30 days, and bounded to 100 results. Aggregate cohorts contain Teams whose `team.created` event falls inside the request window; a missing in-window archive is censored rather than unknown. Timeline requests require an explicit set of at most 10 authorized Team IDs. Mechanism comparisons support one named mechanism versus `none`, recompute every requested metric per group, and suppress project-wide cells below five Teams. Usage aggregates are included only when their complete coverage span is contained in the request window. Every view reports request and actual telemetry coverage, unknown and censored counts, sampling rate, and instrumentation versions. It never returns prompts, messages, branches, paths, sessions, raw payload strings, or free text. Unsupported quality, causal, active-time, and cost-per-success metrics return structured reasons rather than inferred values.
 
 ## What you see in the TUI
 

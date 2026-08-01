@@ -289,6 +289,7 @@ async function executeTeamSpawnLocked(
     "team_claim",
     "team_consult",
     "team_consult_reply",
+    "team_metrics",
   ] as const
   // Read-only profiles still need the host's evidence tools to inspect source
   // and read files written by OpenCode's native output truncation.
@@ -501,6 +502,7 @@ async function executeTeamSpawnLocked(
     "- team_claim: claim a pending task from the shared board",
     "- team_consult: ask a Planner to resolve a technical contract for your owned task boundary",
     "- team_consult_reply: Planner-only reply or escalation for a pending consultation",
+    "- team_metrics: read bounded privacy-safe telemetry; as a teammate you may query only this Team",
   )
 
   // Collaboration guidance for peer-to-peer communication

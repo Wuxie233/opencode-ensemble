@@ -34,6 +34,8 @@ import { executeTeamStatus } from "./tools/team-status"
 import { executeTeamView } from "./tools/team-view"
 import { executeTeamConsult } from "./tools/team-consult"
 import { executeTeamConsultReply } from "./tools/team-consult-reply"
+import { executeTeamMetricsTool } from "./tools/team-metrics"
+import type { TeamMetricsRequest } from "./metrics"
 import type { ToolDeps, } from "./types"
 import { TokenBucket } from "./rate-limit"
 import { Watchdog } from "./watchdog"
@@ -342,7 +344,7 @@ const plugin: Plugin = async (input) => {
     "tool.execute.before": async (input, _output) => {
       checkToolIsolation(registry, tracker, input.tool, input.sessionID, db)
       // Rate limit team tools that trigger LLM inference
-      if (input.tool.startsWith("team_")) {
+      if (input.tool.startsWith("team_") && input.tool !== "team_metrics") {
         if (!rateLimiter.tryConsume()) {
           await rateLimiter.waitForToken()
         }
@@ -677,6 +679,37 @@ const plugin: Plugin = async (input) => {
         async execute(args, ctx) {
           const result = await executeTeamView(deps, args, ctx.sessionID)
           ctx.metadata({ title: `Viewing ${args.member}` })
+          return result
+        },
+      }),
+
+      team_metrics: tool({
+        description: "Query bounded, privacy-safe aggregate Team telemetry. Leads may query their project's Teams; members may query only their own Team. Timeline requires explicit team_ids and never returns prompts, messages, paths, sessions, branches, or raw payload text.",
+        args: {
+          scope: tool.schema.object({
+            project: tool.schema.string().optional(),
+            team_ids: tool.schema.array(tool.schema.string()).optional(),
+          }).optional(),
+          window: tool.schema.object({
+            from: tool.schema.string().optional(),
+            to: tool.schema.string().optional(),
+          }).optional(),
+          filters: tool.schema.object({
+            mechanism: tool.schema.array(tool.schema.string()).optional(),
+            instrumentation_version: tool.schema.array(tool.schema.string()).optional(),
+          }).optional(),
+          view: tool.schema.enum(["summary", "funnel", "timeline", "compare"]),
+          metrics: tool.schema.array(tool.schema.string()),
+          group_by: tool.schema.enum(["day", "week", "mechanism"]).optional(),
+          compare: tool.schema.object({
+            dimension: tool.schema.literal("mechanism"),
+            values: tool.schema.array(tool.schema.string()),
+          }).optional(),
+          limit: tool.schema.number().optional(),
+        },
+        async execute(args, ctx) {
+          const result = executeTeamMetricsTool(deps, args as TeamMetricsRequest, ctx.sessionID)
+          ctx.metadata({ title: `Metrics ${args.view}` })
           return result
         },
       }),

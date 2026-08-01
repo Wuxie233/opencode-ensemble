@@ -78,7 +78,7 @@ Key SDK primitives:
 - client.session.abort() — cancel/shutdown teammates
 - client.session.status() — poll session idle/busy state
 - event hook — subscribe to session.status events for state transitions
-- tool hook — register the 16 team tools
+- tool hook — register the 17 team tools
 - tool.execute.before hook — rate limiting + sub-agent isolation
 
 ### Storage
@@ -222,7 +222,7 @@ populated from session events. When a team tool call arrives from an unknown
 session, walks the parent chain (max depth 10). If any ancestor is a team
 member, the call is blocked. This covers sub-agents at arbitrary depth.
 
-## The 16 Tools
+## The 17 Tools
 
 | Tool                | Who Can Use | Purpose                              |
 |---------------------|-------------|--------------------------------------|
@@ -242,6 +242,7 @@ member, the call is blocked. This covers sub-agents at arbitrary depth.
 | team_cleanup        | Lead only   | Archive only after every writer branch is explicitly merged and verified |
 | team_status         | Any member  | View members, statuses, task summary |
 | team_view           | Any member  | Navigate TUI to teammate's session   |
+| team_metrics        | Lead or own member Team | Read bounded, privacy-safe aggregate telemetry; timeline requires explicit authorized Team IDs |
 
 ## Hooks
 
@@ -260,7 +261,7 @@ Three hooks wired in index.ts:
 
 1. SQLite via the internal database adapter — not file JSON, not in-memory-only, not external native packages
 2. promptAsync for message delivery — not session injection, not polling
-3. 16 separate tools — not a unified action tool, no exceptions
+3. 17 separate tools — not a unified action tool, no exceptions
 4. Fire-and-forget spawn — not blocking, not tmux
 5. tool.execute.before for rate limiting — token bucket, in-memory
 6. tool.execute.before for sub-agent isolation — full descendant tracking via parent chain

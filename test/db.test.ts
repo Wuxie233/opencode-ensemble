@@ -113,6 +113,33 @@ describe("schema migrations", () => {
     ])
   })
 
+  test("migration 16 preserves legacy event coverage as unknown and creates aggregate telemetry", () => {
+    for (let i = 0; i < 15; i++) {
+      db.exec(MIGRATIONS[i]!)
+      db.exec(`PRAGMA user_version = ${i + 1}`)
+    }
+    db.run(
+      "INSERT INTO project (id, name, path, status, time_created, time_updated) VALUES ('project-1', 'project-1', '/tmp/project-1', 'active', 1, 1)",
+    )
+    db.run(
+      "INSERT INTO team (id, name, project_id, lead_session_id, status, delegate, time_created, time_updated) VALUES ('team-1', 'team-1', 'project-1', 'lead', 'active', 0, 1, 1)",
+    )
+    db.run(
+      "INSERT INTO team_event (id, team_id, kind, payload, cause_event_id, time_created) VALUES ('event-legacy', 'team-1', 'team.created', '{}', NULL, 1)",
+    )
+
+    applyMigrations(db)
+
+    expect(db.query("SELECT instrumentation_version FROM team_event WHERE id = 'event-legacy'").get())
+      .toEqual({ instrumentation_version: null })
+    expect(db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'team_usage_aggregate'").get())
+      .toEqual({ name: "team_usage_aggregate" })
+    const indexes = db.query("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'team_event'").all() as Array<{ name: string }>
+    expect(indexes.map(index => index.name)).toEqual(expect.arrayContaining([
+      "team_event_kind_time_idx", "team_event_version_time_idx",
+    ]))
+  })
+
   test("creates team_task table", () => {
     applyMigrations(db)
     const row = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='team_task'").get()
