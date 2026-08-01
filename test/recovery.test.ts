@@ -269,6 +269,11 @@ describe("recoverStaleMembers", () => {
     expect((db.query("SELECT status, assignee FROM team_task WHERE id = 'task-a'").get() as { status: string; assignee: string })).toEqual({ status: "in_progress", assignee: "alice" })
     expect(client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
     expect((db.query("SELECT content FROM team_message WHERE team_id = 't1' AND to_name = 'lead'").get() as { content: string }).content).toContain("could not be preserved")
+    const failed = db.query(
+      "SELECT payload FROM team_event WHERE team_id = 't1' AND kind = 'recovery.stage' AND json_extract(payload, '$.stage') = 'failed'",
+    ).get() as { payload: string }
+    expect(JSON.parse(failed.payload)).toEqual({ member_name: "alice", mechanism: "startup", stage: "failed" })
+    expect(failed.payload).not.toContain("missing-branch")
   })
 
   test("fails closed when an orphaned writer has a branch but recovery cwd is missing", async () => {

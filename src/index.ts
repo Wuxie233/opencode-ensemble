@@ -336,7 +336,7 @@ const plugin: Plugin = async (input) => {
       recordUsageFromV2Event(
         db,
         registry,
-        event as unknown as { type: string; properties: { sessionID?: string; cost?: number; tokens?: { input?: number; output?: number } } },
+        event as unknown as { id?: string; type: string; properties: { sessionID?: string; timestamp?: number; cost?: number; tokens?: { input?: number; output?: number } } },
       )
     },
 

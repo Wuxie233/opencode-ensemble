@@ -1,15 +1,22 @@
+import { createHash } from "node:crypto"
 import type { Database } from "./db"
 import type { MemberRegistry } from "./state"
 import { TELEMETRY_VERSION } from "./team-event"
 import { appendTeamEvent, type ExecutionStatus, type MemberStatus, type MemberTransitionReason, type TaskReleaseReason } from "./team-event"
 
 interface UsageEvent {
+  id?: string
   type: string
   properties: {
     sessionID?: string
+    timestamp?: number
     cost?: number
     tokens?: { input?: number; output?: number }
   }
+}
+
+function validTimestamp(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined
 }
 
 function validTokenCount(value: unknown): number {
@@ -23,30 +30,42 @@ function validCost(value: unknown): number {
 /** Aggregate numeric SDK usage for an active teammate without retaining Session or message data. */
 export function recordUsageFromV2Event(db: Database, registry: MemberRegistry, event: UsageEvent): void {
   if (event.type !== "session.next.step.ended") return
+  if (typeof event.id !== "string" || event.id.length === 0) return
   const sessionId = event.properties.sessionID
   if (!sessionId) return
+  const timestamp = validTimestamp(event.properties.timestamp)
+  if (timestamp === undefined) return
   const member = registry.getBySession(sessionId)
   if (!member) return
   const inputTokens = validTokenCount(event.properties.tokens?.input)
   const outputTokens = validTokenCount(event.properties.tokens?.output)
   const cost = validCost(event.properties.cost)
   if (inputTokens === 0 && outputTokens === 0 && cost === 0) return
-  const now = Date.now()
+  const eventDigest = createHash("sha256").update(event.id).digest("hex")
   try {
-    db.run(
-      `INSERT INTO team_usage_aggregate
-         (team_id, member_name, input_tokens, output_tokens, cost, event_count, coverage_start, coverage_end, instrumentation_version)
-       SELECT tm.team_id, tm.name, ?, ?, ?, 1, ?, ?, ?
-       FROM team_member tm JOIN team t ON t.id = tm.team_id
-       WHERE tm.team_id = ? AND tm.name = ? AND tm.session_id = ? AND t.status = 'active'
-       ON CONFLICT(team_id, member_name) DO UPDATE SET
-         input_tokens = input_tokens + excluded.input_tokens,
-         output_tokens = output_tokens + excluded.output_tokens,
-         cost = cost + excluded.cost,
-         event_count = event_count + 1,
-         coverage_end = excluded.coverage_end`,
-      [inputTokens, outputTokens, cost, now, now, TELEMETRY_VERSION, member.teamId, member.memberName, sessionId],
-    )
+    db.transaction(() => {
+      const inserted = db.run(
+        `INSERT OR IGNORE INTO team_usage_event (event_digest, team_id, instrumentation_version)
+         SELECT ?, tm.team_id, ?
+         FROM team_member tm JOIN team t ON t.id = tm.team_id
+         WHERE tm.team_id = ? AND tm.name = ? AND tm.session_id = ? AND t.status = 'active'`,
+        [eventDigest, TELEMETRY_VERSION, member.teamId, member.memberName, sessionId],
+      ).changes
+      if (inserted === 0) return
+      db.run(
+        `INSERT INTO team_usage_aggregate
+           (team_id, member_name, input_tokens, output_tokens, cost, event_count, coverage_start, coverage_end, instrumentation_version)
+         VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
+         ON CONFLICT(team_id, member_name) DO UPDATE SET
+           input_tokens = input_tokens + excluded.input_tokens,
+           output_tokens = output_tokens + excluded.output_tokens,
+           cost = cost + excluded.cost,
+           event_count = event_count + 1,
+           coverage_start = MIN(coverage_start, excluded.coverage_start),
+           coverage_end = MAX(coverage_end, excluded.coverage_end)`,
+        [member.teamId, member.memberName, inputTokens, outputTokens, cost, timestamp, timestamp, TELEMETRY_VERSION],
+      )
+    })()
   } catch {
     // Observational usage must never affect the SDK event path.
   }

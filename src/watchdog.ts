@@ -242,6 +242,11 @@ export class Watchdog {
       let preservedBranch: string | null = null
       const resolution = await resolveAbortBranch(member.worktree_branch, member.worktree_dir)
       if (!resolution.ok) {
+        appendTeamEventBestEffort(this.db, {
+          teamId: member.team_id,
+          kind: "recovery.stage",
+          payload: { member_name: member.name, mechanism: "watchdog", stage: "failed" },
+        })
         sendLeadAlert(this.db, this.client, {
           teamId: member.team_id,
           content: `Teammate "${member.name}" exceeded its timeout, but ${resolution.reason}. No abort was attempted; inspect the worktree and retry.`,
@@ -252,6 +257,11 @@ export class Watchdog {
       }
       const sourceBranch = resolution.sourceBranch
       if (sourceBranch && !this.cwd) {
+        appendTeamEventBestEffort(this.db, {
+          teamId: member.team_id,
+          kind: "recovery.stage",
+          payload: { member_name: member.name, mechanism: "watchdog", stage: "failed" },
+        })
         sendLeadAlert(this.db, this.client, {
           teamId: member.team_id,
           content: `Teammate "${member.name}" exceeded its timeout with writer branch "${sourceBranch}", but no project directory was available to preserve it. No abort was attempted.`,
@@ -264,6 +274,11 @@ export class Watchdog {
         const safeBranch = preservedBranchName(member.project_name, member.team_name, member.team_id, member.name)
         const ok = await preserveBranch(sourceBranch, safeBranch, this.cwd)
         if (!ok) {
+          appendTeamEventBestEffort(this.db, {
+            teamId: member.team_id,
+            kind: "recovery.stage",
+            payload: { member_name: member.name, mechanism: "watchdog", stage: "failed" },
+          })
           sendLeadAlert(this.db, this.client, {
             teamId: member.team_id,
             content: `Teammate "${member.name}" exceeded its timeout, but branch "${sourceBranch}" could not be preserved. The member and its task were left unchanged for a later retry.`,

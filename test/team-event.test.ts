@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test"
 import { Database } from "bun:sqlite"
-import { appendTeamEvent } from "../src/team-event"
+import { appendTeamEvent, deleteArchivedTeamForExplicitPurge } from "../src/team-event"
 import { applyMigrations, MIGRATIONS } from "../src/schema"
 import { executeTeamClaim } from "../src/tools/team-claim"
 import { executeTeamCleanup } from "../src/tools/team-cleanup"
@@ -32,7 +32,7 @@ describe("team_event migration", () => {
 
     applyMigrations(db)
 
-    expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(16)
+    expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(17)
     expect(db.query("SELECT * FROM team_event").all()).toEqual([])
     const indexes = db.query("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'team_event'").all() as Array<{ name: string }>
     expect(indexes.map(row => row.name)).toEqual(expect.arrayContaining(["team_event_team_time_idx"]))
@@ -58,15 +58,33 @@ describe("team_event migration", () => {
     expect(db.query("SELECT * FROM team_usage_aggregate").all()).toEqual([])
   })
 
-  test("deleting a team cascades to its events", () => {
+  test("migration 17 preserves existing telemetry and adds replay and immutability guards", () => {
+    const db = new Database(":memory:")
+    for (let i = 0; i < 16; i++) {
+      db.exec(MIGRATIONS[i]!)
+      db.exec(`PRAGMA user_version = ${i + 1}`)
+    }
+    db.run("INSERT INTO project (id, name, path, status, time_created, time_updated) VALUES ('p', 'p', 'p', 'active', 1, 1)")
+    db.run("INSERT INTO team (id, name, project_id, lead_session_id, status, delegate, time_created, time_updated) VALUES ('t', 'legacy', 'p', 's', 'active', 0, 1, 1)")
+    db.run("INSERT INTO team_event (id, team_id, kind, payload, time_created, instrumentation_version) VALUES ('event_legacy', 't', 'team.created', '{}', 1, 1)")
+
+    applyMigrations(db)
+
+    expect(db.query("SELECT id FROM team_event").all()).toEqual([{ id: "event_legacy" }])
+    expect(db.query("SELECT * FROM team_usage_event").all()).toEqual([])
+    expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(17)
+  })
+
+  test("ordinary Team deletion cannot bypass immutable event retention", () => {
     const deps = setupDeps()
     insertTeam(deps.db, "t1", "team", "lead")
     const cause = appendTeamEvent(deps.db, { teamId: "t1", kind: "team.created", payload: {} })
     appendTeamEvent(deps.db, {
       teamId: "t1", kind: "team.archived", payload: {}, causeEventId: cause,
     })
-    deps.db.run("DELETE FROM team WHERE id = ?", ["t1"])
-    expect(deps.db.query("SELECT id FROM team_event").all()).toEqual([])
+    expect(() => deps.db.run("DELETE FROM team WHERE id = ?", ["t1"])).toThrow("immutable")
+    expect(deps.db.query("SELECT id FROM team WHERE id = 't1'").all()).toHaveLength(1)
+    expect(deps.db.query("SELECT id FROM team_event").all()).toHaveLength(2)
   })
 })
 
@@ -174,7 +192,25 @@ describe("appendTeamEvent", () => {
   test("keeps rows immutable while allowing explicit Team purge deletion", () => {
     const id = appendTeamEvent(deps.db, { teamId: "t1", kind: "team.created", payload: {} })
     expect(() => deps.db.run("UPDATE team_event SET kind = 'team.archived' WHERE id = ?", [id])).toThrow("immutable")
+    expect(() => deps.db.run("DELETE FROM team_event WHERE id = ?", [id])).toThrow("immutable")
+    expect(() => deps.db.run(
+      "INSERT OR REPLACE INTO team_event (id, team_id, kind, payload, time_created, instrumentation_version) VALUES (?, 't1', 'team.archived', '{}', 2, 1)",
+      [id],
+    )).toThrow("immutable")
+    expect(() => deps.db.run(
+      "REPLACE INTO team_event (id, team_id, kind, payload, time_created, instrumentation_version) VALUES (?, 't1', 'team.archived', '{}', 2, 1)",
+      [id],
+    )).toThrow("immutable")
     expect((deps.db.query("SELECT kind FROM team_event WHERE id = ?").get(id) as { kind: string }).kind).toBe("team.created")
+  })
+
+  test("restores the delete guard when an explicit purge deletion fails", () => {
+    deps.db.run("UPDATE team SET status = 'archived' WHERE id = 't1'")
+    const id = appendTeamEvent(deps.db, { teamId: "t1", kind: "team.created", payload: {} })
+    deps.db.exec("CREATE TRIGGER reject_team_delete BEFORE DELETE ON team BEGIN SELECT RAISE(ABORT, 'reject purge'); END")
+
+    expect(() => deleteArchivedTeamForExplicitPurge(deps.db, "t1")).toThrow("reject purge")
+    expect(() => deps.db.run("DELETE FROM team_event WHERE id = ?", [id])).toThrow("immutable")
   })
 })
 
@@ -255,6 +291,9 @@ describe("team_event transactional callsites", () => {
       async () => ({ ok: true }), async () => true, false, undefined, undefined, async () => [],
     )
     expect(deps.db.query("SELECT id FROM team_event WHERE team_id = 't1'").all()).toEqual([])
+    insertTeam(deps.db, "t2", "retained-team", "retained-lead", "archived")
+    const retainedId = appendTeamEvent(deps.db, { teamId: "t2", kind: "team.created", payload: {} })
+    expect(() => deps.db.run("DELETE FROM team_event WHERE id = ?", [retainedId])).toThrow("immutable")
   })
 
   test("event insertion failure rolls back team creation", async () => {

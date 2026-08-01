@@ -121,6 +121,11 @@ export class TerminalLivenessGuard {
     status: "busy" | "retry",
     reason: string,
   ): void {
+    appendTeamEventBestEffort(this.deps.db, {
+      teamId: member.team_id,
+      kind: "recovery.stage",
+      payload: { member_name: member.name, mechanism: "late_terminal", stage: "failed" },
+    })
     sendLeadAlert(this.deps.db, this.deps.client, {
       teamId: member.team_id,
       content: `Terminal teammate "${member.name}" emitted a late ${status} event, but ${reason}. No re-abort was attempted; its ${member.status}/${member.execution_status} state and branch reference were retained for a later retry.`,

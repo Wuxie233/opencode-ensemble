@@ -268,8 +268,27 @@ export const MIGRATIONS: string[] = [
      instrumentation_version INTEGER NOT NULL,
      PRIMARY KEY (team_id, member_name),
      FOREIGN KEY (team_id, member_name) REFERENCES team_member(team_id, name) ON DELETE CASCADE
-   );
-   CREATE INDEX team_usage_coverage_idx ON team_usage_aggregate(instrumentation_version, coverage_end, team_id);`,
+    );
+    CREATE INDEX team_usage_coverage_idx ON team_usage_aggregate(instrumentation_version, coverage_end, team_id);`,
+  // Migration 17: Deduplicate replayed SDK usage events without retaining raw
+  // runtime IDs, and close every non-purge mutation path for immutable events.
+  `CREATE TABLE team_usage_event (
+      event_digest            TEXT PRIMARY KEY CHECK(length(event_digest) = 64),
+      team_id                 TEXT NOT NULL REFERENCES team(id) ON DELETE CASCADE,
+      instrumentation_version INTEGER NOT NULL
+    );
+    CREATE INDEX team_usage_event_team_idx ON team_usage_event(team_id, instrumentation_version);
+    CREATE TRIGGER team_event_no_insert_over_existing
+      BEFORE INSERT ON team_event
+      WHEN EXISTS (SELECT 1 FROM team_event WHERE id = NEW.id)
+      BEGIN
+        SELECT RAISE(ABORT, 'team_event rows are immutable');
+      END;
+    CREATE TRIGGER team_event_no_delete
+      BEFORE DELETE ON team_event
+      BEGIN
+        SELECT RAISE(ABORT, 'team_event rows are immutable');
+      END;`,
 ]
 
 /**

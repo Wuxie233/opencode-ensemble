@@ -4,7 +4,7 @@ import type { IsDirtyFn } from "./shared"
 import { spawnFailures } from "./team-spawn"
 import { getTeamResourceParts, mergeBranch, deleteBranch, preserveBranch, preservedBranchName, getOverlappingFiles, resolveWorktreeBranch, teamResourceSegment } from "./merge-helper"
 import type { MergeBranchFn, DeleteBranchFn, PreserveBranchFn, ResolveWorktreeBranchFn, OverlapCheckFn } from "./merge-helper"
-import { appendTeamEvent } from "../team-event"
+import { appendTeamEvent, deleteArchivedTeamForExplicitPurge } from "../team-event"
 import { log } from "../log"
 import { runCommand } from "../process"
 import { sendLeadAlert } from "../messaging"
@@ -112,7 +112,7 @@ function deleteArchivedTeams(deps: ToolDeps, targets: PurgeTarget[]): void {
     })
     validatePurgeResources(deps, teams)
     teams.forEach(team => {
-      deps.db.run("DELETE FROM team WHERE id = ? AND status = 'archived'", [team.id])
+      deleteArchivedTeamForExplicitPurge(deps.db, team.id)
     })
   })
   transaction(targets)

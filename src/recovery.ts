@@ -89,6 +89,11 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
     let preservedBranch: string | null = null
     const resolution = await resolveAbortBranch(member.worktree_branch, member.worktree_dir)
     if (!resolution.ok) {
+      appendTeamEventBestEffort(db, {
+        teamId: member.team_id,
+        kind: "recovery.stage",
+        payload: { member_name: member.name, mechanism: "startup", stage: "failed" },
+      })
       sendLeadAlert(db, client, {
         teamId: member.team_id,
         content: `Startup recovery found orphaned teammate "${member.name}", but ${resolution.reason}. No abort was attempted; inspect the worktree and retry.`,
@@ -98,6 +103,11 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
     }
     const sourceBranch = resolution.sourceBranch
     if (sourceBranch && !cwd) {
+      appendTeamEventBestEffort(db, {
+        teamId: member.team_id,
+        kind: "recovery.stage",
+        payload: { member_name: member.name, mechanism: "startup", stage: "failed" },
+      })
       sendLeadAlert(db, client, {
         teamId: member.team_id,
         content: `Startup recovery found orphaned teammate "${member.name}" with writer branch "${sourceBranch}", but no project directory was available to preserve it. No abort was attempted.`,
@@ -109,6 +119,11 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
       const safeBranch = preservedBranchName(member.project_name, member.team_name, member.team_id, member.name)
       const ok = await preserveBranch(sourceBranch, safeBranch, cwd)
       if (!ok) {
+        appendTeamEventBestEffort(db, {
+          teamId: member.team_id,
+          kind: "recovery.stage",
+          payload: { member_name: member.name, mechanism: "startup", stage: "failed" },
+        })
         sendLeadAlert(db, client, {
           teamId: member.team_id,
           content: `Teammate "${member.name}" appears orphaned, but branch "${sourceBranch}" could not be preserved. Startup recovery left the member and its task unchanged for a later retry.`,

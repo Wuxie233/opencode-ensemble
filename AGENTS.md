@@ -440,9 +440,9 @@ Keep it concise and include:
 
 1. Their name and role in the team
 2. The task they are working on
-3. The 8 tools they can use (team_message, team_broadcast,
+3. The 9 tools they can use (team_message, team_broadcast,
    team_tasks_list, team_tasks_add, team_tasks_complete, team_claim,
-   team_consult, team_consult_reply)
+   team_consult, team_consult_reply, team_metrics)
    with a one-line description of each
 4. How to report completion (`team_tasks_complete` with `result` for a claimed
    task; one `team_message` result only when no task was claimed)

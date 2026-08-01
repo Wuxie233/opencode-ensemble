@@ -398,6 +398,11 @@ describe("terminal liveness guard", () => {
     expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
     expect(deps.db.query("SELECT status, worktree_branch FROM team_member WHERE name = 'alice'").get())
       .toEqual({ status: "error", worktree_branch: "live-alice" })
+    const failed = deps.db.query(
+      "SELECT payload FROM team_event WHERE team_id = 't1' AND kind = 'recovery.stage' AND json_extract(payload, '$.stage') = 'failed'",
+    ).get() as { payload: string }
+    expect(JSON.parse(failed.payload)).toEqual({ member_name: "alice", mechanism: "late_terminal", stage: "failed" })
+    expect(failed.payload).not.toContain("live-alice")
   })
 
   test("does not re-abort when a terminal live branch cannot be resolved", async () => {

@@ -80,6 +80,12 @@ const PAYLOAD_KEYS: { [K in TeamEventKind]: readonly (keyof TeamEventPayloads[K]
 
 const MAX_PAYLOAD_BYTES = 2 * 1024
 
+const TEAM_EVENT_NO_DELETE_TRIGGER = `CREATE TRIGGER team_event_no_delete
+  BEFORE DELETE ON team_event
+  BEGIN
+    SELECT RAISE(ABORT, 'team_event rows are immutable');
+  END;`
+
 const IDENTIFIER = /^[a-z0-9][a-z0-9_-]{0,127}$/
 const MEMBER_NAME = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/
 const MEMBER_STATUSES = new Set<MemberStatus>(["ready", "busy", "shutdown_requested", "shutdown", "error"])
@@ -172,5 +178,15 @@ export function appendTeamEventBestEffort(db: Database, event: TeamEventInput): 
     return appendTeamEvent(db, event)
   } catch {
     return undefined
+  }
+}
+
+/** Delete one archived Team through the explicit purge path while restoring event immutability. */
+export function deleteArchivedTeamForExplicitPurge(db: Database, teamId: string): number {
+  db.exec("DROP TRIGGER team_event_no_delete")
+  try {
+    return db.run("DELETE FROM team WHERE id = ? AND status = 'archived'", [teamId]).changes
+  } finally {
+    db.exec(TEAM_EVENT_NO_DELETE_TRIGGER)
   }
 }
