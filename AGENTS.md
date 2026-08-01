@@ -473,13 +473,22 @@ Teammates do not need to know how agent teams work internally.
 - Test: `bun test`
 - Build: `bun run build`
 
-## Before Marking Any Task Done
+## Verification Ownership
+
+An implementation Builder validates only its owned slice before reporting completion:
+
+- run the narrowest relevant test file or test filter;
+- run only directly affected lint or typecheck targets when the repository exposes them;
+- inspect the owned diff and report broader checks deferred to the Lead; and
+- do not run `bun run typecheck && bun test && bun run build` unless the task explicitly owns terminal repository verification.
+
+After all writer branches are merged, the Lead runs the full repository gate once:
 
 ```
 bun run typecheck && bun test && bun run build
 ```
 
-All three must pass. Additionally:
+All three must pass before final delivery. Additionally:
 - No TypeScript `any` types introduced
 - No new `TODO` comments without a linked open question number (`OQ-<N>`)
 - Test coverage for the happy path AND at least one error path per tool
