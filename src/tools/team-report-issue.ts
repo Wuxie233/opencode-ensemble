@@ -9,6 +9,9 @@ export type IssueKind = "bug" | "design_flaw" | "inefficiency" | "missing_capabi
 /** Impact level used to triage which reports are worth iterating on. */
 export type IssueSeverity = "critical" | "high" | "medium" | "low"
 
+/** Canonical repository that owns Ensemble feedback. */
+export const FEEDBACK_REPO = "Wuxie233/opencode-ensemble"
+
 /** Arguments accepted by the team_report_issue tool. */
 export interface TeamReportIssueArgs {
   title: string
@@ -18,7 +21,6 @@ export interface TeamReportIssueArgs {
   trigger?: string
   repro?: string
   proposal?: string
-  repo?: string
 }
 
 /** Injectable subprocess runner — replaced with a stub in tests. */
@@ -100,11 +102,6 @@ export async function executeTeamReportIssue(
   if (!title) throw new Error("An issue title is required.")
   if (!args.body.trim()) throw new Error("An issue body is required.")
 
-  const repo = args.repo?.trim() || deps.config.issueRepo
-  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) {
-    throw new Error(`Invalid target repository "${repo}". Expected OWNER/REPO.`)
-  }
-
   const severity = args.severity ?? "medium"
   const kindLabel = KIND_LABEL[args.kind]
   const severityLabel = `severity:${severity}`
@@ -113,12 +110,12 @@ export async function executeTeamReportIssue(
 
   // Best effort: a missing label would otherwise fail the whole report.
   await Promise.all([
-    ensureLabel(repo, FEEDBACK_LABEL, "5319e7", "Ensemble self-iteration feedback", run),
-    ensureLabel(repo, kindLabel, KIND_COLOR[args.kind], `Ensemble feedback kind: ${args.kind}`, run),
-    ensureLabel(repo, severityLabel, SEVERITY_COLOR[severity], `Ensemble feedback severity: ${severity}`, run),
+    ensureLabel(FEEDBACK_REPO, FEEDBACK_LABEL, "5319e7", "Ensemble self-iteration feedback", run),
+    ensureLabel(FEEDBACK_REPO, kindLabel, KIND_COLOR[args.kind], `Ensemble feedback kind: ${args.kind}`, run),
+    ensureLabel(FEEDBACK_REPO, severityLabel, SEVERITY_COLOR[severity], `Ensemble feedback severity: ${severity}`, run),
   ])
 
-  const base = ["gh", "issue", "create", "--repo", repo, "--title", title, "--body", body]
+  const base = ["gh", "issue", "create", "--repo", FEEDBACK_REPO, "--title", title, "--body", body]
   const labelled = await run([
     ...base,
     "--label", FEEDBACK_LABEL,
@@ -126,14 +123,14 @@ export async function executeTeamReportIssue(
     "--label", severityLabel,
   ])
   if (labelled.exitCode === 0) {
-    return `Filed on ${repo}: ${labelled.stdout.trim()}\nLabels: ${FEEDBACK_LABEL}, ${kindLabel}, ${severityLabel}`
+    return `Filed on ${FEEDBACK_REPO}: ${labelled.stdout.trim()}\nLabels: ${FEEDBACK_LABEL}, ${kindLabel}, ${severityLabel}`
   }
 
   // Labels may be unavailable (permissions, label protection). The report matters more.
   const plain = await run(base)
   if (plain.exitCode !== 0) {
     const reason = (plain.stderr || labelled.stderr || "unknown error").trim()
-    throw new Error(`Could not file the issue on ${repo}: ${reason}`)
+    throw new Error(`Could not file the issue on ${FEEDBACK_REPO}: ${reason}`)
   }
-  return `Filed on ${repo} without labels (label step failed): ${plain.stdout.trim()}`
+  return `Filed on ${FEEDBACK_REPO} without labels (label step failed): ${plain.stdout.trim()}`
 }

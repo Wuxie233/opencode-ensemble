@@ -85,7 +85,7 @@ src/
 ├── types.ts             # Shared types + helper functions
 ├── util.ts              # ID generation + name validation
 ├── watchdog.ts          # Timeout and stall watchdog
-└── tools/               # 17 team tools plus shared/merge helpers
+└── tools/               # 18 team tools plus shared/merge helpers
 
 test/
 ├── helpers.ts        # Shared test utilities (setupDb, mockClient, etc.)

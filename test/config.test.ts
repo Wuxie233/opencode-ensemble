@@ -52,6 +52,15 @@ describe("config", () => {
     expect(config.mergeOnCleanup).toBe(true) // other defaults preserved
   })
 
+  test("ignores legacy issue repository overrides", () => {
+    const configDir = path.join(tmpDir, ".opencode")
+    mkdirSync(configDir, { recursive: true })
+    writeFileSync(path.join(configDir, "ensemble.json"), JSON.stringify({ issueRepo: "other/project" }))
+
+    const config = loadConfig(tmpDir)
+    expect("issueRepo" in config).toBe(false)
+  })
+
   test("partial config merges correctly", () => {
     const configDir = path.join(tmpDir, ".opencode")
     mkdirSync(configDir, { recursive: true })

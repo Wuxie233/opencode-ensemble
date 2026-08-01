@@ -85,7 +85,7 @@ Key SDK primitives:
 - client.session.abort() — cancel/shutdown teammates
 - client.session.status() — poll session idle/busy state
 - event hook — subscribe to session.status events for state transitions
-- tool hook — register the 17 team tools
+- tool hook — register the 18 team tools
 - tool.execute.before hook — rate limiting + sub-agent isolation
 
 ### Storage
@@ -252,63 +252,6 @@ member, the call is blocked. This covers sub-agents at arbitrary depth.
 | team_metrics        | Lead or own member Team | Read bounded, privacy-safe aggregate telemetry; timeline requires explicit authorized Team IDs |
 | team_report_issue   | Lead only (or standalone) | File an Ensemble defect or design observation to the plugin's own tracker for later triage |
 
-## Self-Iteration Feedback Loop
-
-`team_report_issue` is the plugin's self-improvement feedback layer. The design
-intention is to let the Lead log observations without breaking flow, then
-consume them in a dedicated triage session rather than context-switching in
-the middle of real work.
-
-### Filing a report
-
-Call `team_report_issue` when you discover any of the following while the
-Ensemble plugin is running:
-
-- A mechanism that is wrong, incoherent, or produces surprising behaviour
-  (`kind: design_flaw`)
-- A pattern that works correctly but burns wall-clock, turns, or Lead context
-  for no benefit (`kind: inefficiency`)
-- A tool misbehaving against its own documented contract (`kind: bug`)
-- A coordination need the current toolset cannot serve at all
-  (`kind: missing_capability`)
-
-Fill in `body` with the evidence you actually have — what happened, which tool
-was involved, and why it matters for orchestration quality. Use `trigger` for
-the workflow context (e.g. "reviewing worktree isolation during a five-member
-team run"). Skip fields you do not know yet.
-
-### Collection and triage
-
-Periodically open a new conversation and run:
-
-```
-gh issue list --repo Wuxie233/opencode-ensemble --label ensemble-feedback --state open
-```
-
-Read the list, pick the highest-value items (highest recurrence in your memory,
-highest severity label, most concrete body), and treat them as input for the
-next development iteration. Issues you decide to defer stay open; issues you
-fix get closed when the fix lands.
-
-### Target repository
-
-Default target is `Wuxie233/opencode-ensemble` (private fork, the actual
-development repo). Pass `repo: "hueyexe/opencode-ensemble"` only if you are
-explicitly contributing an upstream bug or design observation. Do not route
-private-customization-specific issues to upstream. The default repo can be
-overridden globally in `.opencode/ensemble.json`:
-
-```json
-{ "issueRepo": "Wuxie233/opencode-ensemble" }
-```
-
-### Teammates do not call this tool
-
-If a teammate notices a plugin defect, it should route the observation to the
-Lead via `team_message` and keep working. The Lead decides whether it is worth
-filing. Teammates filing directly would bypass quality filtering and distract
-from their actual task.
-
 ## Hooks
 
 Three hooks wired in index.ts:
@@ -326,7 +269,7 @@ Three hooks wired in index.ts:
 
 1. SQLite via the internal database adapter — not file JSON, not in-memory-only, not external native packages
 2. promptAsync for message delivery — not session injection, not polling
-3. 17 separate tools — not a unified action tool, no exceptions
+3. 18 separate tools — not a unified action tool, no exceptions
 4. Fire-and-forget spawn — not blocking, not tmux
 5. tool.execute.before for rate limiting — token bucket, in-memory
 6. tool.execute.before for sub-agent isolation — full descendant tracking via parent chain

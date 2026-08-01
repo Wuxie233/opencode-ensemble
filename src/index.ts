@@ -734,7 +734,6 @@ const plugin: Plugin = async (input) => {
           severity: tool.schema.enum(["critical", "high", "medium", "low"]).default("medium").describe("critical: blocks or destroys work. high: forces a workaround every time. medium: real friction. low: papercut"),
           trigger: tool.schema.string().optional().describe("The concrete situation that exposed it: what you were orchestrating, which tool or agent was involved, and what you had to do instead"),
           proposal: tool.schema.string().optional().describe("Optional concrete fix direction or acceptance criterion, when you already know what the mechanism should do"),
-          repo: tool.schema.string().optional().describe("Override the target repository as owner/name. Defaults to the configured issueRepo"),
         },
         async execute(args, ctx) {
           const result = await executeTeamReportIssue(deps, args, ctx.sessionID)

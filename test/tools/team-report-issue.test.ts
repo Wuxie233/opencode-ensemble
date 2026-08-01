@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, test } from "bun:test"
 import { insertMember, insertTeam, setupDeps } from "../helpers"
 import {
+  FEEDBACK_REPO,
   FEEDBACK_LABEL,
   buildIssueBody,
   executeTeamReportIssue,
@@ -114,20 +115,11 @@ describe("executeTeamReportIssue", () => {
     expect(createCall?.args).toContain("severity:medium")
   })
 
-  test("targets config.issueRepo by default", async () => {
+  test("always targets the canonical Ensemble repository", async () => {
     const [run, getCalls] = makeMockRun()
-    deps.config.issueRepo = "MyOrg/my-fork"
     await executeTeamReportIssue(deps, BASE, "solo-sess", run)
     const createCall = getCalls().find(c => c.args.includes("create"))
-    expect(createCall?.args).toContain("MyOrg/my-fork")
-  })
-
-  test("uses explicit repo arg over config default", async () => {
-    const [run, getCalls] = makeMockRun()
-    await executeTeamReportIssue(deps, { ...BASE, repo: "hueyexe/opencode-ensemble" }, "solo-sess", run)
-    const createCall = getCalls().find(c => c.args.includes("create"))
-    expect(createCall?.args).toContain("hueyexe/opencode-ensemble")
-    expect(createCall?.args).not.toContain("Wuxie233/opencode-ensemble")
+    expect(createCall?.args).toContain(FEEDBACK_REPO)
   })
 
   test("attempts three label creations before filing", async () => {
@@ -209,10 +201,4 @@ describe("executeTeamReportIssue", () => {
     ).rejects.toThrow("body is required")
   })
 
-  test("rejects invalid repo format", async () => {
-    const [run] = makeMockRun()
-    await expect(
-      executeTeamReportIssue(deps, { ...BASE, repo: "not-valid" }, "solo-sess", run)
-    ).rejects.toThrow("OWNER/REPO")
-  })
 })

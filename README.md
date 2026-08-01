@@ -258,7 +258,7 @@ Build with `bun run build`, then restart OpenCode to pick up changes.
 
 ## Tools
 
-17 tools. The lead can coordinate with all of them. Teammate sessions explicitly allow 9 communication, task, consultation, and metrics tools.
+18 tools. The lead can coordinate with all of them. Teammate sessions explicitly allow 9 communication, task, consultation, and metrics tools.
 
 **Team lifecycle** (lead only, except archived-team purge may also be run from the main session)
 
@@ -293,6 +293,12 @@ Archived-team purge is intentionally two-step. First call `team_cleanup` with `p
 | `team_tasks_add` | Add a transactional DAG using existing same-Team IDs or batch-local keys; rejects missing, cross-Team, self, and cyclic dependencies. Supports workflow phases. |
 | `team_tasks_complete` | Idempotently complete a task, optionally persist its structured terminal result in the same transaction, notify the Lead once, and unblock dependents. |
 | `team_claim` | Claim a pending task. Atomic, prevents double-claims. |
+
+**Plugin feedback** (lead or standalone session)
+
+| Tool | What it does |
+|------|-------------|
+| `team_report_issue` | File an Ensemble plugin defect or design observation on `Wuxie233/opencode-ensemble` for later triage. The target repository is fixed. |
 
 **Metrics contract**
 

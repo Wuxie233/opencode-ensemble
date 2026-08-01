@@ -42,12 +42,6 @@ export interface EnsembleConfig {
   modelAssignment?: "default" | "rotate" | "random"
   /** Lead asks user about model preferences before spawning (default: false) */
   promptForModels?: boolean
-  /**
-   * Target repository for team_report_issue feedback.
-   * Format: "owner/repo" (default: "Wuxie233/opencode-ensemble").
-   * Can be overridden per call via the tool's `repo` argument.
-   */
-  issueRepo?: string
 }
 
 /** Default configuration values. */
@@ -69,7 +63,6 @@ export const DEFAULT_CONFIG: Required<EnsembleConfig> = {
   retryExhaustionAttempt: 6,
   modelAssignment: "default",
   promptForModels: false,
-  issueRepo: "Wuxie233/opencode-ensemble",
 }
 
 /** Read a JSON config file, returning an empty object on missing/invalid. */
@@ -107,7 +100,6 @@ function readConfigFile(filePath: string): Partial<EnsembleConfig> {
     }
     if (typeof raw.modelAssignment === "string" && ["default", "rotate", "random"].includes(raw.modelAssignment)) result.modelAssignment = raw.modelAssignment as "default" | "rotate" | "random"
     if (typeof raw.promptForModels === "boolean") result.promptForModels = raw.promptForModels
-    if (typeof raw.issueRepo === "string" && /^[\w.-]+\/[\w.-]+$/.test(raw.issueRepo)) result.issueRepo = raw.issueRepo
     return result
   } catch (err) {
     if (err && typeof err === "object" && "code" in err && err.code === "ENOENT") return {}
