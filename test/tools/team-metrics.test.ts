@@ -189,7 +189,7 @@ describe("team_metrics", () => {
     expect(body.matched_strata[0]?.groups.every(group => group.metrics[0]?.uncertainty.method === "wilson_95")).toBe(true)
   })
 
-  test("rejects invalid filter, grouping, comparison, and cursor contracts", () => {
+  test("rejects invalid filter, grouping, comparison, percentile, and cursor contracts", () => {
     const db = seedTeam()
     const deps = setupDeps(db)
     const base = { window: { from: FROM, to: TO }, view: "compare" as const, metrics: ["task_created"] }
@@ -198,6 +198,40 @@ describe("team_metrics", () => {
     expect(() => executeTeamMetrics(db, deps.registry, { ...base, compare: { dimension: "model", values: ["a", "b"] }, group_by: "model" }, "lead-session")).toThrow("invalid or outside")
     expect(() => executeTeamMetrics(db, deps.registry, { ...base, compare: { dimension: "model", values: ["a", "b"] }, cursor: "0" }, "lead-session")).toThrow("invalid or outside")
     expect(() => executeTeamMetrics(db, deps.registry, { ...base, percentile: 50 } as typeof base, "lead-session")).toThrow("invalid or outside")
+    expect(() => executeTeamMetrics(db, deps.registry, { ...base, metrics: ["cycle_time_ms"] } as typeof base, "lead-session")).toThrow("invalid or outside")
+    expect(() => executeTeamMetrics(db, deps.registry, { ...base, metrics: ["cycle_time_ms"], percentile: 75 } as typeof base, "lead-session")).toThrow("invalid or outside")
+  })
+
+  test("applies requested p50, p90, and p95 cycle-time percentiles", () => {
+    const db = setupDb()
+    const start = Date.parse(FROM) + 1_000
+    const durations = [100, 200, 300, 400, 500, 600, 700, 800, 900, 10_000]
+    durations.forEach((duration, index) => {
+      const id = `team-${index}`
+      insertTeam(db, id, id, "lead-session")
+      insertEvent(db, `created-${index}`, id, "team.created", start)
+      insertEvent(db, `archived-${index}`, id, "team.archived", start + duration)
+    })
+    const deps = setupDeps(db)
+    const values = ([50, 90, 95] as const).map(requested => {
+      const body = JSON.parse(executeTeamMetrics(db, deps.registry, {
+        window: { from: FROM, to: TO }, view: "summary", metrics: ["cycle_time_ms"], percentile: requested,
+      }, "lead-session")) as { metrics: Array<{ percentile: number; value: number }> }
+      return [body.metrics[0]?.percentile, body.metrics[0]?.value]
+    })
+
+    expect(values).toEqual([[50, 500], [90, 900], [95, 10_000]])
+  })
+
+  test("rejects unavailable owner-supplied workflow dimensions explicitly", () => {
+    const db = seedTeam()
+    const deps = setupDeps(db)
+    const request = { window: { from: FROM, to: TO }, view: "summary" as const, metrics: ["team_created"] }
+
+    expect(() => executeTeamMetrics(db, deps.registry, { ...request, filters: { workflow_kind: ["delivery"] } }, "lead-session"))
+      .toThrow("workflow_kind is unsupported")
+    expect(() => executeTeamMetrics(db, deps.registry, { ...request, filters: { complexity_band: ["large"] } }, "lead-session"))
+      .toThrow("complexity_band is unsupported")
   })
 
   test("excludes legacy Teams with unknown plan approval observability", () => {
@@ -221,6 +255,37 @@ describe("team_metrics", () => {
     expect(summary.metrics[0]).toMatchObject({ denominator: 10, unknown: 1 })
     expect(comparison.groups.map(group => [group.key, group.n])).toEqual([["plan_approval", 5], ["none", 5]])
     expect(comparison.unknown_count).toBe(1)
+  })
+
+  test("excludes legacy events from generic metrics and mechanism filters while preserving explicit timeline history", () => {
+    const db = setupDb()
+    insertTeam(db, "legacy", "legacy", "lead-session")
+    insertTeam(db, "current", "current", "lead-session")
+    const now = Date.now()
+    insertEvent(db, "legacy-created", "legacy", "team.created", now, null)
+    insertEvent(db, "legacy-task", "legacy", "task.created", now + 1, null, '{"task_id":"legacy-task","status":"pending"}')
+    insertEvent(db, "legacy-approved", "legacy", "plan.approved", now + 2, null, '{"member_name":"worker"}')
+    insertEvent(db, "current-created", "current", "team.created", now)
+    insertEvent(db, "current-task", "current", "task.created", now + 1)
+    const deps = setupDeps(db)
+    const summary = JSON.parse(executeTeamMetrics(db, deps.registry, {
+      window: { from: FROM, to: TO }, view: "summary", metrics: ["team_created", "task_created"],
+    }, "lead-session")) as { coverage: { sample_size: number; denominator: number; unknown: number }; metrics: Array<{ value: number; denominator: number; unknown: number }> }
+    const filtered = JSON.parse(executeTeamMetrics(db, deps.registry, {
+      window: { from: FROM, to: TO }, filters: { mechanism: ["plan_approval"] }, view: "summary", metrics: ["task_created"],
+    }, "lead-session")) as { coverage: { denominator: number; unknown: number }; metrics: Array<{ value: number; unknown: number }> }
+    const history = JSON.parse(executeTeamMetrics(db, deps.registry, {
+      scope: { team_ids: ["legacy"] }, window: { from: FROM, to: TO }, view: "timeline", metrics: ["task_created"],
+    }, "lead-session")) as { events: Array<{ id: string }> }
+
+    expect(summary.coverage).toMatchObject({ sample_size: 1, denominator: 2, unknown: 1 })
+    expect(summary.metrics).toEqual([
+      expect.objectContaining({ value: 1, denominator: 2, unknown: 1 }),
+      expect.objectContaining({ value: 1, denominator: 1, unknown: 1 }),
+    ])
+    expect(filtered.coverage).toMatchObject({ denominator: 1, unknown: 1 })
+    expect(filtered.metrics[0]).toMatchObject({ value: 0, unknown: 1 })
+    expect(history.events.map(event => event.id)).toContain("legacy-task")
   })
 
   test("keeps funnel stages ordered and monotonic for partial or out-of-order lifecycles", () => {

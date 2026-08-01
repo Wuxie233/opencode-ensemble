@@ -710,6 +710,7 @@ const plugin: Plugin = async (input) => {
             dimension: tool.schema.enum(["execution_mode", "mechanism", "model"]),
             values: tool.schema.array(tool.schema.string()),
           }).optional(),
+          percentile: tool.schema.union([tool.schema.literal(50), tool.schema.literal(90), tool.schema.literal(95)]).optional(),
           limit: tool.schema.number().optional(),
           cursor: tool.schema.string().optional(),
         },

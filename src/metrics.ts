@@ -12,6 +12,7 @@ const DIMENSION_VALUE = /^[A-Za-z0-9][A-Za-z0-9._/+:-]{0,127}$/
 const TELEMETRY_VERSION = 1
 
 const METRIC_DEFINITIONS: Record<string, { definition: string; unit: string }> = {
+  cycle_time_ms: { definition: "Elapsed time from team.created to team.archived at the requested percentile", unit: "milliseconds" },
   cycle_time_ms_p50: { definition: "Median elapsed time from team.created to team.archived", unit: "milliseconds" },
   cycle_time_ms_p90: { definition: "90th percentile elapsed time from team.created to team.archived", unit: "milliseconds" },
   team_created: { definition: "Distinct Teams with a team.created event", unit: "Teams" },
@@ -48,10 +49,6 @@ const METRIC_DEFINITIONS: Record<string, { definition: string; unit: string }> =
 const UNSUPPORTED = new Set([
   "verified_outcome_rate", "critical_path_task_time", "parallelism_utilization", "coordination_wait_share",
   "cost_per_verified_outcome", "first_pass_acceptance", "outcome_lift_baseline", "team_completion_reliability", "member_failure_rate",
-])
-const TELEMETRY_V1_METRICS = new Set([
-  "plan_approval_adoption", "consultation_adoption", "retry_observed", "retry_fallback", "retry_exhausted", "recovery_incidents",
-  "resume_adoption", "input_tokens", "output_tokens", "usage_cost",
 ])
 const MECHANISMS = new Set(["plan_approval", "technical_consultation", "model_fallback", "abort_recovery", "resume_from"])
 const TELEMETRY_V1_MECHANISMS = new Set(["technical_consultation", "model_fallback", "abort_recovery", "resume_from"])
@@ -93,6 +90,7 @@ export interface TeamMetricsRequest {
   metrics: string[]
   group_by?: "day" | "week" | "workflow_kind" | "profile" | "model" | "mechanism" | "complexity_band"
   compare?: { dimension: "execution_mode" | "mechanism" | "model"; values: string[] }
+  percentile?: 50 | 90 | 95
   limit?: number
   cursor?: string
 }
@@ -120,6 +118,7 @@ interface AuthorizedScope {
   projectId: string
   teamIds: string[]
   explicit: boolean
+  filterUnknown: number
 }
 
 interface MetricValue {
@@ -138,6 +137,10 @@ interface Page<T> {
 
 function fail(): never {
   throw new Error("Metrics request is invalid or outside caller scope")
+}
+
+function unsupportedFilter(name: "workflow_kind" | "complexity_band"): never {
+  throw new Error(`Metrics filter ${name} is unsupported because the dimension is not instrumented`)
 }
 
 function parseWindow(window?: TeamMetricsRequest["window"]): TimeWindow {
@@ -191,13 +194,13 @@ function authorize(db: Database, _registry: MemberRegistry, sessionId: string, r
     const ownIds = [...new Set(roleRows.map(row => row.id))]
     if (ownIds.length !== 1) fail()
     if (requested && (requested.length !== 1 || requested[0] !== ownIds[0])) fail()
-    return { projectId, teamIds: ownIds, explicit: Boolean(requested) }
+    return { projectId, teamIds: ownIds, explicit: Boolean(requested), filterUnknown: 0 }
   }
   const rows = requested
     ? db.query(`SELECT id FROM team WHERE project_id = ? AND id IN (${placeholders(requested)})`).all(projectId, ...requested) as Array<{ id: string }>
     : db.query("SELECT id FROM team WHERE project_id = ? ORDER BY id").all(projectId) as Array<{ id: string }>
   if (requested && rows.length !== requested.length) fail()
-  return { projectId, teamIds: rows.map(row => row.id), explicit: Boolean(requested) }
+  return { projectId, teamIds: rows.map(row => row.id), explicit: Boolean(requested), filterUnknown: 0 }
 }
 
 function createdCohort(db: Database, scope: AuthorizedScope, window: TimeWindow, version?: number): string[] {
@@ -221,7 +224,7 @@ function validateFilterValues(values: string[] | undefined, allowed?: Set<string
 }
 
 function assertRequestShape(request: TeamMetricsRequest): void {
-  const allowedKeys = new Set(["scope", "window", "filters", "view", "metrics", "group_by", "compare", "limit", "cursor"])
+  const allowedKeys = new Set(["scope", "window", "filters", "view", "metrics", "group_by", "compare", "percentile", "limit", "cursor"])
   if (Object.keys(request).some(key => !allowedKeys.has(key))) fail()
   if (request.scope && Object.keys(request.scope).some(key => key !== "project" && key !== "team_ids")) fail()
   if (request.window && Object.keys(request.window).some(key => key !== "from" && key !== "to")) fail()
@@ -251,9 +254,8 @@ function applyFilters(db: Database, scope: AuthorizedScope, filters: TeamMetrics
   validateFilterValues(versions)
   if (versions?.some(value => !/^\d+$/.test(value))) fail()
   let teamIds = scope.teamIds
-  // These owner-supplied dimensions are not persisted yet. Unknown rows never
-  // silently satisfy a requested value.
-  if (filters.workflow_kind || filters.complexity_band) teamIds = []
+  if (filters.workflow_kind) unsupportedFilter("workflow_kind")
+  if (filters.complexity_band) unsupportedFilter("complexity_band")
   if (filters.status) {
     teamIds = intersectTeams(db, teamIds,
       `t.status IN (${placeholders(filters.status)}) OR EXISTS (
@@ -272,13 +274,12 @@ function applyFilters(db: Database, scope: AuthorizedScope, filters: TeamMetrics
       filters.model)
   }
   if (mechanisms && teamIds.length > 0) {
+    const filterScope = { ...scope, teamIds }
+    const all = createdCohort(db, filterScope, window)
+    const eligible = createdCohort(db, filterScope, window, TELEMETRY_VERSION)
     const kinds = [...new Set(mechanisms.flatMap(mechanismEventKinds))]
-    const rows = db.query(
-      `SELECT DISTINCT team_id FROM team_event
-       WHERE team_id IN (${placeholders(teamIds)}) AND kind IN (${placeholders(kinds)})
-         AND time_created >= ? AND time_created <= ?`,
-    ).all(...teamIds, ...kinds, window.from, window.to) as Array<{ team_id: string }>
-    teamIds = rows.map(row => row.team_id)
+    teamIds = teamsWithEventKinds(db, eligible, window, kinds)
+    scope = { ...scope, filterUnknown: scope.filterUnknown + all.length - eligible.length }
   }
   if (versions && teamIds.length > 0) {
     const rows = db.query(
@@ -295,30 +296,32 @@ function baseCoverage(db: Database, scope: AuthorizedScope, window: TimeWindow):
   const cohort = createdCohort(db, scope, window)
   const versioned = createdCohort(db, scope, window, TELEMETRY_VERSION)
   if (cohort.length === 0) {
-    return { sample_size: 0, numerator: 0, denominator: 0, unknown: 0, censored: 0, coverage_start: null, coverage_end: null, sampling_rate: 0, instrumentation_version: [] }
+    return { sample_size: 0, numerator: 0, denominator: scope.filterUnknown, unknown: scope.filterUnknown, censored: 0, coverage_start: null, coverage_end: null, sampling_rate: 0, instrumentation_version: [] }
   }
   const eventSummary = db.query(
     `SELECT MIN(time_created) AS first, MAX(time_created) AS last
-     FROM team_event WHERE team_id IN (${placeholders(cohort)}) AND time_created >= ? AND time_created <= ?`,
-  ).get(...cohort, window.from, window.to) as { first: number | null; last: number | null }
+     FROM team_event WHERE team_id IN (${placeholders(versioned)}) AND instrumentation_version = ?
+       AND time_created >= ? AND time_created <= ?`,
+  ).get(...versioned, TELEMETRY_VERSION, window.from, window.to) as { first: number | null; last: number | null }
   const archived = (db.query(
     `SELECT COUNT(DISTINCT team_id) AS count FROM team_event
-     WHERE kind = 'team.archived' AND team_id IN (${placeholders(cohort)}) AND time_created >= ? AND time_created <= ?`,
-  ).get(...cohort, window.from, window.to) as { count: number }).count
+     WHERE kind = 'team.archived' AND team_id IN (${placeholders(versioned)}) AND instrumentation_version = ?
+       AND time_created >= ? AND time_created <= ?`,
+  ).get(...versioned, TELEMETRY_VERSION, window.from, window.to) as { count: number }).count
   const versions = db.query(
     `SELECT DISTINCT instrumentation_version AS version FROM team_event
      WHERE team_id IN (${placeholders(cohort)}) AND time_created >= ? AND time_created <= ?
        AND instrumentation_version IS NOT NULL ORDER BY version`,
   ).all(...cohort, window.from, window.to) as Array<{ version: number }>
   return {
-    sample_size: cohort.length,
+    sample_size: versioned.length,
     numerator: archived,
-    denominator: cohort.length,
-    unknown: cohort.length - versioned.length,
-    censored: cohort.length - archived,
+    denominator: cohort.length + scope.filterUnknown,
+    unknown: cohort.length - versioned.length + scope.filterUnknown,
+    censored: versioned.length - archived,
     coverage_start: iso(eventSummary.first),
     coverage_end: iso(eventSummary.last),
-    sampling_rate: cohort.length === 0 ? 0 : versioned.length / cohort.length,
+    sampling_rate: versioned.length / (cohort.length + scope.filterUnknown),
     instrumentation_version: versions.map(row => row.version),
   }
 }
@@ -329,13 +332,23 @@ function countEvents(db: Database, teamIds: string[], window: TimeWindow, kinds:
   return (db.query(
     `SELECT ${selection} AS count FROM team_event
      WHERE team_id IN (${placeholders(teamIds)}) AND kind IN (${placeholders(kinds)})
-       AND time_created >= ? AND time_created <= ?`,
-  ).get(...teamIds, ...kinds, window.from, window.to) as { count: number }).count
+       AND instrumentation_version = ? AND time_created >= ? AND time_created <= ?`,
+  ).get(...teamIds, ...kinds, TELEMETRY_VERSION, window.from, window.to) as { count: number }).count
+}
+
+function teamsWithEventKinds(db: Database, teamIds: string[], window: TimeWindow, kinds: string[]): string[] {
+  if (teamIds.length === 0) return []
+  const rows = db.query(
+    `SELECT DISTINCT team_id FROM team_event
+     WHERE team_id IN (${placeholders(teamIds)}) AND kind IN (${placeholders(kinds)})
+       AND instrumentation_version = ? AND time_created >= ? AND time_created <= ?`,
+  ).all(...teamIds, ...kinds, TELEMETRY_VERSION, window.from, window.to) as Array<{ team_id: string }>
+  return rows.map(row => row.team_id)
 }
 
 function eligibleMetricTeams(db: Database, scope: AuthorizedScope, window: TimeWindow, metric: string): { all: string[]; eligible: string[] } {
   const all = createdCohort(db, scope, window)
-  const eligible = TELEMETRY_V1_METRICS.has(metric) ? createdCohort(db, scope, window, TELEMETRY_VERSION) : all
+  const eligible = UNSUPPORTED.has(metric) ? [] : createdCohort(db, scope, window, TELEMETRY_VERSION)
   return { all, eligible }
 }
 
@@ -344,8 +357,8 @@ function cycleDurations(db: Database, teamIds: string[], window: TimeWindow): nu
   const rows = db.query(
     `SELECT team_id, kind, time_created FROM team_event
      WHERE team_id IN (${placeholders(teamIds)}) AND kind IN ('team.created', 'team.archived')
-       AND time_created >= ? AND time_created <= ? ORDER BY team_id, time_created, id`,
-  ).all(...teamIds, window.from, window.to) as Array<{ team_id: string; kind: string; time_created: number }>
+       AND instrumentation_version = ? AND time_created >= ? AND time_created <= ? ORDER BY team_id, time_created, id`,
+  ).all(...teamIds, TELEMETRY_VERSION, window.from, window.to) as Array<{ team_id: string; kind: string; time_created: number }>
   const starts = new Map<string, number>()
   const completed = new Set<string>()
   const durations: number[] = []
@@ -372,17 +385,19 @@ function usageValue(db: Database, all: string[], eligible: string[], window: Tim
   return { value, numerator: rows.length, denominator: all.length, sampleSize: rows.length, unknown: all.length - rows.length, censored: 0 }
 }
 
-function metricValue(db: Database, scope: AuthorizedScope, window: TimeWindow, metric: string): MetricValue {
+function metricValue(db: Database, scope: AuthorizedScope, window: TimeWindow, metric: string, requestedPercentile?: 50 | 90 | 95): MetricValue {
   const { all, eligible } = eligibleMetricTeams(db, scope, window, metric)
-  const v1Unknown = all.length - eligible.length
+  const v1Unknown = all.length - eligible.length + scope.filterUnknown
   if (UNSUPPORTED.has(metric)) return { value: null, numerator: 0, denominator: 0, sampleSize: 0, unknown: 0, censored: 0 }
-  if (metric === "cycle_time_ms_p50" || metric === "cycle_time_ms_p90") {
-    const values = cycleDurations(db, all, window)
-    return { value: percentile(values, metric.endsWith("p50") ? 50 : 90), numerator: values.length, denominator: all.length, sampleSize: values.length, unknown: 0, censored: all.length - values.length }
+  if (metric === "cycle_time_ms" || metric === "cycle_time_ms_p50" || metric === "cycle_time_ms_p90") {
+    const selected = metric === "cycle_time_ms" ? requestedPercentile : metric.endsWith("p50") ? 50 : 90
+    if (selected === undefined) fail()
+    const values = cycleDurations(db, eligible, window)
+    return { value: percentile(values, selected), numerator: values.length, denominator: all.length + scope.filterUnknown, sampleSize: values.length, unknown: v1Unknown, censored: eligible.length - values.length }
   }
   if (metric === "team_created" || metric === "team_archived") {
-    const count = metric === "team_created" ? all.length : countEvents(db, all, window, ["team.archived"], true)
-    return { value: count, numerator: count, denominator: all.length, sampleSize: all.length, unknown: 0, censored: metric === "team_archived" ? all.length - count : 0 }
+    const count = metric === "team_created" ? eligible.length : countEvents(db, eligible, window, ["team.archived"], true)
+    return { value: count, numerator: count, denominator: all.length + scope.filterUnknown, sampleSize: eligible.length, unknown: v1Unknown, censored: metric === "team_archived" ? eligible.length - count : 0 }
   }
   if (metric === "plan_approval_adoption" || metric === "consultation_adoption" || metric === "resume_adoption" || metric === "recovery_incidents") {
     const kinds = metric === "plan_approval_adoption" ? ["plan.approved", "plan.rejected"] : metric === "consultation_adoption" ? ["consultation.requested"] : metric === "resume_adoption" ? ["resume.linked"] : ["recovery.stage"]
@@ -407,10 +422,10 @@ function metricValue(db: Database, scope: AuthorizedScope, window: TimeWindow, m
   return { value: count, numerator: count, denominator: eligible.length, sampleSize: eligible.length, unknown: v1Unknown, censored: 0 }
 }
 
-function metricResponse(db: Database, scope: AuthorizedScope, window: TimeWindow, metric: string): Record<string, unknown> {
+function metricResponse(db: Database, scope: AuthorizedScope, window: TimeWindow, metric: string, requestedPercentile?: 50 | 90 | 95): Record<string, unknown> {
   const definition = METRIC_DEFINITIONS[metric]
   if (!definition) fail()
-  const value = metricValue(db, scope, window, metric)
+  const value = metricValue(db, scope, window, metric, requestedPercentile)
   const coverage = baseCoverage(db, scope, window)
   return {
     metric,
@@ -425,6 +440,7 @@ function metricResponse(db: Database, scope: AuthorizedScope, window: TimeWindow
     coverage_end: coverage.coverage_end,
     sampling_rate: coverage.sampling_rate,
     instrumentation_version: coverage.instrumentation_version,
+    ...(metric === "cycle_time_ms" ? { percentile: requestedPercentile } : {}),
     ...(UNSUPPORTED.has(metric) ? { supported: false, unsupported_reason: definition.definition } : { supported: true }),
   }
 }
@@ -449,9 +465,9 @@ function metricUncertainty(metric: Record<string, unknown>): Record<string, unkn
   return { method: "wilson_95", confidence: 0.95, lower: Math.max(0, center - spread), upper: Math.min(1, center + spread) }
 }
 
-function comparisonMetricResponses(db: Database, scope: AuthorizedScope, window: TimeWindow, metrics: string[]): Array<Record<string, unknown>> {
+function comparisonMetricResponses(db: Database, scope: AuthorizedScope, window: TimeWindow, metrics: string[], requestedPercentile?: 50 | 90 | 95): Array<Record<string, unknown>> {
   return metrics.map(metric => {
-    const response = metricResponse(db, scope, window, metric)
+    const response = metricResponse(db, scope, window, metric, requestedPercentile)
     return { ...response, uncertainty: metricUncertainty(response) }
   })
 }
@@ -507,14 +523,7 @@ function compareEligibleTeams(db: Database, scope: AuthorizedScope, window: Time
 }
 
 function teamsWithMechanism(db: Database, eligible: string[], window: TimeWindow, mechanism: string): Set<string> {
-  if (eligible.length === 0) return new Set()
-  const kinds = mechanismEventKinds(mechanism)
-  const rows = db.query(
-    `SELECT DISTINCT team_id FROM team_event
-     WHERE team_id IN (${placeholders(eligible)}) AND kind IN (${placeholders(kinds)})
-       AND time_created >= ? AND time_created <= ?`,
-  ).all(...eligible, ...kinds, window.from, window.to) as Array<{ team_id: string }>
-  return new Set(rows.map(row => row.team_id))
+  return new Set(teamsWithEventKinds(db, eligible, window, mechanismEventKinds(mechanism)))
 }
 
 function dimensionCohorts(
@@ -563,6 +572,7 @@ function comparisonGroups(
   window: TimeWindow,
   comparison: NonNullable<TeamMetricsRequest["compare"]>,
   metrics: string[],
+  requestedPercentile?: 50 | 90 | 95,
 ): { groups: Array<Record<string, unknown>>; unknown: number } {
   const cohorts = dimensionCohorts(db, scope, window, comparison)
   const groups = comparison.values.map(key => {
@@ -570,7 +580,7 @@ function comparisonGroups(
     if (!teamIds) fail()
     if (!scope.explicit && teamIds.length < 5) return { key, suppressed: true, suppression_reason: "fewer than five Teams" }
     const groupScope = { ...scope, teamIds }
-    return { key, n: teamIds.length, metrics: comparisonMetricResponses(db, groupScope, window, metrics) }
+    return { key, n: teamIds.length, metrics: comparisonMetricResponses(db, groupScope, window, metrics, requestedPercentile) }
   })
   return { groups, unknown: cohorts.unknown }
 }
@@ -645,14 +655,14 @@ function page<T>(values: T[], limit: number, cursor: string | undefined): Page<T
 }
 
 function funnelStages(db: Database, scope: AuthorizedScope, window: TimeWindow): Array<{ kind: string; count: number }> {
-  const cohort = createdCohort(db, scope, window)
+  const cohort = createdCohort(db, scope, window, TELEMETRY_VERSION)
   if (cohort.length === 0) return ["team.created", "member.registered", "task.created", "task.completed", "team.archived"].map(kind => ({ kind, count: 0 }))
   const rows = db.query(
     `SELECT team_id, kind, time_created, id FROM team_event
      WHERE team_id IN (${placeholders(cohort)})
        AND kind IN ('team.created', 'member.registered', 'task.created', 'task.completed', 'team.archived')
-       AND time_created >= ? AND time_created <= ? ORDER BY team_id, time_created, id`,
-  ).all(...cohort, window.from, window.to) as Array<{ team_id: string; kind: string }>
+       AND instrumentation_version = ? AND time_created >= ? AND time_created <= ? ORDER BY team_id, time_created, id`,
+  ).all(...cohort, TELEMETRY_VERSION, window.from, window.to) as Array<{ team_id: string; kind: string }>
   const expected = ["team.created", "member.registered", "task.created", "task.completed", "team.archived"]
   const progress = new Map<string, number>()
   const counts = expected.map(() => 0)
@@ -674,7 +684,7 @@ function compareView(db: Database, scope: AuthorizedScope, window: TimeWindow, r
     if (!mechanism || !MECHANISMS.has(mechanism) || !comparison.values.includes("none")) fail()
   }
   if (!request.group_by) {
-    const result = comparisonGroups(db, scope, window, comparison, metrics)
+    const result = comparisonGroups(db, scope, window, comparison, metrics, request.percentile)
     return { group_by: comparison.dimension, groups: result.groups, unknown_count: result.unknown, matched_strata: [] }
   }
   if (request.group_by === comparison.dimension) fail()
@@ -682,7 +692,7 @@ function compareView(db: Database, scope: AuthorizedScope, window: TimeWindow, r
     ? compareEligibleTeams(db, scope, window, comparison.values.find(value => value !== "none") as string)
     : createdCohort(db, scope, window, TELEMETRY_VERSION)
   const strata = dimensionStrata(db, eligible, window, request.group_by).flatMap(stratum => {
-    const result = comparisonGroups(db, { ...scope, teamIds: stratum.teamIds }, window, comparison, metrics)
+    const result = comparisonGroups(db, { ...scope, teamIds: stratum.teamIds }, window, comparison, metrics, request.percentile)
     return result.groups.some(group => group.suppressed === true)
       ? []
       : [{ key: stratum.key, groups: result.groups, unknown_count: result.unknown }]
@@ -700,6 +710,9 @@ export function executeTeamMetrics(db: Database, registry: MemberRegistry, reque
   if (!request || !Array.isArray(request.metrics) || request.metrics.length === 0 || request.metrics.length > MAX_METRICS) fail()
   assertRequestShape(request)
   if (!request.metrics.every(metric => Object.hasOwn(METRIC_DEFINITIONS, metric))) fail()
+  if (request.percentile !== undefined && ![50, 90, 95].includes(request.percentile)) fail()
+  if ((request.metrics.includes("cycle_time_ms") && request.percentile === undefined)
+    || (!request.metrics.includes("cycle_time_ms") && request.percentile !== undefined)) fail()
   if (!["summary", "funnel", "timeline", "compare"].includes(request.view)) fail()
   if (request.cursor !== undefined && (request.view !== "compare" || request.group_by === undefined)) fail()
   if (request.group_by !== undefined && (request.view !== "compare" || !GROUP_BY.has(request.group_by))) fail()
@@ -712,7 +725,7 @@ export function executeTeamMetrics(db: Database, registry: MemberRegistry, reque
   if (request.view === "timeline") {
     return JSON.stringify({ view: request.view, request_window: { from: window.fromIso, to: window.toIso }, coverage, ...timeline(db, scope, window, limit) })
   }
-  const metrics = request.metrics.map(metric => metricResponse(db, scope, window, metric))
+  const metrics = request.metrics.map(metric => metricResponse(db, scope, window, metric, request.percentile))
   if (request.view === "funnel") {
     const stages = funnelStages(db, scope, window)
     return JSON.stringify({ view: request.view, request_window: { from: window.fromIso, to: window.toIso }, coverage, stages, metrics })
