@@ -93,15 +93,10 @@ export function buildLeadSystemPrompt(db: Database, teamId: string, config?: Req
 
   if (pendingMessages.length > 0) {
     lines.push("", "--- Team Messages ---")
-    const MAX_MSG = 500
     for (const msg of pendingMessages) {
       const parsed = parseTaskResult(msg.content)
       if (parsed) {
-        // Truncate details for system prompt — full content available via team_results
-        const truncatedResult = { ...parsed, details: truncate(parsed.details, 500) }
-        lines.push(formatTaskResult(msg.from_name, truncatedResult))
-      } else if (msg.content.length > MAX_MSG) {
-        lines.push(`[From ${msg.from_name}]: ${msg.content.slice(0, MAX_MSG)}... (use team_results to read full message)`)
+        lines.push(formatTaskResult(msg.from_name, parsed))
       } else {
         lines.push(`[From ${msg.from_name}]: ${msg.content}`)
       }
@@ -220,13 +215,10 @@ export function buildTeammateSystemPrompt(db: Database, teamId: string, memberNa
 
   if (pendingMessages.length > 0) {
     lines.push("", "--- Messages for you ---")
-    const MAX_MSG = 500
     for (const msg of pendingMessages) {
       const parsed = parseTaskResult(msg.content)
       if (parsed) {
-        lines.push(formatTaskResult(msg.from_name, { ...parsed, details: truncate(parsed.details, MAX_MSG) }))
-      } else if (msg.content.length > MAX_MSG) {
-        lines.push(`[From ${msg.from_name}]: ${msg.content.slice(0, MAX_MSG)}... (truncated)`)
+        lines.push(formatTaskResult(msg.from_name, parsed))
       } else {
         lines.push(`[From ${msg.from_name}]: ${msg.content}`)
       }

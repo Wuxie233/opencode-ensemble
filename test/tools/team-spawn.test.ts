@@ -1060,6 +1060,20 @@ describe("team_spawn", () => {
     expect(text).toContain("team_claim")
   })
 
+  test("read-only agent receives readable evidence-tool guidance", async () => {
+    await executeTeamSpawn(deps, {
+      name: "alice", agent: "explore", prompt: "Research",
+    }, "lead-sess")
+    const promptCall = deps.client.calls.find(c => c.method === "session.promptAsync")
+    const text = (promptCall!.args[0] as { parts: Array<{ text: string }> }).parts[0]!.text
+
+    expect(text).toContain("read: read source files and saved tool output by path")
+    expect(text).toContain("glob: find files by glob pattern")
+    expect(text).toContain("grep: search file contents by regular expression")
+    expect(text).toContain("list: inspect directory entries")
+    expect(text).toContain("use read, grep, or glob on that path to inspect the actual evidence")
+  })
+
   test("claimed read-only agent reports its terminal result atomically", async () => {
     const taskId = "task-read-only-review"
     insertTask(deps, "t1", taskId)
@@ -1503,6 +1517,10 @@ describe("team_spawn — agent mode enforcement", () => {
     expect(opts.permission).toEqual([
       { permission: "edit", pattern: "*", action: "deny" },
       { permission: "bash", pattern: "*", action: "deny" },
+      { permission: "read", pattern: "*", action: "allow" },
+      { permission: "glob", pattern: "*", action: "allow" },
+      { permission: "grep", pattern: "*", action: "allow" },
+      { permission: "list", pattern: "*", action: "allow" },
       ...TEAM_TOOL_PERMISSIONS,
     ])
   })
@@ -1515,6 +1533,10 @@ describe("team_spawn — agent mode enforcement", () => {
     expect(opts.permission).toEqual([
       { permission: "edit", pattern: "*", action: "deny" },
       { permission: "bash", pattern: "*", action: "deny" },
+      { permission: "read", pattern: "*", action: "allow" },
+      { permission: "glob", pattern: "*", action: "allow" },
+      { permission: "grep", pattern: "*", action: "allow" },
+      { permission: "list", pattern: "*", action: "allow" },
       ...TEAM_TOOL_PERMISSIONS,
     ])
   })

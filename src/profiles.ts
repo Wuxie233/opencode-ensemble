@@ -32,7 +32,7 @@ const PROFILES: Record<ProfileName, EnsembleProfile> = {
     name: "scout",
     agent: "explore",
     access: "read",
-    capabilities: ["codebase-reconnaissance", "evidence-mapping"],
+    capabilities: ["codebase-reconnaissance", "evidence-mapping", "readable-tool-evidence"],
     mission: "Return concise evidence, unknowns, and implementation boundaries without writing files.",
   },
   researcher: {
@@ -81,7 +81,7 @@ const PROFILES: Record<ProfileName, EnsembleProfile> = {
     name: "reviewer",
     agent: "explore",
     access: "read",
-    capabilities: ["risk-review", "contract-verification"],
+    capabilities: ["risk-review", "contract-verification", "readable-tool-evidence"],
     mission: "Review the integrated delivery for a named risk without modifying files.",
   },
 }

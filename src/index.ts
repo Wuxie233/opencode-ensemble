@@ -555,7 +555,7 @@ const plugin: Plugin = async (input) => {
       }),
 
       team_results: tool({
-        description: "Retrieve full message content from teammates. Returns unread messages and marks them as read. Use this after receiving a truncated message notification.",
+        description: "Retrieve the complete durable content of unread team messages addressed to you and mark them as read. Use from or message_id to narrow the retrieval.",
         args: {
           from: tool.schema.string().optional().describe("Filter messages by sender name (optional, returns all if omitted)"),
           message_id: tool.schema.string().optional().describe("Retrieve one specific unread message addressed to the caller"),

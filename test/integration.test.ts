@@ -275,7 +275,7 @@ describe("integration: message delivery pipeline end-to-end", () => {
     expect(prompt2).not.toContain("--- Team Messages ---")
   })
 
-  test("long message is truncated in system prompt with team_results hint", async () => {
+  test("long message is delivered in full in the system prompt", async () => {
     await executeTeamCreate(deps, { name: "long-msg-team" }, leadSession)
     const team = deps.db.query("SELECT id FROM team WHERE name = 'long-msg-team'").get() as { id: string }
     await executeTeamSpawn(deps, { name: "verbose", agent: "build", prompt: "task" }, leadSession)
@@ -285,8 +285,7 @@ describe("integration: message delivery pipeline end-to-end", () => {
     await executeTeamMessage(deps, { to: "lead", text: longText }, verboseSession)
 
     const prompt = buildLeadSystemPrompt(deps.db, team.id)
-    expect(prompt).toContain("team_results to read full message")
-    expect(prompt).not.toContain(longText) // full text NOT in prompt
+    expect(prompt).toContain(longText)
   })
 
   test("member-to-member messages deliver via promptAsync with full content", async () => {

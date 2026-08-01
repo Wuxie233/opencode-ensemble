@@ -126,6 +126,33 @@ describe("buildLeadSystemPrompt", () => {
     expect(undelivered.c).toBe(0)
   })
 
+  test("delivers full durable message content inline for the lead", () => {
+    const db = setupDb()
+    insertTeam(db, "long-lead", "long-lead", "lead-sess")
+    const content = "x".repeat(2_000)
+    db.run("INSERT INTO team_message (id, team_id, from_name, to_name, content, delivered, time_created) VALUES (?, ?, ?, ?, ?, 0, ?)",
+      ["long-msg", "long-lead", "alice", "lead", content, Date.now()])
+
+    const result = buildLeadSystemPrompt(db, "long-lead")
+
+    expect(result).toContain(content)
+    expect(result).not.toContain("use team_results to read full message")
+  })
+
+  test("does not truncate structured result details in the lead prompt", () => {
+    const db = setupDb()
+    insertTeam(db, "long-structured", "long-structured", "lead-sess")
+    const details = "evidence".repeat(300)
+    const content = `<task-result><kind>result</kind><task_id>task-1</task_id><status>completed</status><summary>Finished</summary><details>${details}</details></task-result>`
+    db.run("INSERT INTO team_message (id, team_id, from_name, to_name, content, delivered, time_created) VALUES (?, ?, ?, ?, ?, 0, ?)",
+      ["long-structured-msg", "long-structured", "alice", "lead", content, Date.now()])
+
+    const result = buildLeadSystemPrompt(db, "long-structured")
+
+    expect(result).toContain(details)
+    expect(result).not.toContain("...")
+  })
+
   test("does not show messages section when no undelivered messages", () => {
     const db = setupDb()
     insertTeam(db, "t7", "clean-team", "lead-sess")
@@ -407,5 +434,18 @@ describe("buildTeammateSystemPrompt peer messages", () => {
     expect(result).toContain("alice")
     expect(result).toContain("test-team")
     expect(result).not.toContain("Messages for you")
+  })
+
+  test("delivers full durable message content inline for a teammate", () => {
+    const db = setupDb()
+    insertTeam(db, "long-member", "long-member", "lead-sess")
+    const content = "y".repeat(2_000)
+    db.run("INSERT INTO team_message (id, team_id, from_name, to_name, content, delivered, time_created) VALUES (?, ?, ?, ?, ?, 0, ?)",
+      ["long-msg", "long-member", "bob", "alice", content, Date.now()])
+
+    const result = buildTeammateSystemPrompt(db, "long-member", "alice")
+
+    expect(result).toContain(content)
+    expect(result).not.toContain("truncated")
   })
 })

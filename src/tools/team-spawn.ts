@@ -290,6 +290,9 @@ async function executeTeamSpawnLocked(
     "team_consult",
     "team_consult_reply",
   ] as const
+  // Read-only profiles still need the host's evidence tools to inspect source
+  // and read files written by OpenCode's native output truncation.
+  const READ_ONLY_TOOLS = ["read", "glob", "grep", "list"] as const
   const permission: PermissionRule[] = []
 
   if (worktreeDir) {
@@ -305,6 +308,7 @@ async function executeTeamSpawnLocked(
     permission.push(
       { permission: "edit", pattern: "*", action: "deny" },
       { permission: "bash", pattern: "*", action: "deny" },
+      ...READ_ONLY_TOOLS.map(t => ({ permission: t, pattern: "*", action: "allow" as const })),
     )
   }
 
@@ -470,6 +474,14 @@ async function executeTeamSpawnLocked(
 
   context.push(
     "", "Tools available to you:",
+    ...(isReadOnly
+      ? [
+          "- read: read source files and saved tool output by path, using offset/limit for large files",
+          "- glob: find files by glob pattern",
+          "- grep: search file contents by regular expression",
+          "- list: inspect directory entries",
+        ]
+      : []),
     "- team_message: send a message to the lead or another teammate",
     "- team_broadcast: send a message to all team members",
     "- team_tasks_list: view the shared team task board",
@@ -526,7 +538,12 @@ async function executeTeamSpawnLocked(
     "- Do NOT attempt workarounds or make assumptions. Wait for the lead's response.",
     "",
     "Your plain text output is NOT visible to the team. You MUST use team_message to communicate.",
-    "Send concise incremental progress summaries only at meaningful milestones or phase transitions; keep raw logs and long evidence in your session unless the lead asks for them.",
+    ...(isReadOnly
+      ? [
+          "When a tool reports that full output was saved to a path, use read, grep, or glob on that path to inspect the actual evidence before reporting.",
+          "Send concise incremental progress summaries only at meaningful milestones or phase transitions; keep raw logs and long evidence in your session unless the lead asks for them.",
+        ]
+      : ["Send concise incremental progress summaries only at meaningful milestones or phase transitions; keep raw logs and long evidence in your session unless the lead asks for them."]),
   )
 
   if (resumeContext) {
