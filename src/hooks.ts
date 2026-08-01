@@ -3,6 +3,8 @@ import type { MemberRegistry, DescendantTracker } from "./state"
 import { findTeamBySession } from "./types"
 import { sendMessage } from "./messaging"
 import { recomputeCurrentPhase } from "./task-phase"
+import { appendTeamEvent, type ExecutionStatus, type MemberStatus } from "./team-event"
+import { appendMemberTransition, releaseMemberTasks } from "./telemetry"
 
 const TEAM_TOOL_PREFIX = "team_"
 /** @deprecated Prefer config.retryExhaustionAttempt; kept for tests and call sites. */
@@ -126,7 +128,17 @@ export class RetryTracker {
         [JSON.stringify([...attempts]), count, tripped, Date.now(), teamInfo.teamId, memberName, sessionId],
       )
       if (updated.changes !== 1) return
+      appendTeamEvent(db, {
+        teamId: teamInfo.teamId,
+        kind: "retry.observed",
+        payload: { member_name: memberName, attempt },
+      })
       if (tripped === 1) {
+        appendTeamEvent(db, {
+          teamId: teamInfo.teamId,
+          kind: "retry.exhausted",
+          payload: { member_name: memberName, attempts: count },
+        })
         return {
           kind: "exhaustion",
           leadSessionId: row.lead_session_id,
@@ -244,7 +256,7 @@ export function handleSessionStatusEvent(
   if (!team || team.status === "archived") return undefined
 
   const member = db.query("SELECT status, execution_status, abort_recovery_state, plan_approval FROM team_member WHERE team_id = ? AND name = ?")
-    .get(entry.teamId, entry.memberName) as { status: string; execution_status: string; abort_recovery_state: string; plan_approval: string } | null
+    .get(entry.teamId, entry.memberName) as { status: MemberStatus; execution_status: ExecutionStatus; abort_recovery_state: string; plan_approval: string } | null
   if (!member) return undefined
 
   if (member.status === "error" || member.status === "shutdown") return undefined
@@ -257,10 +269,13 @@ export function handleSessionStatusEvent(
     }
     const newStatus = "ready"
     if (member.status === newStatus) return undefined
-    db.run(
-      "UPDATE team_member SET status = ?, execution_status = 'idle', time_updated = ? WHERE team_id = ? AND name = ?",
-      [newStatus, Date.now(), entry.teamId, entry.memberName]
-    )
+    db.transaction(() => {
+      db.run(
+        "UPDATE team_member SET status = ?, execution_status = 'idle', time_updated = ? WHERE team_id = ? AND name = ?",
+        [newStatus, Date.now(), entry.teamId, entry.memberName]
+      )
+      appendMemberTransition(db, entry.teamId, entry.memberName, member.status, "ready", member.execution_status, "idle", "session_status")
+    })()
     // Mark teammate as having reported if they sent at least one message to lead (issue #3).
     // Set on busy→ready transition so Q&A messages during work don't prematurely block delivery.
     if (member.status === "busy" && newStatus === "ready" && member.plan_approval !== "pending") {
@@ -277,19 +292,25 @@ export function handleSessionStatusEvent(
     return { memberName: entry.memberName, teamId: entry.teamId, from: member.status, to: newStatus }
   } else if (status === "busy") {
     if (member.status === "busy" && member.execution_status === "starting") {
-      db.run(
-        "UPDATE team_member SET execution_status = 'running', time_updated = ? WHERE team_id = ? AND name = ?",
-        [Date.now(), entry.teamId, entry.memberName]
-      )
+      db.transaction(() => {
+        db.run(
+          "UPDATE team_member SET execution_status = 'running', time_updated = ? WHERE team_id = ? AND name = ?",
+          [Date.now(), entry.teamId, entry.memberName]
+        )
+        appendMemberTransition(db, entry.teamId, entry.memberName, "busy", "busy", "starting", "running", "session_status")
+      })()
       return undefined
     }
     if (member.status === "ready") {
       // Reset reported_to_lead so re-activated teammates can receive messages again (issue #3).
       // INVARIANT: every promptAsync delivery path must check hasReportedCompletion() to prevent loops.
-      db.run(
-        "UPDATE team_member SET status = 'busy', execution_status = 'running', reported_to_lead = 0, time_updated = ? WHERE team_id = ? AND name = ?",
-        [Date.now(), entry.teamId, entry.memberName]
-      )
+      db.transaction(() => {
+        db.run(
+          "UPDATE team_member SET status = 'busy', execution_status = 'running', reported_to_lead = 0, time_updated = ? WHERE team_id = ? AND name = ?",
+          [Date.now(), entry.teamId, entry.memberName]
+        )
+        appendMemberTransition(db, entry.teamId, entry.memberName, "ready", "busy", member.execution_status, "running", "session_status")
+      })()
       return { memberName: entry.memberName, teamId: entry.teamId, from: member.status, to: "busy" }
     }
     // Session went busy while shutdown was requested — signal for re-abort
@@ -412,11 +433,17 @@ export function handleSessionErrorEvent(
   if (!sessionId) return
 
   const member = db.query(
-    `SELECT tm.team_id, tm.name, t.lead_session_id
+    `SELECT tm.team_id, tm.name, tm.status, tm.execution_status, t.lead_session_id
      FROM team_member tm
      JOIN team t ON t.id = tm.team_id
      WHERE tm.session_id = ? AND t.status = 'active'`,
-  ).get(sessionId) as { team_id: string; name: string; lead_session_id: string } | null
+  ).get(sessionId) as {
+    team_id: string
+    name: string
+    status: "ready" | "busy"
+    execution_status: "idle" | "starting" | "running" | "cancel_requested"
+    lead_session_id: string
+  } | null
   if (!member) return
 
   const errMsg = error?.data?.message ?? error?.name ?? "unknown error"
@@ -431,12 +458,8 @@ export function handleSessionErrorEvent(
     )
     if (claimed.changes !== 1) return undefined
 
-    const releasedTasks = db.run(
-      `UPDATE team_task
-       SET status = 'pending', assignee = NULL, time_updated = ?
-       WHERE team_id = ? AND assignee = ? AND status = 'in_progress'`,
-      [now, member.team_id, member.name],
-    ).changes
+    appendMemberTransition(db, member.team_id, member.name, member.status, "error", member.execution_status, "failed", "session_error")
+    const releasedTasks = releaseMemberTasks(db, member.team_id, member.name, "session_error", now)
     recomputeCurrentPhase(db, member.team_id, now)
     const taskNotice = releasedTasks > 0
       ? ` ${releasedTasks} assigned task${releasedTasks === 1 ? " was" : "s were"} returned to pending so a replacement can claim ${releasedTasks === 1 ? "it" : "them"}.`

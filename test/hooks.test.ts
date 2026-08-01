@@ -48,6 +48,8 @@ describe("handleSessionStatusEvent", () => {
     const row = db.query("SELECT status, execution_status FROM team_member WHERE session_id = ?").get("sess-1") as Record<string, string>
     expect(row.status).toBe("ready")
     expect(row.execution_status).toBe("idle")
+    const event = db.query("SELECT payload FROM team_event WHERE kind = 'member.transitioned'").get() as { payload: string }
+    expect(JSON.parse(event.payload)).toMatchObject({ member_name: "alice", from_status: "busy", to_status: "ready", from_execution: "running", to_execution: "idle", reason: "session_status" })
   })
 
   test("keeps a pending-plan progress report active and incomplete when the session becomes idle", () => {
@@ -328,6 +330,8 @@ describe("RetryTracker", () => {
     expect(member.status).toBe("busy")
     expect(db.query("SELECT retry_count, retry_tripped, retry_attempts FROM team_member WHERE session_id = ?").get("sess-1"))
       .toEqual({ retry_count: 6, retry_tripped: 1, retry_attempts: "[1,2,3,4,5,6]" })
+    expect(db.query("SELECT COUNT(*) AS count FROM team_event WHERE kind = 'retry.observed'").get()).toEqual({ count: 6 })
+    expect(db.query("SELECT payload FROM team_event WHERE kind = 'retry.exhausted'").get()).toEqual({ payload: JSON.stringify({ member_name: "alice", attempts: 6 }) })
   })
 
   test("keeps a tripped sequence permanent across idle and output events", () => {

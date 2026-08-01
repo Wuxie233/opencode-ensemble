@@ -36,6 +36,9 @@ describe("team consultation", () => {
     const prompts = deps.client.calls.filter((call) => call.method === "session.promptAsync")
     expect(prompts).toHaveLength(1)
     expect((prompts[0]!.args[0] as { sessionID: string }).sessionID).toBe("planner-sess")
+    const requestEvent = deps.db.query("SELECT payload FROM team_event WHERE kind = 'consultation.requested'").get() as { payload: string }
+    expect(JSON.parse(requestEvent.payload)).toMatchObject({ task_id: "task-1", requester: "builder", planner: "planner" })
+    expect(requestEvent.payload).not.toContain("idempotency")
   })
 
   test("planner reply atomically resolves the wait and wakes only the requester", async () => {
@@ -62,6 +65,7 @@ describe("team consultation", () => {
     const prompts = deps.client.calls.filter((call) => call.method === "session.promptAsync")
     expect(prompts).toHaveLength(1)
     expect((prompts[0]!.args[0] as { sessionID: string }).sessionID).toBe("builder-sess")
+    expect(deps.db.query("SELECT COUNT(*) AS count FROM team_event WHERE kind = 'consultation.resolved'").get()).toEqual({ count: 1 })
   })
 
   test("planner escalation keeps the builder waiting and wakes the lead", async () => {
@@ -87,6 +91,7 @@ describe("team consultation", () => {
     const prompts = deps.client.calls.filter((call) => call.method === "session.promptAsync")
     expect(prompts).toHaveLength(1)
     expect((prompts[0]!.args[0] as { sessionID: string }).sessionID).toBe("lead-sess")
+    expect(deps.db.query("SELECT COUNT(*) AS count FROM team_event WHERE kind = 'consultation.escalated'").get()).toEqual({ count: 1 })
   })
 
   test("planner resolves an escalated consultation after the lead supplies the business decision", async () => {

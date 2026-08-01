@@ -32,11 +32,30 @@ describe("team_event migration", () => {
 
     applyMigrations(db)
 
-    expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(15)
+    expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(16)
     expect(db.query("SELECT * FROM team_event").all()).toEqual([])
     const indexes = db.query("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'team_event'").all() as Array<{ name: string }>
     expect(indexes.map(row => row.name)).toEqual(expect.arrayContaining(["team_event_team_time_idx"]))
+    expect(indexes.map(row => row.name)).toEqual(expect.arrayContaining([
+      "team_event_kind_time_idx", "team_event_version_time_idx",
+    ]))
     expect(indexes.map(row => row.name)).not.toContain("team_event_operation_idx")
+  })
+
+  test("migration 16 leaves legacy coverage unknown and creates an empty aggregate table", () => {
+    const db = new Database(":memory:")
+    for (let i = 0; i < 15; i++) {
+      db.exec(MIGRATIONS[i]!)
+      db.exec(`PRAGMA user_version = ${i + 1}`)
+    }
+    db.run("INSERT INTO project (id, name, path, status, time_created, time_updated) VALUES ('p', 'p', 'p', 'active', 1, 1)")
+    db.run("INSERT INTO team (id, name, project_id, lead_session_id, status, delegate, time_created, time_updated) VALUES ('t', 'legacy', 'p', 's', 'active', 0, 1, 1)")
+    db.run("INSERT INTO team_event (id, team_id, kind, payload, time_created) VALUES ('event_legacy', 't', 'team.created', '{}', 1)")
+
+    applyMigrations(db)
+
+    expect(db.query("SELECT instrumentation_version FROM team_event").get()).toEqual({ instrumentation_version: null })
+    expect(db.query("SELECT * FROM team_usage_aggregate").all()).toEqual([])
   })
 
   test("deleting a team cascades to its events", () => {
@@ -75,6 +94,39 @@ describe("appendTeamEvent", () => {
     expect(() => appendTeamEvent(deps.db, {
       teamId: "t1", kind: "task.claimed", payload: { task_id: "private task content", assignee: "alice" },
     })).toThrow("payload value")
+  })
+
+  test("accepts typed numeric enum and opaque ID values but rejects arbitrary strings", () => {
+    appendTeamEvent(deps.db, {
+      teamId: "t1",
+      kind: "retry.observed",
+      payload: { member_name: "alice", attempt: 0 },
+    })
+    appendTeamEvent(deps.db, {
+      teamId: "t1",
+      kind: "resume.linked",
+      payload: { member_name: "bob", predecessor_name: "alice", context_truncated: true },
+    })
+    expect(() => appendTeamEvent(deps.db, {
+      teamId: "t1",
+      kind: "retry.observed",
+      payload: { member_name: "alice", attempt: Number.NaN },
+    })).toThrow("payload value")
+    expect(() => appendTeamEvent(deps.db, {
+      teamId: "t1",
+      kind: "recovery.stage",
+      payload: { member_name: "alice", mechanism: "private runtime detail", stage: "failed" },
+    } as never)).toThrow("payload value")
+    expect(() => appendTeamEvent(deps.db, {
+      teamId: "t1",
+      kind: "consultation.requested",
+      payload: { consultation_id: "private question", task_id: "task_1", requester: "alice", planner: "bob" },
+    })).toThrow("payload value")
+
+    const rows = deps.db.query("SELECT instrumentation_version, payload FROM team_event ORDER BY time_created, id").all() as Array<{ instrumentation_version: number; payload: string }>
+    expect(rows).toHaveLength(2)
+    expect(rows.every(row => row.instrumentation_version === 1)).toBe(true)
+    expect(rows.map(row => row.payload).join("\n")).not.toContain("private")
   })
 
   test("rejects oversized identifiers before persistence and never persists forbidden fields", () => {

@@ -13,14 +13,15 @@ Never infer causality from an unadjusted before/after chart.
 
 Three evidence classes must remain distinct:
 
-- **Available now:** SQLite Team, Member, Task, Message, and immutable
-  `team_event` rows. These survive restart until explicit Team purge.
-- **Ephemeral now:** step tokens, cost, tool calls, and shell results in the
-  process-shared `ActivityBuffer`; SDK session messages can be fetched on demand.
-  Neither source is suitable for historical metrics.
+- **Available now:** SQLite Team, Member, Task, Message, immutable versioned
+  `team_event` rows, and aggregate-only numeric Team/Member usage counters.
+  These survive restart until explicit Team purge. Coverage begins at migration
+  16; legacy events remain explicitly unversioned and are never backfilled.
+- **Ephemeral now:** tool calls and shell results in the process-shared
+  `ActivityBuffer`; SDK session messages can be fetched on demand. Neither
+  source is suitable for historical metrics.
 - **Missing:** explicit outcome labels, baseline identity, active/blocked spans,
-  structured failure/recovery events, durable usage counters, and workflow or
-  complexity classification.
+  workflow or complexity classification, and complete incident correlation.
 
 ## Metric Catalog
 
@@ -43,10 +44,10 @@ run, not a zero.
 | Metric | Formula | Source and instrumentation | Cost and cautions |
 |---|---|---|---|
 | End-to-end cycle time | `T1 - T0`; also time to verified outcome when that precedes archive | Current `team_event` has both boundary events; `team.time_created/time_updated` is a fallback snapshot. **Missing:** verified-outcome timestamp. | Near zero. Cleanup delay can dominate `T1`; report outcome time and archive lag separately. |
-| Critical-path task time | `max(path sum of task active durations)` over `depends_on` DAG | Current Task dependencies and lifecycle events identify creation, claim, completion, and unblock. **Missing:** release reasons beyond spawn rollback, reclaims, pause/block transitions, and active-span IDs. | Medium event volume. `time_updated - time_created` mixes waiting and work and must not be called active time. |
-| Parallelism utilization | `integral(active Members) dt / (wall time * peak concurrent Members)` | Member status is currently a latest snapshot. **Missing:** enumerated Member execution transition events or compact active spans. | Medium, transition-only. High utilization can indicate useful overlap or excess fan-out; pair with outcome and merge/rework metrics. |
+| Critical-path task time | `max(path sum of task active durations)` over `depends_on` DAG | Current Task dependencies and lifecycle events identify creation, claim, completion, unblock, and reason-coded releases for runtime-owned failure/shutdown paths. **Missing:** pause/block transitions and active-span IDs. | Medium event volume. `time_updated - time_created` mixes waiting and work and must not be called active time. |
+| Parallelism utilization | `integral(active Members) dt / (wall time * peak concurrent Members)` | Versioned Member status/execution transition events cover spawn-time and runtime-owned state changes after migration 16. | Medium, transition-only. Legacy and incomplete instrumentation must remain unknown, not inferred. High utilization can indicate useful overlap or excess fan-out; pair with outcome and merge/rework metrics. |
 | Coordination wait share | `sum(task ready-to-claim + consultation wait + plan approval wait + merge wait) / sum(task elapsed time)` | Current task/plan/consult/merge states expose the latest state; lifecycle events cover plan and merge but not consultation or every task transition. **Missing:** transition events with stable correlation IDs. | Medium. Overlapping waits must be assigned to mutually exclusive states before summing. |
-| Cost per verified outcome | `sum(model cost) / verified_success Teams`; report tokens similarly | Step cost and tokens exist only in `ActivityBuffer` and SDK responses. **Missing:** durable per-session aggregate counters keyed to Team and Member, including provider/model and coverage status. Persist aggregates, not message content. | Low storage, moderate hook work. Provider prices and cache accounting change; preserve raw token classes and pricing-version metadata rather than only dollars. |
+| Cost per verified outcome | `sum(model cost) / verified_success Teams`; report tokens similarly | Aggregate input/output token and cost counters are durable per opaque Team/Member identity when SDK step events provide numeric usage. **Missing:** verified outcomes, provider/model attribution, cache token classes, and price-version metadata. | Low storage. Coverage is best-effort and versioned; provider prices and cache accounting change, so aggregate dollars alone are not a normalized comparison. |
 | Wasted execution share | `(tokens or cost after terminal result + failed/replaced Member usage + abandoned-task usage) / total usage` | **Missing:** durable usage deltas, terminal-result timestamp, replacement lineage (`resume_from`), and reason-coded abandoned work. Retry counters give only a partial signal. | Medium. Failed exploration can be necessary learning. Label this avoidable waste only when a reason code establishes duplication, late execution, or discarded output. |
 
 ### Reliability
@@ -54,9 +55,9 @@ run, not a zero.
 | Metric | Formula | Source and instrumentation | Cost and cautions |
 |---|---|---|---|
 | Team completion reliability | `Teams reaching verified terminal state / Teams started`; separately `Teams archived cleanly / Teams started` | `team.created` and `team.archived` exist. **Missing:** verified/abandoned terminal outcome and cleanup-blocked events. | Low. Archived is an operational state, not proof of successful delivery. Apply a cohort cutoff and show censored Teams. |
-| Member failure rate | `Members ending failed, timed_out, or unexpected error / Members registered` | `member.registered` exists; Member terminal state is a latest snapshot. Retry fields and abort-recovery state persist. **Missing:** append-only terminal transition and reason code. | Low. User-requested shutdown is not failure. Count one terminal incident per Member, not every retry event. |
-| Retry exhaustion and fallback recovery | `retry-tripped Members / Members with retry`; `fallback Members later completed / fallback Members` | Current `retry_count`, `retry_tripped`, `retry_fallback_used`, and `retry_fallback_models` expose latest aggregates. **Missing:** privacy-safe retry/fallback/completion events for historical sequence and latency. | Low, retry-only. Provider incidents cluster in time; group by provider/model and incident window before blaming orchestration. |
-| Recovery latency | `terminal recovery settled time - incident detected time`, by timeout, unexpected abort, restart, or late terminal event | Current execution and abort-recovery fields show state; runtime paths implement these mechanisms. **Missing:** incident, claim, preservation, abort, replacement, and settlement events with a shared incident ID. | Low, incident-only. Failed-safe behavior may be slower because it protects work; always pair latency with work-loss rate. |
+| Member failure rate | `Members ending failed, timed_out, or unexpected error / Members registered` | `member.registered` plus versioned Member terminal transitions and reason codes cover runtime-owned failure, timeout, and recovery paths after migration 16. | Low. User-requested shutdown is not failure. Count one terminal incident per Member, not every retry event; legacy members remain unknown. |
+| Retry exhaustion and fallback recovery | `retry-tripped Members / Members with retry`; `fallback Members later completed / fallback Members` | Versioned distinct retry-attempt, fallback, and exhaustion events supplement current retry fields. **Missing:** completion linkage and latency. | Low, retry-only. Provider incidents cluster in time; model attribution is intentionally absent; group by incident window before blaming orchestration. |
+| Recovery latency | `terminal recovery settled time - incident detected time`, by timeout, unexpected abort, restart, or late terminal event | Versioned recovery-stage events cover detection, preservation, prompting, re-abort, and settlement for watchdog, startup, safe-abort, and late-terminal paths. **Missing:** shared incident ID and complete abort/replacement linkage. | Low, incident-only. Failed-safe behavior may be slower because it protects work; always pair latency with work-loss rate. |
 | Message delivery reliability | `messages delivered within SLO / attempted messages`; lease recovery rate is `expired claims recovered / expired claims` | `team_message` has creation, `delivered`, and `delivery_claimed_at`. **Missing:** delivery-settled timestamp, attempt count, failure/reclaim reason, and channel (`lead`, peer, broadcast). | Medium for per-attempt events; low for aggregate counters. `delivered=1` can be set during archive consumption, so it is not currently proof of recipient delivery. |
 | Merge reliability | `merge.completed / merge.started`; recovery rate after `merge.failed` | Immutable merge events already support starts, completions, failures, and causal linkage for the immediate attempt; Member `merge_state` is the current guard. | Near zero. A merge can complete mechanically and still fail verification. Report verification outcome separately. |
 
@@ -72,9 +73,9 @@ used. Do not rank mechanisms by invocation count.
 | Task DAG and ready frontier | DAG adoption; blocked-to-ready latency; critical-path ratio; duplicate-claim prevention incidents | Task `depends_on`, statuses, and `task.created/claimed/unblocked/completed` exist. **Missing:** claim-conflict and invalid-dependency counters, all release/reclaim events, active spans. | Complex work selects into DAG usage, so raw completion rates will make DAGs look worse. |
 | Structured progress, result, blocker, and Lead Brief | Structured-message adoption; blocker resolution latency; Lead context bytes avoided; result-to-completion atomicity failures | Message bodies can be parsed today, and Lead Brief is persisted, but analytics should not scan bodies by default. **Missing:** content-free message kind, task ID, byte count, projection/replacement relation, and brief size/update counters. | Message count rewards chatter. Measure resolved blockers and bounded context, not volume. |
 | Plan approval | Eligible risky-writer adoption; rejection/revision count; post-approval rework and verified outcome | `plan.approved/rejected` events and Member `plan_approval` exist. **Missing:** eligibility/risk label, revision correlation, decision latency, and post-approval correction relation. | Plan approval is intentionally selected for risky work; compare within risk strata. |
-| Technical consultation | Adoption by eligible blocked task; answer/escalation latency; resolution without Lead interruption; downstream rework | Member consultation state and IDs exist as current state. **Missing:** append-only requested/answered/escalated/consumed events and eligibility reason. | Consultations may increase elapsed time while preventing larger rework. |
+| Technical consultation | Adoption by eligible blocked task; answer/escalation latency; resolution without Lead interruption; downstream rework | Append-only requested/resolved/escalated events now carry only opaque consultation/task/member IDs. **Missing:** consumed events and eligibility reason. | Consultations may increase elapsed time while preventing larger rework. |
 | Worktree isolation and explicit merge | Writer isolation adoption; merge success; overlap-block incidents; preserved-work recovery; integration time | Worktree/branch and merge state persist; merge lifecycle events exist. **Missing:** writer/read-only declaration event, overlap-block event, preservation events, integration verification result. | Read-only members correctly use no worktree. Never use all Members as the denominator. |
-| `resume_from`, model fallback, and abort recovery | Recovery mechanism adoption; recovered completion rate; duplicated-work cost; recovery latency | Retry/fallback and abort-recovery fields are partial. **Missing:** predecessor-successor lineage, incident ID, selected mechanism, preserved context bytes, and terminal disposition. | These mechanisms activate after failure. Compare recovery options within incident type, not against healthy Members. |
+| `resume_from`, model fallback, and abort recovery | Recovery mechanism adoption; recovered completion rate; duplicated-work cost; recovery latency | Versioned retry-attempt/fallback/exhaustion, recovery-stage, and predecessor-successor events provide partial sequence evidence without Session, model, branch, path, or error strings. **Missing:** shared incident ID, preserved context byte count, and verified terminal disposition. | These mechanisms activate after failure. Compare recovery options within incident type, not against healthy Members. |
 | Risk-triggered review and terminal verification | Eligible-risk review adoption; defect catch rate; escaped defect rate; review/verification time | **Missing:** risk class, Reviewer assignment, finding severity/disposition, verification commands/results, and final outcome. Profiles alone do not prove a review occurred. | More findings may mean better detection or worse inputs. Pair catch rate with escaped defects and first-pass acceptance. |
 
 ## Collection Plan
@@ -87,9 +88,10 @@ latest-state snapshot.
 
 Collection tiers:
 
-1. **Always-on, low cost:** Team/Task/Member transitions, outcome labels,
-   incident and recovery stages, mechanism usage, usage aggregates, model ID,
-   workflow kind, complexity band, and instrumentation version. Emit only on a
+1. **Always-on, low cost:** Team/Task/Member transitions, incident and recovery
+   stages, mechanism usage, aggregate numeric usage, and instrumentation
+   version. Outcome labels, model ID, workflow kind, and complexity band remain
+   owner-supplied or unavailable. Emit only on a
    real state transition; estimated storage is tens to low hundreds of rows per
    Team.
 2. **Sampled diagnostics:** 5-10% of Teams, stratified by workflow and failure
@@ -218,8 +220,10 @@ messages.
 
 - `src/schema.ts`: persistent Team, Member, Task, Message, retry, merge,
   consultation, Lead Brief, and immutable `team_event` fields and retention.
-- `src/team-event.ts`: current allowlisted event kinds, strict payload keys,
-  2 KiB payload ceiling, and append-only insertion.
+- `src/team-event.ts`: versioned allowlisted event kinds, typed value validators,
+  2 KiB payload ceiling, append-only insertion, and best-effort observation helper.
+- `src/telemetry.ts`: aggregate-only numeric usage collection and transaction-
+  coupled Member transition/task release helpers.
 - `src/activity.ts`: in-memory rolling tokens, cost, tool activity, reasoning,
   text, commands, and file data; the buffer is capped per session.
 - `src/dashboard.ts`: on-demand SDK session/message fallback, demonstrating why

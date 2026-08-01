@@ -378,6 +378,17 @@ async function executeTeamSpawnLocked(
         kind: "member.registered",
         payload: { member_name: args.name },
       })
+      if (resumeContext) {
+        appendTeamEvent(deps.db, {
+          teamId: teamInfo.teamId,
+          kind: "resume.linked",
+          payload: {
+            member_name: args.name,
+            predecessor_name: resumeContext.predecessor,
+            context_truncated: resumeContext.truncated,
+          },
+        })
+      }
     })
   } catch (err) {
     const registrationError = err instanceof Error ? err.message : String(err)

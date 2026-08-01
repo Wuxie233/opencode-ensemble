@@ -8,6 +8,8 @@ import { sendLeadAlert, isMemberPromptEligible } from "./messaging"
 import { log } from "./log"
 import { recomputeCurrentPhase } from "./task-phase"
 import { resolveAbortBranch } from "./abort-preservation"
+import { appendTeamEventBestEffort } from "./team-event"
+import { appendMemberTransition, releaseMemberTasks } from "./telemetry"
 
 interface WatchdogOpts {
   db: Database
@@ -230,6 +232,11 @@ export class Watchdog {
         .some(entry => entry.timestamp >= cutoff) ?? false
       if (hasRecentActivity()) continue
       this.abortingSessions.add(member.session_id)
+      appendTeamEventBestEffort(this.db, {
+        teamId: member.team_id,
+        kind: "recovery.stage",
+        payload: { member_name: member.name, mechanism: "watchdog", stage: "detected" },
+      })
 
       // Preserve branch BEFORE abort — session.abort() may destroy the worktree + branch
       let preservedBranch: string | null = null
@@ -266,6 +273,11 @@ export class Watchdog {
           continue
         }
         preservedBranch = safeBranch
+        appendTeamEventBestEffort(this.db, {
+          teamId: member.team_id,
+          kind: "recovery.stage",
+          payload: { member_name: member.name, mechanism: "watchdog", stage: "preserved" },
+        })
         log(`watchdog:branch:preserved src=${sourceBranch} target=${safeBranch}`)
       }
 
@@ -321,11 +333,8 @@ export class Watchdog {
           [now, member.team_id, member.name],
         )
         if (result.changes !== 1) return false
-        this.db.run(
-          `UPDATE team_task SET status = 'pending', assignee = NULL, time_updated = ?
-           WHERE team_id = ? AND assignee = ? AND status = 'in_progress'`,
-          [now, member.team_id, member.name],
-        )
+        appendMemberTransition(this.db, member.team_id, member.name, "busy", "error", "cancelling", "timed_out", "timeout")
+        releaseMemberTasks(this.db, member.team_id, member.name, "timeout", now)
         recomputeCurrentPhase(this.db, member.team_id, now)
         this.db.run(
           "UPDATE team_message SET content = ? WHERE id = ? AND team_id = ? AND from_name = 'system' AND to_name = 'lead'",
@@ -334,6 +343,11 @@ export class Watchdog {
         return true
       })()
       if (!transitioned) continue
+      appendTeamEventBestEffort(this.db, {
+        teamId: member.team_id,
+        kind: "recovery.stage",
+        payload: { member_name: member.name, mechanism: "watchdog", stage: "settled" },
+      })
 
       // Notify
       try {

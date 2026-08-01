@@ -3,6 +3,7 @@ import { immediateTransaction } from "../db"
 import { sendMessage, wakeTeamLead } from "../messaging"
 import { requireTeamMember } from "./shared"
 import { log } from "../log"
+import { appendTeamEvent } from "../team-event"
 
 export interface TeamConsultReplyArgs {
   consult_id: string
@@ -47,6 +48,16 @@ export async function executeTeamConsultReply(
       [state, args.reply.trim(), Date.now(), teamInfo.teamId, requester.name, args.consult_id, requester.consult_state],
     )
     if (updated.changes !== 1) throw new Error(`Consultation "${args.consult_id}" was already resolved`)
+    appendTeamEvent(deps.db, {
+      teamId: teamInfo.teamId,
+      kind: args.escalate_to_lead ? "consultation.escalated" : "consultation.resolved",
+      payload: {
+        consultation_id: args.consult_id,
+        task_id: requester.consult_task_id,
+        requester: requester.name,
+        planner,
+      },
+    })
     const content = [
       `<team-consult-reply id="${args.consult_id}" task_id="${requester.consult_task_id}" from="${planner}" state="${state}">`,
       args.reply.trim(),

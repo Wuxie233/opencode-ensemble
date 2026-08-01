@@ -5,6 +5,7 @@ import { sendMessage, wakeTeamLead } from "../messaging"
 import { immediateTransaction } from "../db"
 import { serializeTaskResult } from "../result-parser"
 import { recomputeCurrentPhase } from "../task-phase"
+import { appendMemberTransition } from "../telemetry"
 import { appendTeamEvent } from "../team-event"
 
 interface TerminalResultInput {
@@ -103,6 +104,12 @@ export async function executeTeamTasksComplete(
     }
 
     if (terminalContent && memberName) {
+      const member = deps.db.query(
+        "SELECT status, execution_status FROM team_member WHERE team_id = ? AND name = ?",
+      ).get(teamInfo.teamId, memberName) as {
+        status: "ready" | "busy"
+        execution_status: "idle" | "starting" | "running" | "cancel_requested" | "completing"
+      } | null
       sendMessage(deps.db, {
         teamId: teamInfo.teamId,
         from: memberName,
@@ -117,6 +124,9 @@ export async function executeTeamTasksComplete(
       )
       if (reporting.changes !== 1) {
         throw new Error(`Teammate "${memberName}" not found while recording terminal result`)
+      }
+      if (member) {
+        appendMemberTransition(deps.db, teamInfo.teamId, memberName, member.status, member.status, member.execution_status, "completed", "task_completed")
       }
     } else {
       const who = memberName ?? "lead"

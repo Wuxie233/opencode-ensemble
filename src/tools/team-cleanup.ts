@@ -9,6 +9,7 @@ import { log } from "../log"
 import { runCommand } from "../process"
 import { sendLeadAlert } from "../messaging"
 import { recomputeCurrentPhase } from "../task-phase"
+import { appendMemberTransition, releaseMemberTasks } from "../telemetry"
 import { resolveAbortBranch, type AbortBranchResolution } from "../abort-preservation"
 
 type PurgeApprovalFn = (preview: string) => Promise<void>
@@ -575,11 +576,8 @@ export async function executeTeamCleanup(
         if (settled.changes !== 1) {
           throw new Error(`Cannot clean up team "${teamInfo.teamName}": ${member.name}'s shutdown state changed after abort.`)
         }
-        deps.db.run(
-          `UPDATE team_task SET status = 'pending', assignee = NULL, time_updated = ?
-           WHERE team_id = ? AND assignee = ? AND status = 'in_progress'`,
-          [now, teamInfo.teamId, member.name],
-        )
+        appendMemberTransition(deps.db, teamInfo.teamId, member.name, "shutdown_requested", "shutdown", "cancelling", "idle", "force_cleanup")
+        releaseMemberTasks(deps.db, teamInfo.teamId, member.name, "force_cleanup", now)
         recomputeCurrentPhase(deps.db, teamInfo.teamId, now)
       })()
       member.status = "shutdown"

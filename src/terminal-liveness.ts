@@ -10,6 +10,7 @@ import {
   type ResolveWorktreeBranchFn,
 } from "./tools/merge-helper"
 import { resolveAbortBranch, type AbortBranchResolution } from "./abort-preservation"
+import { appendTeamEventBestEffort } from "./team-event"
 
 const activeReaborts = new Map<string, Promise<boolean>>()
 
@@ -39,6 +40,11 @@ export class TerminalLivenessGuard {
       worktree_dir: string | null
     } | null
     if (!member) return false
+    appendTeamEventBestEffort(this.deps.db, {
+      teamId: member.team_id,
+      kind: "recovery.stage",
+      payload: { member_name: member.name, mechanism: "late_terminal", stage: "detected" },
+    })
     const current = activeReaborts.get(sessionId)
     if (current) return current
 
@@ -93,6 +99,11 @@ export class TerminalLivenessGuard {
     }
     try {
       await this.deps.client.session.abort({ sessionID: sessionId })
+      appendTeamEventBestEffort(this.deps.db, {
+        teamId: member.team_id,
+        kind: "recovery.stage",
+        payload: { member_name: member.name, mechanism: "late_terminal", stage: "reaborted" },
+      })
       log(`terminal-liveness:reaborted member=${member.name} status=${status}`)
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)

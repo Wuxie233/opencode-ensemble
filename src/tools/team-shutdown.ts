@@ -7,6 +7,7 @@ import type { PreserveBranchFn, ResolveWorktreeBranchFn } from "./merge-helper"
 import { getTeamResourceParts, preserveBranch, preservedBranchName, resolveWorktreeBranch } from "./merge-helper"
 import type { CommitCountFn, IsDirtyFn } from "./shared"
 import { checkWorktreeDirty, countBranchCommits, requireLead } from "./shared"
+import { appendMemberTransition, releaseMemberTasks } from "../telemetry"
 
 const TERMINAL_EXECUTION_STATUSES = new Set(["completed", "cancelled", "failed", "timed_out"])
 
@@ -94,11 +95,17 @@ export async function executeTeamShutdown(
     log(`shutdown:branch:preserved-graceful src=${resolution.sourceBranch} target=${safeBranch}`)
   }
 
-  const requested = deps.db.run(
-    `UPDATE team_member SET status = 'shutdown_requested', time_updated = ?
-     WHERE team_id = ? AND name = ? AND status IN ('ready', 'busy')`,
-    [Date.now(), teamInfo.teamId, args.member],
-  )
+  const requested = deps.db.transaction(() => {
+    const result = deps.db.run(
+      `UPDATE team_member SET status = 'shutdown_requested', time_updated = ?
+       WHERE team_id = ? AND name = ? AND status IN ('ready', 'busy')`,
+      [Date.now(), teamInfo.teamId, args.member],
+    )
+    if (result.changes === 1) {
+      appendMemberTransition(deps.db, teamInfo.teamId, args.member, member.status as "ready" | "busy", "shutdown_requested", member.execution_status as "idle" | "starting" | "running" | "cancel_requested", member.execution_status as "idle" | "starting" | "running" | "cancel_requested", "shutdown")
+    }
+    return result
+  })()
   if (requested.changes !== 1) {
     throw new Error(`Cannot request shutdown for "${args.member}": the member state changed. Retry with current state.`)
   }
@@ -249,6 +256,9 @@ async function preserveAndAbort(
 function settleShutdown(deps: ToolDeps, teamId: string, memberName: string): void {
   deps.db.transaction(() => {
     const now = Date.now()
+    const previous = deps.db.query(
+      "SELECT execution_status FROM team_member WHERE team_id = ? AND name = ? AND status = 'shutdown_requested'",
+    ).get(teamId, memberName) as { execution_status: "idle" | "starting" | "running" | "cancel_requested" | "cancelling" | "cancelled" | "completing" | "completed" | "failed" | "timed_out" } | null
     const transitioned = deps.db.run(
       `UPDATE team_member
        SET status = 'shutdown',
@@ -261,11 +271,9 @@ function settleShutdown(deps: ToolDeps, teamId: string, memberName: string): voi
       [now, teamId, memberName],
     )
     if (transitioned.changes !== 1) return
-    deps.db.run(
-      `UPDATE team_task SET status = 'pending', assignee = NULL, time_updated = ?
-       WHERE team_id = ? AND assignee = ? AND status = 'in_progress'`,
-      [now, teamId, memberName],
-    )
+    const nextExecution = previous && TERMINAL_EXECUTION_STATUSES.has(previous.execution_status) ? previous.execution_status : "idle"
+    appendMemberTransition(deps.db, teamId, memberName, "shutdown_requested", "shutdown", previous?.execution_status ?? "idle", nextExecution as "idle" | "cancelled" | "completed" | "failed" | "timed_out", "shutdown")
+    releaseMemberTasks(deps.db, teamId, memberName, "shutdown", now)
     recomputeCurrentPhase(deps.db, teamId, now)
   })()
 }

@@ -4,6 +4,7 @@ import { log } from "./log"
 import type { MemberRegistry } from "./state"
 import type { PluginClient } from "./types"
 import { generateId } from "./util"
+import { appendTeamEventBestEffort } from "./team-event"
 
 const ABORT_ERROR_NAME = "MessageAbortedError"
 const DEFAULT_RETRY_DELAYS_MS = [50, 150, 350]
@@ -80,6 +81,11 @@ export class SafeAbortRecovery {
     if (!sessionId || error?.name !== ABORT_ERROR_NAME) return false
     const member = this.lookupEligibleMember(sessionId)
     if (!member) return false
+    appendTeamEventBestEffort(this.db, {
+      teamId: member.team_id,
+      kind: "recovery.stage",
+      payload: { member_name: member.name, mechanism: "safe_abort", stage: "detected" },
+    })
 
     if (member.abort_recovery_state === "consumed") return false
     if (eventId && member.abort_recovery_event_id === eventId) return true
@@ -283,6 +289,14 @@ export class SafeAbortRecovery {
         this.pending.delete(sessionId)
         return
       }
+      const recoveredMember = this.lookupEligibleMember(sessionId)
+      if (recoveredMember) {
+        appendTeamEventBestEffort(this.db, {
+          teamId: recoveredMember.team_id,
+          kind: "recovery.stage",
+          payload: { member_name: recoveredMember.name, mechanism: "safe_abort", stage: "prompted" },
+        })
+      }
       if (this.disposed) return
       check.timer = setTimeout(() => {
         check.timer = undefined
@@ -342,6 +356,16 @@ export class SafeAbortRecovery {
       [Date.now(), sessionId, claimToken],
     )
     if (claimed.changes !== 1) return
+    const member = this.db.query(
+      "SELECT team_id, name FROM team_member WHERE session_id = ?",
+    ).get(sessionId) as { team_id: string; name: string } | null
+    if (member) {
+      appendTeamEventBestEffort(this.db, {
+        teamId: member.team_id,
+        kind: "recovery.stage",
+        payload: { member_name: member.name, mechanism: "safe_abort", stage: "failed" },
+      })
+    }
     log(`safe-abort:fail-closed session=${sessionId} reason=${reason}`)
     const alert = handleSessionErrorEvent(this.db, this.registry, sessionId, {
       name: ABORT_ERROR_NAME,

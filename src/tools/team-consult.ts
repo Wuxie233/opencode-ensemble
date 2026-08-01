@@ -4,6 +4,7 @@ import { isMemberPromptEligible, sendMessage } from "../messaging"
 import { generateId } from "../util"
 import { requireTeamMember } from "./shared"
 import { log } from "../log"
+import { appendTeamEvent } from "../team-event"
 
 export interface TeamConsultArgs {
   task_id: string
@@ -71,6 +72,11 @@ export async function executeTeamConsult(
     if (waiting.changes !== 1) {
       throw new Error(`Teammate "${requester}" already has a pending consultation`)
     }
+    appendTeamEvent(deps.db, {
+      teamId: teamInfo.teamId,
+      kind: "consultation.requested",
+      payload: { consultation_id: consultId, task_id: args.task_id, requester, planner: selected.name },
+    })
     sendMessage(deps.db, {
       teamId: teamInfo.teamId,
       from: requester,

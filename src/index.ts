@@ -39,6 +39,7 @@ import { TokenBucket } from "./rate-limit"
 import { Watchdog } from "./watchdog"
 import { SafeAbortRecovery } from "./safe-abort-recovery"
 import { handleRetryStatus } from "./retry-breaker"
+import { recordUsageFromV2Event } from "./telemetry"
 import { TerminalLivenessGuard } from "./terminal-liveness"
 
 const DEFAULT_RATE_LIMIT_REFILL = 2
@@ -329,6 +330,11 @@ const plugin: Plugin = async (input) => {
         event as unknown as { type: string; properties: { sessionID?: string; tool?: string; input?: string; content?: string; title?: string; error?: string; command?: string; exitCode?: number; cost?: number; tokens?: { input?: number; output?: number } } },
         registry,
         activityBuffer,
+      )
+      recordUsageFromV2Event(
+        db,
+        registry,
+        event as unknown as { type: string; properties: { sessionID?: string; cost?: number; tokens?: { input?: number; output?: number } } },
       )
     },
 

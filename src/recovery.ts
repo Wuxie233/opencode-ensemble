@@ -18,6 +18,8 @@ import { log } from "./log"
 import { runCommand } from "./process"
 import { recomputeCurrentPhase } from "./task-phase"
 import { resolveAbortBranch } from "./abort-preservation"
+import { appendTeamEventBestEffort } from "./team-event"
+import { appendMemberTransition, releaseMemberTasks } from "./telemetry"
 
 /**
  * Scan for team members stuck in 'busy' status (stale from a crash)
@@ -78,6 +80,11 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
           ? "watchdog"
           : "stale"
     if (liveSessions[member.session_id] && kind === "stale") continue
+    appendTeamEventBestEffort(db, {
+      teamId: member.team_id,
+      kind: "recovery.stage",
+      payload: { member_name: member.name, mechanism: "startup", stage: "detected" },
+    })
     // Preserve branch BEFORE abort — session.abort() may destroy the worktree + branch
     let preservedBranch: string | null = null
     const resolution = await resolveAbortBranch(member.worktree_branch, member.worktree_dir)
@@ -110,6 +117,11 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
         continue
       }
       preservedBranch = safeBranch
+      appendTeamEventBestEffort(db, {
+        teamId: member.team_id,
+        kind: "recovery.stage",
+        payload: { member_name: member.name, mechanism: "startup", stage: "preserved" },
+      })
       log(`recovery:branch:preserved src=${sourceBranch} target=${safeBranch}`)
     }
 
@@ -149,11 +161,17 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
         [terminal[0], terminal[1], now, member.team_id, member.name, kind, kind, kind],
       )
       if (result.changes !== 1) return false
-      db.run(
-        `UPDATE team_task SET status = 'pending', assignee = NULL, time_updated = ?
-         WHERE team_id = ? AND assignee = ? AND status = 'in_progress'`,
-        [now, member.team_id, member.name],
+      appendMemberTransition(
+        db,
+        member.team_id,
+        member.name,
+        member.status as "busy" | "shutdown_requested",
+        terminal[0] as "shutdown" | "error",
+        "cancelling",
+        terminal[1] as "idle" | "failed" | "timed_out",
+        "startup_recovery",
       )
+      releaseMemberTasks(db, member.team_id, member.name, "startup_recovery", now)
       recomputeCurrentPhase(db, member.team_id, now)
       sendMessage(db, {
         teamId: member.team_id,
@@ -166,6 +184,11 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
       return true
     })()
     if (!transitioned) continue
+    appendTeamEventBestEffort(db, {
+      teamId: member.team_id,
+      kind: "recovery.stage",
+      payload: { member_name: member.name, mechanism: "startup", stage: "settled" },
+    })
     interrupted++
 
     wakeTeamLead(

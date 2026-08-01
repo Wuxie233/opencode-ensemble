@@ -8,6 +8,8 @@ import { sendLeadAlert, sendMessage, wakeTeamLead } from "./messaging"
 import { log } from "./log"
 import { resolveAbortBranch } from "./abort-preservation"
 import { recomputeCurrentPhase } from "./task-phase"
+import { appendTeamEvent } from "./team-event"
+import { appendMemberTransition, releaseMemberTasks } from "./telemetry"
 
 const activeTerminations = new Map<string, Promise<RetryExhaustion | undefined>>()
 
@@ -149,14 +151,11 @@ export async function breakRetryLoop(
         [preservedBranch, now, request.teamId, request.memberName, request.sessionId],
       )
       if (result.changes !== 1) return false
-      deps.db.run(
-        `UPDATE team_task SET status = 'pending', assignee = NULL, time_updated = ?
-         WHERE team_id = ? AND assignee = ? AND status = 'in_progress'`,
-        [now, request.teamId, request.memberName],
-      )
+      appendMemberTransition(deps.db, request.teamId, request.memberName, "shutdown_requested", "error", "cancelling", "failed", "retry_exhausted")
+      const releasedTasks = releaseMemberTasks(deps.db, request.teamId, request.memberName, "retry_exhausted", now)
       recomputeCurrentPhase(deps.db, request.teamId, now)
-      const taskNotice = taskRows.length > 0
-        ? ` Released task${taskRows.length === 1 ? "" : "s"}: ${taskRows.map(task => task.id).join(", ")}.`
+      const taskNotice = releasedTasks > 0
+        ? ` Released task${releasedTasks === 1 ? "" : "s"}: ${taskRows.map(task => task.id).join(", ")}.`
         : ""
       const recoveryGuidance = request.fallbackModel
         ? ` Start a fresh teammate with team_spawn, resume_from: "${request.memberName}", and model: "${request.fallbackModel}"; have it inspect actual state before continuing so completed tool side effects are not replayed.`
@@ -220,15 +219,24 @@ function claimFallbackHandoff(deps: ToolDeps, request: RetryFallback): RetryExha
     return
   }
 
-  const updated = deps.db.run(
-    `UPDATE team_member SET retry_fallback_used = 1, retry_fallback_models = ?,
-        retry_tripped = 1, time_updated = ?
-     WHERE team_id = ? AND name = ? AND session_id = ?
-       AND retry_tripped = 0 AND retry_fallback_used = 0
-       AND status IN ('ready', 'busy')`,
-    [JSON.stringify([...tried, fallbackModel]), Date.now(), request.teamId, request.memberName, request.sessionId],
-  )
-  if (updated.changes !== 1) return
+  const changed = deps.db.transaction(() => {
+    const updated = deps.db.run(
+      `UPDATE team_member SET retry_fallback_used = 1, retry_fallback_models = ?,
+          retry_tripped = 1, time_updated = ?
+       WHERE team_id = ? AND name = ? AND session_id = ?
+         AND retry_tripped = 0 AND retry_fallback_used = 0
+         AND status IN ('ready', 'busy')`,
+      [JSON.stringify([...tried, fallbackModel]), Date.now(), request.teamId, request.memberName, request.sessionId],
+    )
+    if (updated.changes !== 1) return false
+    appendTeamEvent(deps.db, {
+      teamId: request.teamId,
+      kind: "retry.fallback",
+      payload: { member_name: request.memberName, attempt: request.attempts },
+    })
+    return true
+  })()
+  if (!changed) return
 
   return { ...request, kind: "exhaustion", fallbackModel }
 }

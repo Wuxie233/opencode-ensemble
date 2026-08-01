@@ -250,7 +250,26 @@ export const MIGRATIONS: string[] = [
    ALTER TABLE team_member ADD COLUMN consult_planner TEXT;
    ALTER TABLE team_member ADD COLUMN consult_question TEXT;
    ALTER TABLE team_member ADD COLUMN consult_reply TEXT;
-   CREATE UNIQUE INDEX team_member_consult_id_idx ON team_member(consult_id) WHERE consult_id IS NOT NULL;`,
+    CREATE UNIQUE INDEX team_member_consult_id_idx ON team_member(consult_id) WHERE consult_id IS NOT NULL;`,
+  // Migration 16: Forward-only privacy-safe telemetry coverage. Existing events
+  // deliberately retain NULL instrumentation_version; no snapshots are backfilled.
+  `ALTER TABLE team_event ADD COLUMN instrumentation_version INTEGER;
+   CREATE INDEX team_event_kind_time_idx ON team_event(kind, time_created, team_id);
+   CREATE INDEX team_event_version_time_idx ON team_event(instrumentation_version, time_created, team_id);
+   CREATE TABLE team_usage_aggregate (
+     team_id                 TEXT NOT NULL REFERENCES team(id) ON DELETE CASCADE,
+     member_name             TEXT NOT NULL,
+     input_tokens            INTEGER NOT NULL DEFAULT 0 CHECK(input_tokens >= 0),
+     output_tokens           INTEGER NOT NULL DEFAULT 0 CHECK(output_tokens >= 0),
+     cost                    REAL NOT NULL DEFAULT 0 CHECK(cost >= 0),
+     event_count             INTEGER NOT NULL DEFAULT 0 CHECK(event_count >= 0),
+     coverage_start          INTEGER NOT NULL,
+     coverage_end            INTEGER NOT NULL,
+     instrumentation_version INTEGER NOT NULL,
+     PRIMARY KEY (team_id, member_name),
+     FOREIGN KEY (team_id, member_name) REFERENCES team_member(team_id, name) ON DELETE CASCADE
+   );
+   CREATE INDEX team_usage_coverage_idx ON team_usage_aggregate(instrumentation_version, coverage_end, team_id);`,
 ]
 
 /**
