@@ -3,7 +3,6 @@ import type { PluginClient } from "./types"
 import { log } from "./log"
 import { generateId } from "./util"
 
-const MAX_CONTENT_BYTES = 10 * 1024 // 10KB
 export const MESSAGE_DELIVERY_LEASE_MS = 60_000
 const pendingPeerDeliveries = new Set<string>()
 
@@ -41,14 +40,8 @@ export interface MessageRow {
   time_created: number
 }
 
-/**
- * Insert a direct message into team_message. Returns the message ID.
- * Throws if content exceeds 10KB.
- */
+/** Insert a direct message into team_message. Returns the message ID. */
 export function sendMessage(db: Database, input: SendMessageInput): string {
-  if (new TextEncoder().encode(input.content).length > MAX_CONTENT_BYTES) {
-    throw new Error("Message content exceeds 10KB limit")
-  }
   const id = generateId("msg")
   db.run(
     "INSERT INTO team_message (id, team_id, from_name, to_name, content, delivered, time_created) VALUES (?, ?, ?, ?, ?, 0, ?)",
@@ -82,14 +75,8 @@ export function wakeTeamLead(db: Database, client: PluginClient, teamId: string,
   })
 }
 
-/**
- * Insert a broadcast message (to_name = NULL) into team_message. Returns the message ID.
- * Throws if content exceeds 10KB.
- */
+/** Insert a broadcast message (to_name = NULL) into team_message. Returns the message ID. */
 export function broadcastMessage(db: Database, input: BroadcastMessageInput): string {
-  if (new TextEncoder().encode(input.content).length > MAX_CONTENT_BYTES) {
-    throw new Error("Message content exceeds 10KB limit")
-  }
   const id = generateId("msg")
   db.run(
     "INSERT INTO team_message (id, team_id, from_name, to_name, content, delivered, time_created) VALUES (?, ?, ?, NULL, ?, 0, ?)",

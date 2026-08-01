@@ -465,7 +465,7 @@ const plugin: Plugin = async (input) => {
         description: "Send a message to a specific teammate or to the lead. Use 'lead' to message the team lead.",
         args: {
           to: tool.schema.string().describe("Recipient name ('lead' or teammate name)"),
-          text: tool.schema.string().describe("Message content (max 10KB)"),
+          text: tool.schema.string().describe("Message content"),
           approve: tool.schema.boolean().optional().describe("Approve a teammate's plan (only when recipient has plan_approval='pending')"),
           reject: tool.schema.string().optional().describe("Reject a teammate's plan with reason (only when recipient has plan_approval='pending')"),
         },
@@ -483,7 +483,7 @@ const plugin: Plugin = async (input) => {
       team_broadcast: tool({
         description: "Send a message to all teammates and the lead (excluding yourself).",
         args: {
-          text: tool.schema.string().describe("Message content (max 10KB)"),
+          text: tool.schema.string().describe("Message content"),
         },
         async execute(args, ctx) {
           const result = await executeTeamBroadcast(deps, args, ctx.sessionID)

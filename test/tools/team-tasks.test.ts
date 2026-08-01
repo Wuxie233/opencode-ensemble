@@ -335,7 +335,7 @@ describe("team_tasks_complete", () => {
     expect(deps.client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(0)
   })
 
-  test("rejects an oversized atomic result before completing the task", async () => {
+  test("atomically persists a terminal result over the former 10KB limit", async () => {
     const added = await executeTeamTasksAdd(deps, { tasks: [
       { content: "Large result", priority: "high" },
     ] }, "sess-alice")
@@ -343,14 +343,16 @@ describe("team_tasks_complete", () => {
     await executeTeamClaim(deps, { task_id: taskId }, "sess-alice")
     deps.client.calls.length = 0
 
+    const details = "x".repeat(11 * 1024)
     await expect(executeTeamTasksComplete(deps, {
       task_id: taskId,
-      result: { summary: "Large", details: "x".repeat(11 * 1024) },
-    }, "sess-alice")).rejects.toThrow("10KB")
+      result: { summary: "Large", details },
+    }, "sess-alice")).resolves.toContain("Completed task")
 
-    expect(deps.db.query("SELECT status FROM team_task WHERE id = ?").get(taskId)).toEqual({ status: "in_progress" })
-    expect(deps.db.query("SELECT id FROM team_message WHERE team_id = 't1'").all()).toHaveLength(0)
-    expect(deps.client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(0)
+    expect(deps.db.query("SELECT status FROM team_task WHERE id = ?").get(taskId)).toEqual({ status: "completed" })
+    const message = deps.db.query("SELECT content FROM team_message WHERE team_id = 't1'").get() as { content: string }
+    expect(parseTaskResult(message.content)?.details).toBe(details)
+    expect(deps.client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(1)
   })
 
   test("rolls back task, dependency, and reporting state when result insertion fails", async () => {

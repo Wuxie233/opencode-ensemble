@@ -65,9 +65,13 @@ describe("team_message", () => {
     expect(result).toContain("unknown")
   })
 
-  test("rejects messages over 10KB", async () => {
-    await expect(executeTeamMessage(deps, { to: "lead", text: "x".repeat(10241) }, "sess-alice"))
-      .rejects.toThrow("10KB")
+  test("sends messages over the former 10KB limit", async () => {
+    const longText = "x".repeat(11 * 1024)
+
+    await expect(executeTeamMessage(deps, { to: "lead", text: longText }, "sess-alice"))
+      .resolves.toContain("Message sent to lead")
+    expect((deps.db.query("SELECT content FROM team_message WHERE team_id = ?").get("t1") as { content: string }).content)
+      .toBe(longText)
   })
 
   test("message to lead over 500 chars is stored in DB (wake-up sent, content via system prompt)", async () => {
@@ -150,6 +154,16 @@ describe("team_broadcast", () => {
     // Should call promptAsync for alice + bob (not lead)
     const promptCalls = deps.client.calls.filter(c => c.method === "session.promptAsync")
     expect(promptCalls).toHaveLength(2)
+  })
+
+  test("broadcasts messages over the former 10KB limit", async () => {
+    const longText = "x".repeat(11 * 1024)
+
+    await expect(executeTeamBroadcast(deps, { text: longText }, "sess-alice"))
+      .resolves.toContain("Broadcast sent")
+    const rows = deps.db.query("SELECT content FROM team_message WHERE team_id = ?").all("t1") as Array<{ content: string }>
+    expect(rows).toHaveLength(2)
+    expect(rows.every(row => row.content === longText)).toBe(true)
   })
 
   test("broadcast does not wake shutdown_requested teammates", async () => {

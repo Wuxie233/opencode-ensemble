@@ -61,9 +61,6 @@ export async function executeTeamTasksComplete(
         details: args.result.details.trim(),
         branch: args.result.branch?.trim() || undefined,
       })
-      if (new TextEncoder().encode(terminalContent).length > 10 * 1024) {
-        throw new Error("Message content exceeds 10KB limit")
-      }
     }
     if (task.status === "completed") return { changed: false, content: task.content, unblocked: 0 }
 

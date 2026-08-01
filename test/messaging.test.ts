@@ -49,23 +49,12 @@ describe("sendMessage", () => {
     expect(id.length).toBeGreaterThan(0)
   })
 
-  test("rejects messages over 10KB", () => {
+  test("persists messages over the former 10KB limit", () => {
     const bigContent = "x".repeat(10241)
-    expect(() => sendMessage(db, { teamId: "t1", from: "alice", to: "bob", content: bigContent }))
-      .toThrow("Message content exceeds 10KB limit")
-  })
+    sendMessage(db, { teamId: "t1", from: "alice", to: "bob", content: bigContent })
 
-  test("accepts content at exactly 10KB boundary", () => {
-    const exactContent = "x".repeat(10 * 1024)
-    expect(() => sendMessage(db, { teamId: "t1", from: "alice", to: "bob", content: exactContent }))
-      .not.toThrow()
-  })
-
-  test("measures size in bytes not characters (multi-byte)", () => {
-    // Each emoji is 4 bytes in UTF-8; 2561 emojis = 10244 bytes > 10KB
-    const multiByteContent = "😀".repeat(2561)
-    expect(() => sendMessage(db, { teamId: "t1", from: "alice", to: "bob", content: multiByteContent }))
-      .toThrow("Message content exceeds 10KB limit")
+    expect((db.query("SELECT content FROM team_message WHERE team_id = ?").get("t1") as { content: string }).content)
+      .toBe(bigContent)
   })
 })
 
@@ -90,16 +79,12 @@ describe("broadcastMessage", () => {
     expect(id.length).toBeGreaterThan(0)
   })
 
-  test("rejects broadcast messages over 10KB", () => {
+  test("persists broadcast messages over the former 10KB limit", () => {
     const bigContent = "x".repeat(10241)
-    expect(() => broadcastMessage(db, { teamId: "t1", from: "alice", content: bigContent }))
-      .toThrow("Message content exceeds 10KB limit")
-  })
+    broadcastMessage(db, { teamId: "t1", from: "alice", content: bigContent })
 
-  test("accepts broadcast content at exactly 10KB boundary", () => {
-    const exactContent = "x".repeat(10 * 1024)
-    expect(() => broadcastMessage(db, { teamId: "t1", from: "alice", content: exactContent }))
-      .not.toThrow()
+    expect((db.query("SELECT content FROM team_message WHERE team_id = ?").get("t1") as { content: string }).content)
+      .toBe(bigContent)
   })
 })
 
