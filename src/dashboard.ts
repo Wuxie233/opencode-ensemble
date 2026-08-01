@@ -10,7 +10,7 @@ import type { ActivityBuffer, ActivityEntry } from "./activity"
 import type { PluginClient } from "./types"
 
 /** Assemble the full dashboard HTML from parts. */
-const DASHBOARD_HTML = DASHBOARD_HEAD + "\n<script>" + DASHBOARD_JS_CORE + DASHBOARD_JS_RENDER + DASHBOARD_JS_EVENTS + "<\/script>\n</body></html>"
+const DASHBOARD_HTML = `${DASHBOARD_HEAD}\n<script>${DASHBOARD_JS_CORE}${DASHBOARD_JS_RENDER}${DASHBOARD_JS_EVENTS}</script>\n</body></html>`
 
 interface TeamRow {
   id: string
@@ -251,7 +251,7 @@ async function handleActivityRoute(
   const buffered = buffer?.getActivity(sessionId) ?? []
 
   let sessionData: unknown = null
-  let fallbackActivity: ActivityEntry[] = []
+  const fallbackActivity: ActivityEntry[] = []
 
   if (client) {
     try {
@@ -293,8 +293,9 @@ function handleDashboardRequest(
   }
 
   const activityMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/activity$/)
-  if (activityMatch) {
-    const sessionId = decodeURIComponent(activityMatch[1]!)
+  const encodedSessionId = activityMatch?.[1]
+  if (encodedSessionId) {
+    const sessionId = decodeURIComponent(encodedSessionId)
     handleActivityRoute(sessionId, options, res).catch(() => {
       if (!res.headersSent) {
         res.writeHead(500, { "Content-Type": "application/json" })

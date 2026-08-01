@@ -33,7 +33,9 @@ export async function executeTeamTasksAdd(
       throw new Error(`Task key "${task.key}" must be 1-64 lowercase alphanumeric, hyphen, or underscore characters`)
     }
     if (keyedIds.has(task.key)) throw new Error(`Duplicate task key "${task.key}"`)
-    keyedIds.set(task.key, ids[index]!)
+    const taskId = ids[index]
+    if (!taskId) throw new Error("Task ID allocation failed")
+    keyedIds.set(task.key, taskId)
   })
 
   const now = Date.now()
@@ -53,7 +55,8 @@ export async function executeTeamTasksAdd(
     assertAcyclic(ids, resolvedDependencies)
 
     args.tasks.forEach((task, index) => {
-      const dependencies = resolvedDependencies[index]!
+      const dependencies = resolvedDependencies[index]
+      if (!dependencies) throw new Error("Task dependency resolution failed")
       const taskId = ids[index]
       if (!taskId) throw new Error("Task ID allocation failed")
       const resolved = dependencies.every(depId => {

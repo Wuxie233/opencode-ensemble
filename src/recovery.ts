@@ -278,15 +278,16 @@ export async function recoverUndeliveredMessages(
         continue
       }
 
-      if (!recipientSessionId) continue
+      const recipientName = msg.to_name
+      if (!recipientSessionId || !recipientName) continue
 
       // Skip delivery to teammates who have already reported completion (issue #3)
-      if (hasReportedCompletion(db, team.id, msg.to_name!)) {
+      if (hasReportedCompletion(db, team.id, recipientName)) {
         markDelivered(db, msg.id)
         continue
       }
 
-      if (!isMemberPromptEligible(db, team.id, msg.to_name!)) continue
+      if (!isMemberPromptEligible(db, team.id, recipientName)) continue
 
       if (!claimPeerMessageDelivery(db, msg.id, Date.now() - MESSAGE_DELIVERY_LEASE_MS)) continue
 

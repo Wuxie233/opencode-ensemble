@@ -9,7 +9,7 @@ import { log } from "../log"
 import { runCommand } from "../process"
 import { sendLeadAlert } from "../messaging"
 import { recomputeCurrentPhase } from "../task-phase"
-import { resolveAbortBranch } from "../abort-preservation"
+import { resolveAbortBranch, type AbortBranchResolution } from "../abort-preservation"
 
 type PurgeApprovalFn = (preview: string) => Promise<void>
 type ListBranchesFn = (namespace: string, cwd: string) => Promise<string[]>
@@ -98,7 +98,7 @@ function resolvePurgeTargets(deps: ToolDeps, purge: string[]): PurgeTarget[] {
   if (active.length > 0) throw new Error(`Cannot purge active team: ${active.join(", ")}`)
 
   return rows
-    .map(row => row.teams[0]!)
+    .flatMap(row => row.teams[0] ? [row.teams[0]] : [])
     .sort((a, b) => b.time_updated - a.time_updated || a.name.localeCompare(b.name))
 }
 
@@ -204,8 +204,7 @@ function validatePurgeResources(deps: ToolDeps, targets: PurgeTarget[]): void {
 function collectStaleEnsembleBranches(deps: ToolDeps, targets: PurgeTarget[]): string[] {
   return [...new Set(
     getPurgeMemberResources(deps, targets)
-      .filter(isStaleEnsembleBranch)
-      .map(resource => resource.worktree_branch!)
+      .flatMap(resource => isStaleEnsembleBranch(resource) && resource.worktree_branch ? [resource.worktree_branch] : [])
   )]
 }
 
@@ -501,7 +500,7 @@ export async function executeTeamCleanup(
   if (args.force) {
     const preserved = new Map<string, string>()
     for (const member of abortable) {
-      let resolution
+      let resolution: AbortBranchResolution
       try {
         resolution = await resolveAbortBranch(member.worktree_branch, member.worktree_dir, resolveBranch)
       } catch (error) {
@@ -606,7 +605,8 @@ export async function executeTeamCleanup(
   const mergedWithBranch = members.filter(member => member.worktree_branch !== null && member.merge_state === "merged")
   const residualBranches: string[] = []
   for (const member of mergedWithBranch) {
-    const branch = member.worktree_branch!
+    const branch = member.worktree_branch
+    if (!branch) continue
     if (await delBranch(branch, deps.directory)) {
       deps.db.run("UPDATE team_member SET worktree_branch = NULL WHERE team_id = ? AND name = ?", [teamInfo.teamId, member.name])
       member.worktree_branch = null

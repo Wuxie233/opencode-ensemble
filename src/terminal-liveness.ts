@@ -9,7 +9,7 @@ import {
   type PreserveBranchFn,
   type ResolveWorktreeBranchFn,
 } from "./tools/merge-helper"
-import { resolveAbortBranch } from "./abort-preservation"
+import { resolveAbortBranch, type AbortBranchResolution } from "./abort-preservation"
 
 const activeReaborts = new Map<string, Promise<boolean>>()
 
@@ -63,7 +63,7 @@ export class TerminalLivenessGuard {
       worktree_dir: string | null
     },
   ): Promise<boolean> {
-    let resolution
+    let resolution: AbortBranchResolution
     try {
       resolution = await resolveAbortBranch(member.worktree_branch, member.worktree_dir, this.resolveBranch)
     } catch {
