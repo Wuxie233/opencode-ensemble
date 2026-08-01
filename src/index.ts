@@ -35,6 +35,7 @@ import { executeTeamView } from "./tools/team-view"
 import { executeTeamConsult } from "./tools/team-consult"
 import { executeTeamConsultReply } from "./tools/team-consult-reply"
 import { executeTeamMetricsTool } from "./tools/team-metrics"
+import { executeTeamReportIssue } from "./tools/team-report-issue"
 import type { TeamMetricsRequest } from "./metrics"
 import type { ToolDeps, } from "./types"
 import { TokenBucket } from "./rate-limit"
@@ -717,6 +718,27 @@ const plugin: Plugin = async (input) => {
         async execute(args, ctx) {
           const result = executeTeamMetricsTool(deps, args as TeamMetricsRequest, ctx.sessionID)
           ctx.metadata({ title: `Metrics ${args.view}` })
+          return result
+        },
+      }),
+
+      team_report_issue: tool({
+        description: "File a feedback issue about the Ensemble plugin itself to its own issue tracker. " +
+          "Use when you hit an Ensemble design flaw, an inefficient orchestration mechanism, a missing capability, or a plugin bug during real work. " +
+          "This is the plugin's self-iteration feedback layer: file the observation now, keep working, and triage the tracker in a later session. " +
+          "Lead only. Do not use it for defects in the user's own project code.",
+        args: {
+          title: tool.schema.string().describe("Short issue title describing the plugin problem, not the current task"),
+          body: tool.schema.string().describe("What is wrong, why it matters for orchestration, and the concrete evidence or symptom you observed"),
+          kind: tool.schema.enum(["design_flaw", "inefficiency", "bug", "missing_capability"]).describe("design_flaw: the mechanism is wrong or incoherent. inefficiency: it works but wastes wall-clock, context, or turns. bug: it misbehaves against its own documented contract. missing_capability: a needed mechanism does not exist"),
+          severity: tool.schema.enum(["critical", "high", "medium", "low"]).default("medium").describe("critical: blocks or destroys work. high: forces a workaround every time. medium: real friction. low: papercut"),
+          trigger: tool.schema.string().optional().describe("The concrete situation that exposed it: what you were orchestrating, which tool or agent was involved, and what you had to do instead"),
+          proposal: tool.schema.string().optional().describe("Optional concrete fix direction or acceptance criterion, when you already know what the mechanism should do"),
+          repo: tool.schema.string().optional().describe("Override the target repository as owner/name. Defaults to the configured issueRepo"),
+        },
+        async execute(args, ctx) {
+          const result = await executeTeamReportIssue(deps, args, ctx.sessionID)
+          ctx.metadata({ title: `Reported ${args.kind}: ${args.title}` })
           return result
         },
       }),
