@@ -2,12 +2,13 @@ import type { Database } from "./db"
 import type { MemberRegistry } from "./state"
 
 const MAX_LIMIT = 100
-const MAX_COMPARE_PERIODS = 52
 const MAX_METRICS = 20
+const MAX_FILTER_VALUES = 20
 const MAX_TIMELINE_TEAMS = 10
 const MAX_WINDOW_MS = 366 * 24 * 60 * 60 * 1000
 const UTC_ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const IDENTIFIER = /^[a-z0-9][a-z0-9_-]{0,127}$/
+const DIMENSION_VALUE = /^[A-Za-z0-9][A-Za-z0-9._/+:-]{0,127}$/
 const TELEMETRY_VERSION = 1
 
 const METRIC_DEFINITIONS: Record<string, { definition: string; unit: string }> = {
@@ -49,11 +50,16 @@ const UNSUPPORTED = new Set([
   "cost_per_verified_outcome", "first_pass_acceptance", "outcome_lift_baseline", "team_completion_reliability", "member_failure_rate",
 ])
 const TELEMETRY_V1_METRICS = new Set([
-  "consultation_adoption", "retry_observed", "retry_fallback", "retry_exhausted", "recovery_incidents",
+  "plan_approval_adoption", "consultation_adoption", "retry_observed", "retry_fallback", "retry_exhausted", "recovery_incidents",
   "resume_adoption", "input_tokens", "output_tokens", "usage_cost",
 ])
 const MECHANISMS = new Set(["plan_approval", "technical_consultation", "model_fallback", "abort_recovery", "resume_from"])
 const TELEMETRY_V1_MECHANISMS = new Set(["technical_consultation", "model_fallback", "abort_recovery", "resume_from"])
+const FILTER_STATUSES = new Set([
+  "active", "archived", "ready", "busy", "shutdown_requested", "shutdown", "error", "idle", "starting", "running",
+  "cancel_requested", "cancelling", "cancelled", "completing", "completed", "failed", "timed_out",
+])
+const GROUP_BY = new Set(["day", "week", "workflow_kind", "profile", "model", "mechanism", "complexity_band"])
 const EVENT_KINDS = new Set([
   "team.created", "team.archived", "task.created", "task.claimed", "task.completed", "task.unblocked", "task.released",
   "member.registered", "member.transitioned", "plan.approved", "plan.rejected", "merge.started", "merge.completed", "merge.failed",
@@ -74,11 +80,19 @@ const TIMELINE_ENUMS: Record<string, Set<string>> = {
 export interface TeamMetricsRequest {
   scope?: { project?: string; team_ids?: string[] }
   window?: { from?: string; to?: string }
-  filters?: { mechanism?: string[]; instrumentation_version?: string[] }
+  filters?: {
+    workflow_kind?: string[]
+    status?: string[]
+    profile?: string[]
+    model?: string[]
+    mechanism?: string[]
+    complexity_band?: string[]
+    instrumentation_version?: string[]
+  }
   view: "summary" | "funnel" | "timeline" | "compare"
   metrics: string[]
-  group_by?: "day" | "week" | "mechanism"
-  compare?: { dimension: "mechanism"; values: string[] }
+  group_by?: "day" | "week" | "workflow_kind" | "profile" | "model" | "mechanism" | "complexity_band"
+  compare?: { dimension: "execution_mode" | "mechanism" | "model"; values: string[] }
   limit?: number
   cursor?: string
 }
@@ -115,6 +129,11 @@ interface MetricValue {
   sampleSize: number
   unknown: number
   censored: number
+}
+
+interface Page<T> {
+  values: T[]
+  nextCursor?: string
 }
 
 function fail(): never {
@@ -195,13 +214,63 @@ function createdCohort(db: Database, scope: AuthorizedScope, window: TimeWindow,
   return rows.map(row => row.team_id)
 }
 
+function validateFilterValues(values: string[] | undefined, allowed?: Set<string>): void {
+  if (!values) return
+  if (values.length === 0 || values.length > MAX_FILTER_VALUES || new Set(values).size !== values.length) fail()
+  if (values.some(value => !DIMENSION_VALUE.test(value) || (allowed && !allowed.has(value)))) fail()
+}
+
+function assertRequestShape(request: TeamMetricsRequest): void {
+  const allowedKeys = new Set(["scope", "window", "filters", "view", "metrics", "group_by", "compare", "limit", "cursor"])
+  if (Object.keys(request).some(key => !allowedKeys.has(key))) fail()
+  if (request.scope && Object.keys(request.scope).some(key => key !== "project" && key !== "team_ids")) fail()
+  if (request.window && Object.keys(request.window).some(key => key !== "from" && key !== "to")) fail()
+  if (request.compare && Object.keys(request.compare).some(key => key !== "dimension" && key !== "values")) fail()
+}
+
+function intersectTeams(db: Database, teamIds: string[], sql: string, params: unknown[]): string[] {
+  if (teamIds.length === 0) return []
+  const rows = db.query(
+    `SELECT DISTINCT t.id FROM team t WHERE t.id IN (${placeholders(teamIds)}) AND (${sql}) ORDER BY t.id`,
+  ).all(...teamIds, ...params) as Array<{ id: string }>
+  return rows.map(row => row.id)
+}
+
 function applyFilters(db: Database, scope: AuthorizedScope, filters: TeamMetricsRequest["filters"], window: TimeWindow): AuthorizedScope {
   if (!filters) return scope
+  const allowedKeys = new Set(["workflow_kind", "status", "profile", "model", "mechanism", "complexity_band", "instrumentation_version"])
+  if (Object.keys(filters).some(key => !allowedKeys.has(key))) fail()
   const mechanisms = filters.mechanism
   const versions = filters.instrumentation_version
-  if (mechanisms && (mechanisms.length === 0 || mechanisms.some(value => !MECHANISMS.has(value)))) fail()
-  if (versions && (versions.length === 0 || versions.some(value => !/^\d+$/.test(value)))) fail()
+  validateFilterValues(filters.workflow_kind)
+  validateFilterValues(filters.status, FILTER_STATUSES)
+  validateFilterValues(filters.profile)
+  validateFilterValues(filters.model)
+  validateFilterValues(mechanisms, MECHANISMS)
+  validateFilterValues(filters.complexity_band)
+  validateFilterValues(versions)
+  if (versions?.some(value => !/^\d+$/.test(value))) fail()
   let teamIds = scope.teamIds
+  // These owner-supplied dimensions are not persisted yet. Unknown rows never
+  // silently satisfy a requested value.
+  if (filters.workflow_kind || filters.complexity_band) teamIds = []
+  if (filters.status) {
+    teamIds = intersectTeams(db, teamIds,
+      `t.status IN (${placeholders(filters.status)}) OR EXISTS (
+        SELECT 1 FROM team_member tm WHERE tm.team_id = t.id
+          AND (tm.status IN (${placeholders(filters.status)}) OR tm.execution_status IN (${placeholders(filters.status)}))
+      )`, [...filters.status, ...filters.status, ...filters.status])
+  }
+  if (filters.profile) {
+    teamIds = intersectTeams(db, teamIds,
+      `EXISTS (SELECT 1 FROM team_member tm WHERE tm.team_id = t.id AND tm.profile IN (${placeholders(filters.profile)}))`,
+      filters.profile)
+  }
+  if (filters.model) {
+    teamIds = intersectTeams(db, teamIds,
+      `EXISTS (SELECT 1 FROM team_member tm WHERE tm.team_id = t.id AND tm.model IN (${placeholders(filters.model)}))`,
+      filters.model)
+  }
   if (mechanisms && teamIds.length > 0) {
     const kinds = [...new Set(mechanisms.flatMap(mechanismEventKinds))]
     const rows = db.query(
@@ -214,8 +283,8 @@ function applyFilters(db: Database, scope: AuthorizedScope, filters: TeamMetrics
   if (versions && teamIds.length > 0) {
     const rows = db.query(
       `SELECT DISTINCT team_id FROM team_event
-       WHERE team_id IN (${placeholders(teamIds)}) AND instrumentation_version IN (${placeholders(versions)})
-         AND time_created >= ? AND time_created <= ?`,
+       WHERE kind = 'team.created' AND team_id IN (${placeholders(teamIds)}) AND instrumentation_version IN (${placeholders(versions)})
+          AND time_created >= ? AND time_created <= ?`,
     ).all(...teamIds, ...versions.map(Number), window.from, window.to) as Array<{ team_id: string }>
     teamIds = rows.map(row => row.team_id)
   }
@@ -360,6 +429,33 @@ function metricResponse(db: Database, scope: AuthorizedScope, window: TimeWindow
   }
 }
 
+function metricUncertainty(metric: Record<string, unknown>): Record<string, unknown> {
+  if (metric.supported !== true || metric.unit !== "ratio") {
+    return { method: "not_estimable", reason: metric.supported === true ? "metric is not a ratio" : "metric is unsupported" }
+  }
+  const numerator = metric.numerator
+  const denominator = metric.denominator
+  if (typeof numerator !== "number" || typeof denominator !== "number" || denominator <= 0) {
+    return { method: "wilson_95", confidence: 0.95, lower: null, upper: null }
+  }
+  if (numerator < 0 || numerator > denominator) {
+    return { method: "not_estimable", reason: "metric is not a binomial proportion" }
+  }
+  const z = 1.959963984540054
+  const observed = numerator / denominator
+  const denominatorAdjustment = 1 + (z * z) / denominator
+  const center = (observed + (z * z) / (2 * denominator)) / denominatorAdjustment
+  const spread = z * Math.sqrt((observed * (1 - observed) + (z * z) / (4 * denominator)) / denominator) / denominatorAdjustment
+  return { method: "wilson_95", confidence: 0.95, lower: Math.max(0, center - spread), upper: Math.min(1, center + spread) }
+}
+
+function comparisonMetricResponses(db: Database, scope: AuthorizedScope, window: TimeWindow, metrics: string[]): Array<Record<string, unknown>> {
+  return metrics.map(metric => {
+    const response = metricResponse(db, scope, window, metric)
+    return { ...response, uncertainty: metricUncertainty(response) }
+  })
+}
+
 function safeTimelinePayload(raw: string): Record<string, unknown> {
   let parsed: unknown
   try { parsed = JSON.parse(raw) } catch { return {} }
@@ -405,36 +501,78 @@ function mechanismEventKinds(value: string): string[] {
 }
 
 function compareEligibleTeams(db: Database, scope: AuthorizedScope, window: TimeWindow, mechanism: string): string[] {
-  return TELEMETRY_V1_MECHANISMS.has(mechanism)
+  return (mechanism === "plan_approval" || TELEMETRY_V1_MECHANISMS.has(mechanism))
     ? createdCohort(db, scope, window, TELEMETRY_VERSION)
     : createdCohort(db, scope, window)
 }
 
-function comparisonGroups(db: Database, scope: AuthorizedScope, window: TimeWindow, mechanism: string, values: string[], metrics: string[]): Array<Record<string, unknown>> {
-  const eligible = compareEligibleTeams(db, scope, window, mechanism)
-  const adopted = new Set<string>()
-  if (eligible.length > 0) {
-    const kinds = mechanismEventKinds(mechanism)
-    const rows = db.query(
-      `SELECT DISTINCT team_id FROM team_event
-       WHERE team_id IN (${placeholders(eligible)}) AND kind IN (${placeholders(kinds)})
-         AND time_created >= ? AND time_created <= ?`,
-    ).all(...eligible, ...kinds, window.from, window.to) as Array<{ team_id: string }>
-    rows.forEach(row => {
-      adopted.add(row.team_id)
-    })
+function teamsWithMechanism(db: Database, eligible: string[], window: TimeWindow, mechanism: string): Set<string> {
+  if (eligible.length === 0) return new Set()
+  const kinds = mechanismEventKinds(mechanism)
+  const rows = db.query(
+    `SELECT DISTINCT team_id FROM team_event
+     WHERE team_id IN (${placeholders(eligible)}) AND kind IN (${placeholders(kinds)})
+       AND time_created >= ? AND time_created <= ?`,
+  ).all(...eligible, ...kinds, window.from, window.to) as Array<{ team_id: string }>
+  return new Set(rows.map(row => row.team_id))
+}
+
+function dimensionCohorts(
+  db: Database,
+  scope: AuthorizedScope,
+  window: TimeWindow,
+  comparison: NonNullable<TeamMetricsRequest["compare"]>,
+): { eligible: string[]; groups: Map<string, string[]>; unknown: number } {
+  if (comparison.dimension === "execution_mode") {
+    const eligible = createdCohort(db, scope, window, TELEMETRY_VERSION)
+    return { eligible, groups: new Map(comparison.values.map(value => [value, []])), unknown: eligible.length }
   }
-  const groups = new Map<string, string[]>([
-    [mechanism, eligible.filter(id => adopted.has(id))],
-    ["none", eligible.filter(id => !adopted.has(id))],
-  ])
-  return values.map(key => {
-    const teamIds = groups.get(key)
+  if (comparison.dimension === "model") {
+    const eligible = createdCohort(db, scope, window, TELEMETRY_VERSION)
+    const groups = new Map(comparison.values.map(value => [value, [] as string[]]))
+    if (eligible.length > 0) {
+      const rows = db.query(
+        `SELECT DISTINCT team_id, model FROM team_member
+         WHERE team_id IN (${placeholders(eligible)}) AND model IS NOT NULL ORDER BY team_id, model`,
+      ).all(...eligible) as Array<{ team_id: string; model: string }>
+      const modelsByTeam = new Map<string, string[]>()
+      rows.forEach(row => {
+        modelsByTeam.set(row.team_id, [...(modelsByTeam.get(row.team_id) ?? []), row.model])
+      })
+      modelsByTeam.forEach((models, teamId) => {
+        if (models.length === 1) groups.get(models[0] as string)?.push(teamId)
+      })
+    }
+    const observed = new Set([...groups.values()].flat())
+    return { eligible, groups, unknown: eligible.filter(id => !observed.has(id)).length }
+  }
+  const mechanism = comparison.values.find(value => value !== "none")
+  if (!mechanism || !MECHANISMS.has(mechanism) || !comparison.values.includes("none")) fail()
+  const eligible = compareEligibleTeams(db, scope, window, mechanism)
+  const adopted = teamsWithMechanism(db, eligible, window, mechanism)
+  return {
+    eligible,
+    groups: new Map([[mechanism, eligible.filter(id => adopted.has(id))], ["none", eligible.filter(id => !adopted.has(id))]]),
+    unknown: createdCohort(db, scope, window).length - eligible.length,
+  }
+}
+
+function comparisonGroups(
+  db: Database,
+  scope: AuthorizedScope,
+  window: TimeWindow,
+  comparison: NonNullable<TeamMetricsRequest["compare"]>,
+  metrics: string[],
+): { groups: Array<Record<string, unknown>>; unknown: number } {
+  const cohorts = dimensionCohorts(db, scope, window, comparison)
+  const groups = comparison.values.map(key => {
+    const teamIds = cohorts.groups.get(key)
     if (!teamIds) fail()
     if (!scope.explicit && teamIds.length < 5) return { key, suppressed: true, suppression_reason: "fewer than five Teams" }
     const groupScope = { ...scope, teamIds }
-    return { key, n: teamIds.length, metrics: metrics.map(metric => metricResponse(db, groupScope, window, metric)) }
+    return { key, n: teamIds.length, metrics: comparisonMetricResponses(db, groupScope, window, metrics) }
   })
+  return { groups, unknown: cohorts.unknown }
 }
 
 function periodKey(ms: number, grouping: "day" | "week"): string {
@@ -445,39 +583,126 @@ function periodKey(ms: number, grouping: "day" | "week"): string {
   return `${date.toISOString().slice(0, 10)}T00:00:00.000Z`
 }
 
-function compareView(db: Database, scope: AuthorizedScope, window: TimeWindow, request: TeamMetricsRequest, metrics: string[], limit: number): Record<string, unknown> {
-  const comparison = request.compare
-  if (!comparison || comparison.dimension !== "mechanism" || comparison.values.length !== 2) fail()
-  const mechanism = comparison.values.find(value => value !== "none")
-  if (!mechanism || !MECHANISMS.has(mechanism) || !comparison.values.includes("none") || new Set(comparison.values).size !== 2) fail()
-  if (request.group_by === "day" || request.group_by === "week") {
-    const eligible = compareEligibleTeams(db, scope, window, mechanism)
-    const rows = eligible.length === 0 ? [] : db.query(
+function dimensionStrata(
+  db: Database,
+  teamIds: string[],
+  window: TimeWindow,
+  groupBy: NonNullable<TeamMetricsRequest["group_by"]>,
+): Array<{ key: string; teamIds: string[] }> {
+  if (teamIds.length === 0) return []
+  if (groupBy === "day" || groupBy === "week") {
+    const rows = db.query(
       `SELECT team_id, time_created FROM team_event WHERE kind = 'team.created'
-       AND team_id IN (${placeholders(eligible)}) AND time_created >= ? AND time_created <= ?
+       AND team_id IN (${placeholders(teamIds)}) AND time_created >= ? AND time_created <= ?
        ORDER BY time_created, team_id`,
-    ).all(...eligible, window.from, window.to) as Array<{ team_id: string; time_created: number }>
+    ).all(...teamIds, window.from, window.to) as Array<{ team_id: string; time_created: number }>
     const periods = new Map<string, string[]>()
     rows.forEach(row => {
-      const key = periodKey(row.time_created, request.group_by as "day" | "week")
+      const key = periodKey(row.time_created, groupBy)
       periods.set(key, [...(periods.get(key) ?? []), row.team_id])
     })
-    const groups = [...periods].slice(0, Math.min(limit, MAX_COMPARE_PERIODS)).map(([period, teamIds]) => ({
-      period,
-      groups: comparisonGroups(db, { ...scope, teamIds, explicit: scope.explicit }, window, mechanism, comparison.values, metrics),
-    }))
-    return { group_by: request.group_by, groups }
+    return [...periods].map(([key, ids]) => ({ key, teamIds: ids }))
   }
-  return { group_by: request.group_by ?? "mechanism", groups: comparisonGroups(db, scope, window, mechanism, comparison.values, metrics) }
+  if (groupBy === "workflow_kind" || groupBy === "complexity_band") return [{ key: "unknown", teamIds }]
+  if (groupBy === "profile" || groupBy === "model") {
+    const column = groupBy
+    const rows = db.query(
+      `SELECT DISTINCT team_id, ${column} AS value FROM team_member
+       WHERE team_id IN (${placeholders(teamIds)}) AND ${column} IS NOT NULL ORDER BY value, team_id`,
+    ).all(...teamIds) as Array<{ team_id: string; value: string }>
+    const valuesByTeam = new Map<string, string[]>()
+    rows.forEach(row => {
+      valuesByTeam.set(row.team_id, [...(valuesByTeam.get(row.team_id) ?? []), row.value])
+    })
+    const strata = new Map<string, string[]>()
+    valuesByTeam.forEach((values, teamId) => {
+      const key = values.join("+")
+      strata.set(key, [...(strata.get(key) ?? []), teamId])
+    })
+    if (valuesByTeam.size < teamIds.length) strata.set("unknown", teamIds.filter(id => !valuesByTeam.has(id)))
+    return [...strata].map(([key, ids]) => ({ key, teamIds: ids }))
+  }
+  const mechanismsByTeam = new Map(teamIds.map(teamId => [teamId, [] as string[]]))
+  MECHANISMS.forEach(mechanism => {
+    teamsWithMechanism(db, teamIds, window, mechanism).forEach(teamId => {
+      mechanismsByTeam.get(teamId)?.push(mechanism)
+    })
+  })
+  const strata = new Map<string, string[]>()
+  mechanismsByTeam.forEach((mechanisms, teamId) => {
+    const key = mechanisms.length === 0 ? "none" : mechanisms.join("+")
+    strata.set(key, [...(strata.get(key) ?? []), teamId])
+  })
+  return [...strata].map(([key, ids]) => ({ key, teamIds: ids }))
+}
+
+function page<T>(values: T[], limit: number, cursor: string | undefined): Page<T> {
+  const offset = cursor === undefined ? 0 : Number(cursor)
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset > values.length) fail()
+  const pageValues = values.slice(offset, offset + limit)
+  const next = offset + pageValues.length
+  return { values: pageValues, ...(next < values.length ? { nextCursor: String(next) } : {}) }
+}
+
+function funnelStages(db: Database, scope: AuthorizedScope, window: TimeWindow): Array<{ kind: string; count: number }> {
+  const cohort = createdCohort(db, scope, window)
+  if (cohort.length === 0) return ["team.created", "member.registered", "task.created", "task.completed", "team.archived"].map(kind => ({ kind, count: 0 }))
+  const rows = db.query(
+    `SELECT team_id, kind, time_created, id FROM team_event
+     WHERE team_id IN (${placeholders(cohort)})
+       AND kind IN ('team.created', 'member.registered', 'task.created', 'task.completed', 'team.archived')
+       AND time_created >= ? AND time_created <= ? ORDER BY team_id, time_created, id`,
+  ).all(...cohort, window.from, window.to) as Array<{ team_id: string; kind: string }>
+  const expected = ["team.created", "member.registered", "task.created", "task.completed", "team.archived"]
+  const progress = new Map<string, number>()
+  const counts = expected.map(() => 0)
+  rows.forEach(row => {
+    const index = progress.get(row.team_id) ?? 0
+    if (row.kind !== expected[index]) return
+    counts[index] = (counts[index] ?? 0) + 1
+    progress.set(row.team_id, index + 1)
+  })
+  return expected.map((kind, index) => ({ kind, count: counts[index] ?? 0 }))
+}
+
+function compareView(db: Database, scope: AuthorizedScope, window: TimeWindow, request: TeamMetricsRequest, metrics: string[], limit: number): Record<string, unknown> {
+  const comparison = request.compare
+  if (!comparison || comparison.values.length !== 2 || new Set(comparison.values).size !== 2) fail()
+  validateFilterValues(comparison.values)
+  if (comparison.dimension === "mechanism") {
+    const mechanism = comparison.values.find(value => value !== "none")
+    if (!mechanism || !MECHANISMS.has(mechanism) || !comparison.values.includes("none")) fail()
+  }
+  if (!request.group_by) {
+    const result = comparisonGroups(db, scope, window, comparison, metrics)
+    return { group_by: comparison.dimension, groups: result.groups, unknown_count: result.unknown, matched_strata: [] }
+  }
+  if (request.group_by === comparison.dimension) fail()
+  const eligible = comparison.dimension === "mechanism"
+    ? compareEligibleTeams(db, scope, window, comparison.values.find(value => value !== "none") as string)
+    : createdCohort(db, scope, window, TELEMETRY_VERSION)
+  const strata = dimensionStrata(db, eligible, window, request.group_by).flatMap(stratum => {
+    const result = comparisonGroups(db, { ...scope, teamIds: stratum.teamIds }, window, comparison, metrics)
+    return result.groups.some(group => group.suppressed === true)
+      ? []
+      : [{ key: stratum.key, groups: result.groups, unknown_count: result.unknown }]
+  })
+  const paged = page(strata, limit, request.cursor)
+  return {
+    group_by: request.group_by,
+    matched_strata: paged.values,
+    ...(paged.nextCursor ? { next_cursor: paged.nextCursor } : {}),
+  }
 }
 
 /** Execute a bounded, read-only and privacy-safe metrics request. */
 export function executeTeamMetrics(db: Database, registry: MemberRegistry, request: TeamMetricsRequest, sessionId: string): string {
   if (!request || !Array.isArray(request.metrics) || request.metrics.length === 0 || request.metrics.length > MAX_METRICS) fail()
+  assertRequestShape(request)
   if (!request.metrics.every(metric => Object.hasOwn(METRIC_DEFINITIONS, metric))) fail()
   if (!["summary", "funnel", "timeline", "compare"].includes(request.view)) fail()
-  if (request.cursor !== undefined) fail()
-  if (request.group_by !== undefined && (request.view !== "compare" || !["day", "week", "mechanism"].includes(request.group_by))) fail()
+  if (request.cursor !== undefined && (request.view !== "compare" || request.group_by === undefined)) fail()
+  if (request.group_by !== undefined && (request.view !== "compare" || !GROUP_BY.has(request.group_by))) fail()
   if (request.filters?.mechanism?.some(value => !MECHANISMS.has(value))) fail()
   const limit = request.limit ?? MAX_LIMIT
   if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIMIT) fail()
@@ -489,11 +714,7 @@ export function executeTeamMetrics(db: Database, registry: MemberRegistry, reque
   }
   const metrics = request.metrics.map(metric => metricResponse(db, scope, window, metric))
   if (request.view === "funnel") {
-    const cohort = createdCohort(db, scope, window)
-    const stages = ["team.created", "member.registered", "task.created", "task.completed", "team.archived"].map(kind => ({
-      kind,
-      count: kind === "team.created" ? cohort.length : countEvents(db, cohort, window, [kind], true),
-    }))
+    const stages = funnelStages(db, scope, window)
     return JSON.stringify({ view: request.view, request_window: { from: window.fromIso, to: window.toIso }, coverage, stages, metrics })
   }
   if (request.view === "compare") {

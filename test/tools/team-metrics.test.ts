@@ -6,6 +6,13 @@ import { insertMember, insertTeam, setupDb, setupDeps } from "../helpers"
 const TO = new Date(Date.now() + 60_000).toISOString()
 const FROM = new Date(Date.now() - 60_000).toISOString()
 
+function insertEvent(db: ReturnType<typeof setupDb>, id: string, teamId: string, kind: string, time: number, version: number | null = 1, payload = "{}") {
+  db.run(
+    "INSERT INTO team_event (id, team_id, kind, payload, time_created, instrumentation_version) VALUES (?, ?, ?, ?, ?, ?)",
+    [id, teamId, kind, payload, time, version],
+  )
+}
+
 function seedTeam() {
   const db = setupDb()
   insertTeam(db, "team-one", "team-one", "lead-session")
@@ -153,5 +160,125 @@ describe("team_metrics", () => {
       window: { from: FROM, to: TO }, view: "summary", metrics: ["input_tokens"],
     }, "lead-session")) as { metrics: Array<{ value: number | null; unknown: number; sample_size: number }> }
     expect(body.metrics[0]).toMatchObject({ value: null, unknown: 1, sample_size: 0 })
+  })
+
+  test("filters by persisted member dimensions and returns matched model strata with uncertainty", () => {
+    const db = setupDb()
+    for (let index = 0; index < 10; index++) {
+      const id = `team-${index}`
+      insertTeam(db, id, id, "lead-session")
+      insertMember(db, id, "worker", `session-${index}`)
+      db.run("UPDATE team_member SET profile = 'backend', model = ? WHERE team_id = ?", [index < 5 ? "provider/a" : "provider/b", id])
+      appendTeamEvent(db, { teamId: id, kind: "team.created", payload: {} })
+      appendTeamEvent(db, { teamId: id, kind: "merge.started", payload: { member_name: "worker" } })
+      if (index !== 9) appendTeamEvent(db, { teamId: id, kind: "merge.completed", payload: { member_name: "worker" } })
+    }
+    const deps = setupDeps(db)
+    const body = JSON.parse(executeTeamMetrics(db, deps.registry, {
+      window: { from: FROM, to: TO },
+      filters: { profile: ["backend"], status: ["active"], instrumentation_version: ["1"] },
+      view: "compare",
+      metrics: ["merge_reliability"],
+      compare: { dimension: "model", values: ["provider/a", "provider/b"] },
+      group_by: "profile",
+    }, "lead-session")) as { matched_strata: Array<{ key: string; groups: Array<{ key: string; n: number; metrics: Array<{ uncertainty: { method: string } }> }> }> }
+
+    expect(body.matched_strata).toHaveLength(1)
+    expect(body.matched_strata[0]?.key).toBe("backend")
+    expect(body.matched_strata[0]?.groups.map(group => [group.key, group.n])).toEqual([["provider/a", 5], ["provider/b", 5]])
+    expect(body.matched_strata[0]?.groups.every(group => group.metrics[0]?.uncertainty.method === "wilson_95")).toBe(true)
+  })
+
+  test("rejects invalid filter, grouping, comparison, and cursor contracts", () => {
+    const db = seedTeam()
+    const deps = setupDeps(db)
+    const base = { window: { from: FROM, to: TO }, view: "compare" as const, metrics: ["task_created"] }
+    expect(() => executeTeamMetrics(db, deps.registry, { ...base, filters: { status: ["secret"] } }, "lead-session")).toThrow("invalid or outside")
+    expect(() => executeTeamMetrics(db, deps.registry, { ...base, compare: { dimension: "execution_mode", values: ["ensemble"] } }, "lead-session")).toThrow("invalid or outside")
+    expect(() => executeTeamMetrics(db, deps.registry, { ...base, compare: { dimension: "model", values: ["a", "b"] }, group_by: "model" }, "lead-session")).toThrow("invalid or outside")
+    expect(() => executeTeamMetrics(db, deps.registry, { ...base, compare: { dimension: "model", values: ["a", "b"] }, cursor: "0" }, "lead-session")).toThrow("invalid or outside")
+    expect(() => executeTeamMetrics(db, deps.registry, { ...base, percentile: 50 } as typeof base, "lead-session")).toThrow("invalid or outside")
+  })
+
+  test("excludes legacy Teams with unknown plan approval observability", () => {
+    const db = setupDb()
+    for (let index = 0; index < 11; index++) {
+      const id = `team-${index}`
+      insertTeam(db, id, id, "lead-session")
+      const version = index === 0 ? null : 1
+      insertEvent(db, `created-${index}`, id, "team.created", Date.now(), version)
+      if (index < 6) insertEvent(db, `approved-${index}`, id, "plan.approved", Date.now() + 1, version, '{"member_name":"worker"}')
+    }
+    const deps = setupDeps(db)
+    const summary = JSON.parse(executeTeamMetrics(db, deps.registry, {
+      window: { from: FROM, to: TO }, view: "summary", metrics: ["plan_approval_adoption"],
+    }, "lead-session")) as { metrics: Array<{ denominator: number; unknown: number }> }
+    const comparison = JSON.parse(executeTeamMetrics(db, deps.registry, {
+      window: { from: FROM, to: TO }, view: "compare", metrics: ["task_completed"],
+      compare: { dimension: "mechanism", values: ["plan_approval", "none"] },
+    }, "lead-session")) as { groups: Array<{ key: string; n: number }> ; unknown_count: number }
+
+    expect(summary.metrics[0]).toMatchObject({ denominator: 10, unknown: 1 })
+    expect(comparison.groups.map(group => [group.key, group.n])).toEqual([["plan_approval", 5], ["none", 5]])
+    expect(comparison.unknown_count).toBe(1)
+  })
+
+  test("keeps funnel stages ordered and monotonic for partial or out-of-order lifecycles", () => {
+    const db = setupDb()
+    insertTeam(db, "complete", "complete", "lead-session")
+    insertTeam(db, "partial", "partial", "lead-session")
+    insertTeam(db, "out-of-order", "out-of-order", "lead-session")
+    const now = Date.now()
+    insertEvent(db, "complete-1", "complete", "team.created", now)
+    insertEvent(db, "complete-2", "complete", "member.registered", now + 1, 1, '{"member_name":"worker"}')
+    insertEvent(db, "complete-3", "complete", "task.created", now + 2, 1, '{"task_id":"task-a","status":"pending"}')
+    insertEvent(db, "complete-4", "complete", "task.completed", now + 3, 1, '{"task_id":"task-a"}')
+    insertEvent(db, "complete-5", "complete", "team.archived", now + 4)
+    insertEvent(db, "partial-1", "partial", "team.created", now)
+    insertEvent(db, "partial-2", "partial", "member.registered", now + 1, 1, '{"member_name":"worker"}')
+    insertEvent(db, "out-1", "out-of-order", "team.created", now)
+    insertEvent(db, "out-2", "out-of-order", "task.completed", now + 1, 1, '{"task_id":"task-b"}')
+    insertEvent(db, "out-3", "out-of-order", "team.archived", now + 2)
+    const deps = setupDeps(db)
+    const body = JSON.parse(executeTeamMetrics(db, deps.registry, {
+      window: { from: FROM, to: TO }, view: "funnel", metrics: ["team_created"],
+    }, "lead-session")) as { stages: Array<{ kind: string; count: number }> }
+
+    expect(body.stages).toEqual([
+      { kind: "team.created", count: 3 },
+      { kind: "member.registered", count: 2 },
+      { kind: "task.created", count: 1 },
+      { kind: "task.completed", count: 1 },
+      { kind: "team.archived", count: 1 },
+    ])
+  })
+
+  test("omits suppressed compare strata before cursor pagination", () => {
+    const db = setupDb()
+    const start = Date.parse("2026-07-01T00:00:00.000Z")
+    for (let day = 0; day < 3; day++) {
+      for (let index = 0; index < 10; index++) {
+        const id = `team-${day}-${index}`
+        insertTeam(db, id, id, "lead-session")
+        insertEvent(db, `created-${day}-${index}`, id, "team.created", start + day * 86_400_000)
+        if (index < (day === 0 ? 1 : 5)) insertEvent(db, `approved-${day}-${index}`, id, "plan.approved", start + day * 86_400_000 + 1, 1, '{"member_name":"worker"}')
+      }
+    }
+    const deps = setupDeps(db)
+    const request = {
+      window: { from: "2026-07-01T00:00:00.000Z", to: "2026-07-04T00:00:00.000Z" },
+      view: "compare" as const,
+      metrics: ["task_completed"],
+      compare: { dimension: "mechanism" as const, values: ["plan_approval", "none"] },
+      group_by: "day" as const,
+      limit: 1,
+    }
+    const first = JSON.parse(executeTeamMetrics(db, deps.registry, request, "lead-session")) as { matched_strata: Array<{ key: string; groups: Array<{ suppressed?: boolean }> }>; next_cursor: string }
+    const second = JSON.parse(executeTeamMetrics(db, deps.registry, { ...request, cursor: first.next_cursor }, "lead-session")) as { matched_strata: Array<{ key: string; groups: Array<{ suppressed?: boolean }> }>; next_cursor: string }
+
+    expect(first.matched_strata[0]?.key).toBe("2026-07-02")
+    expect(first.matched_strata[0]?.groups.every(group => group.suppressed !== true)).toBe(true)
+    expect(second.matched_strata[0]?.key).toBe("2026-07-03")
+    expect(second.next_cursor).toBeUndefined()
   })
 })

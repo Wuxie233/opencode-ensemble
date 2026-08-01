@@ -695,17 +695,23 @@ const plugin: Plugin = async (input) => {
             to: tool.schema.string().optional(),
           }).optional(),
           filters: tool.schema.object({
+            workflow_kind: tool.schema.array(tool.schema.string()).optional(),
+            status: tool.schema.array(tool.schema.string()).optional(),
+            profile: tool.schema.array(tool.schema.string()).optional(),
+            model: tool.schema.array(tool.schema.string()).optional(),
             mechanism: tool.schema.array(tool.schema.string()).optional(),
+            complexity_band: tool.schema.array(tool.schema.string()).optional(),
             instrumentation_version: tool.schema.array(tool.schema.string()).optional(),
           }).optional(),
           view: tool.schema.enum(["summary", "funnel", "timeline", "compare"]),
           metrics: tool.schema.array(tool.schema.string()),
-          group_by: tool.schema.enum(["day", "week", "mechanism"]).optional(),
+          group_by: tool.schema.enum(["day", "week", "workflow_kind", "profile", "model", "mechanism", "complexity_band"]).optional(),
           compare: tool.schema.object({
-            dimension: tool.schema.literal("mechanism"),
+            dimension: tool.schema.enum(["execution_mode", "mechanism", "model"]),
             values: tool.schema.array(tool.schema.string()),
           }).optional(),
           limit: tool.schema.number().optional(),
+          cursor: tool.schema.string().optional(),
         },
         async execute(args, ctx) {
           const result = executeTeamMetricsTool(deps, args as TeamMetricsRequest, ctx.sessionID)
