@@ -39,6 +39,10 @@ describe("opencode-ensemble agent skill", () => {
     expect(readme).toContain("returned key-to-ID mapping");
     expect(readme).toContain('key: "map-flow"');
     expect(readme).toContain("Lead Brief");
+    expect(readme).toContain("21 tools");
+    expect(readme).toContain("team_artifact_publish");
+    expect(readme).toContain("one exact contract artifact");
+    expect(readme).toContain("artifactGlobalMaxBytes");
     expect(readme).toContain("<kind>progress</kind>");
     expect(readme).toContain("message_id");
     expect(readme).not.toContain('depends_on: ["task_b"]');
@@ -63,6 +67,9 @@ describe("opencode-ensemble agent skill", () => {
     expect(skill).toContain("terminal results atomically through `team_tasks_complete`");
     expect(skill).toContain("sixth distinct consecutive provider retry");
     expect(skill).toContain("resume_from");
+    expect(skill).toContain("team_artifact_publish");
+    expect(skill).toContain("exact artifact ID");
+    expect(skill).toContain("uncommitted Lead-worktree file");
     expect(skill).toContain("Do not invent task IDs");
     expect(skill).toContain("Keep teammate prompts short");
   });

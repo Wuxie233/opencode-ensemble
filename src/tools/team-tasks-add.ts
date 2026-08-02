@@ -11,6 +11,12 @@ interface TaskInput {
   priority: string
   depends_on?: string[]
   phase?: string
+  contract_artifact_id?: string
+}
+
+interface ContractSnapshot {
+  id: string
+  sha256: string
 }
 
 /**
@@ -53,6 +59,16 @@ export async function executeTeamTasksAdd(
       return resolved
     }))
     assertAcyclic(ids, resolvedDependencies)
+    const contractSnapshots = args.tasks.map((task): ContractSnapshot | null => {
+      if (!task.contract_artifact_id) return null
+      const artifact = deps.db.query(
+        "SELECT id, sha256 FROM team_artifact WHERE id = ? AND team_id = ? AND kind = 'contract'",
+      ).get(task.contract_artifact_id, teamInfo.teamId) as ContractSnapshot | null
+      if (!artifact) {
+        throw new Error(`Contract artifact "${task.contract_artifact_id}" not found in this Team`)
+      }
+      return artifact
+    })
 
     args.tasks.forEach((task, index) => {
       const dependencies = resolvedDependencies[index]
@@ -66,11 +82,15 @@ export async function executeTeamTasksAdd(
         return status === "completed" || status === "cancelled"
       })
       const status = dependencies.length > 0 && !resolved ? "blocked" : "pending"
+      const contract = contractSnapshots[index]
       deps.db.run(
-        `INSERT INTO team_task (id, team_id, content, status, priority, depends_on, phase, time_created, time_updated)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO team_task
+           (id, team_id, content, status, priority, depends_on, phase,
+            contract_artifact_id, contract_artifact_sha256, time_created, time_updated)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [taskId, teamInfo.teamId, task.content, status,
-          task.priority, dependencies.length > 0 ? JSON.stringify(dependencies) : null, task.phase ?? null, now, now],
+          task.priority, dependencies.length > 0 ? JSON.stringify(dependencies) : null, task.phase ?? null,
+          contract?.id ?? null, contract?.sha256 ?? null, now, now],
       )
       appendTeamEvent(deps.db, {
         teamId: teamInfo.teamId,

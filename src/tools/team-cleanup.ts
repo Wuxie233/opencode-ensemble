@@ -28,6 +28,8 @@ interface PurgeStats extends PurgeTarget {
   members: number
   tasks: number
   messages: number
+  artifacts: number
+  artifactBytes: number
   branches: number
   staleResources: number
   staleBranches: number
@@ -354,35 +356,50 @@ function buildPurgePreview(deps: ToolDeps, targets: PurgeTarget[], branchesByTea
     const members = (deps.db.query("SELECT COUNT(*) as c FROM team_member WHERE team_id = ?").get(target.id) as { c: number }).c
     const tasks = (deps.db.query("SELECT COUNT(*) as c FROM team_task WHERE team_id = ?").get(target.id) as { c: number }).c
     const messages = (deps.db.query("SELECT COUNT(*) as c FROM team_message WHERE team_id = ?").get(target.id) as { c: number }).c
+    const artifactUsage = deps.db.query(
+      "SELECT COUNT(*) AS artifacts, COALESCE(SUM(byte_count), 0) AS artifact_bytes FROM team_artifact WHERE team_id = ?",
+    ).get(target.id) as { artifacts: number; artifact_bytes: number }
     const branches = branchesByTeam.get(target.id)?.length ?? 0
     const staleResources = countStaleResourceRefs(deps, target)
     const staleBranches = countStaleBranchRefs(deps, target)
-    return { ...target, members, tasks, messages, branches, staleResources, staleBranches }
+    return {
+      ...target,
+      members,
+      tasks,
+      messages,
+      artifacts: artifactUsage.artifacts,
+      artifactBytes: artifactUsage.artifact_bytes,
+      branches,
+      staleResources,
+      staleBranches,
+    }
   }) satisfies PurgeStats[]
   const totals = rows.reduce(
     (acc, row) => ({
       members: acc.members + row.members,
       tasks: acc.tasks + row.tasks,
       messages: acc.messages + row.messages,
+      artifacts: acc.artifacts + row.artifacts,
+      artifactBytes: acc.artifactBytes + row.artifactBytes,
       branches: acc.branches + row.branches,
       staleResources: acc.staleResources + row.staleResources,
       staleBranches: acc.staleBranches + row.staleBranches,
     }),
-    { members: 0, tasks: 0, messages: 0, branches: 0, staleResources: 0, staleBranches: 0 }
+    { members: 0, tasks: 0, messages: 0, artifacts: 0, artifactBytes: 0, branches: 0, staleResources: 0, staleBranches: 0 }
   )
   const details = rows.slice(0, 10).map(row =>
-    `- ${row.name}: ${formatCount(row.members, "member")}, ${formatCount(row.tasks, "task")}, ${formatCount(row.messages, "message")}, ${formatCount(row.branches, "preserved branch", "preserved branches")}, ${formatCount(row.staleResources, "stale resource")}, ${formatCount(row.staleBranches, "stale branch", "stale branches")}`
+    `- ${row.name}: ${formatCount(row.members, "member")}, ${formatCount(row.tasks, "task")}, ${formatCount(row.messages, "message")}, ${formatCount(row.artifacts, "artifact")} (${row.artifactBytes} bytes), ${formatCount(row.branches, "preserved branch", "preserved branches")}, ${formatCount(row.staleResources, "stale resource")}, ${formatCount(row.staleBranches, "stale branch", "stale branches")}`
   )
   const hidden = rows.length > 10 ? [`...and ${rows.length - 10} more archived team${rows.length - 10 === 1 ? "" : "s"}`] : []
 
   return [
     "Permanently delete archived teams?",
-    "This will delete archived team records and cascade-delete their members, tasks, and messages.",
+    "This will logically delete archived team records and cascade-delete their members, tasks, messages, and artifacts. It does not promise secure erasure from storage snapshots or backups.",
     "",
     ...details,
     ...hidden,
     "",
-    `Total: ${formatCount(rows.length, "team")}, ${formatCount(totals.members, "member")}, ${formatCount(totals.tasks, "task")}, ${formatCount(totals.messages, "message")}, ${formatCount(totals.branches, "preserved branch", "preserved branches")}, ${formatCount(totals.staleResources, "stale resource")}, ${formatCount(totals.staleBranches, "stale branch", "stale branches")}`,
+    `Total: ${formatCount(rows.length, "team")}, ${formatCount(totals.members, "member")}, ${formatCount(totals.tasks, "task")}, ${formatCount(totals.messages, "message")}, ${formatCount(totals.artifacts, "artifact")} (${totals.artifactBytes} bytes), ${formatCount(totals.branches, "preserved branch", "preserved branches")}, ${formatCount(totals.staleResources, "stale resource")}, ${formatCount(totals.staleBranches, "stale branch", "stale branches")}`,
   ].join("\n")
 }
 

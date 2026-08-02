@@ -258,7 +258,7 @@ Build with `bun run build`, then restart OpenCode to pick up changes.
 
 ## Tools
 
-18 tools. The lead can coordinate with all of them. Teammate sessions explicitly allow 9 communication, task, consultation, and metrics tools.
+21 tools. The lead can coordinate with all of them. Teammate sessions explicitly allow 12 communication, task, consultation, metrics, and artifact tools.
 
 **Team lifecycle** (lead only, except archived-team purge may also be run from the main session)
 
@@ -294,6 +294,16 @@ Archived-team purge is intentionally two-step. First call `team_cleanup` with `p
 | `team_tasks_complete` | Idempotently complete a task, optionally persist its structured terminal result in the same transaction, notify the Lead once, and unblock dependents. |
 | `team_claim` | Claim a pending task. Atomic, prevents double-claims. |
 
+**Team artifacts** (active Team members; publication is role/task constrained)
+
+| Tool | What it does |
+|------|-------------|
+| `team_artifact_publish` | Publish immutable bounded UTF-8 `contract` or owned `task_result` content in SQLite. Only the Lead publishes contracts; task results require the current in-progress assignee. |
+| `team_artifact_list` | List bounded same-Team artifact metadata without returning content. |
+| `team_artifact_read` | Read one exact same-Team artifact by opaque ID with provenance and delimited content. |
+
+Tasks may bind one exact contract artifact and stored SHA-256 digest before claim. Task list, claim, and spawn context expose that immutable binding; there is no implicit latest contract. Artifact storage is a coordination control plane for cooperative agents, not a security sandbox against arbitrary code running as the same operating-system user. v1 stores text only and intentionally excludes filesystem payloads, binary files, cross-Team sharing, aliases, Dashboard previews, and archived retrieval. Archived Team rows retain artifacts until explicit purge, when the preview includes artifact counts and logical bytes.
+
 **Plugin feedback** (lead or standalone session)
 
 | Tool | What it does |
@@ -320,7 +330,7 @@ Teammate messages arrive in the lead's session as `[Team message from alice]: ..
 
 ## Architecture
 
-- **SQLite** (WAL mode) for teams, members, tasks, and messages. Uses `bun:sqlite` in Bun and `node:sqlite` in Node/Electron through the internal database adapter.
+- **SQLite** (WAL mode) for teams, members, tasks, messages, and immutable bounded text artifacts. Uses `bun:sqlite` in Bun and `node:sqlite` in Node/Electron through the internal database adapter.
 - **promptAsync** for message delivery: injects a message and starts the prompt loop in one call
 - **Git worktree isolation**: each teammate gets their own worktree by default, so multiple agents can edit files without conflicts. Opt out with `worktree: false` for read-only agents.
 - **System prompt injection**: the lead's system prompt includes team state (member statuses, task counts) on every LLM call. Teammates get a short role reminder.
@@ -412,7 +422,11 @@ Configure via JSON files, environment variables, or both. Project config overrid
   "modelPool": ["anthropic/claude-opus-4-7", "anthropic/claude-sonnet-4-6", "openai/gpt-5.4"],
   "modelsByAgent": {},
   "modelAssignment": "default",
-  "promptForModels": false
+  "promptForModels": false,
+  "artifactMaxBytes": 262144,
+  "artifactTeamMaxCount": 1000,
+  "artifactTeamMaxBytes": 16777216,
+  "artifactGlobalMaxBytes": 268435456
 }
 ```
 
@@ -434,6 +448,10 @@ All fields are optional. Missing fields use defaults.
 | `modelsByAgent` | `{}` | Map agent type to model (e.g. `{"build": "anthropic/claude-opus-4-7"}`). |
 | `modelAssignment` | `"default"` | How to assign models: `"default"`, `"rotate"`, or `"random"`. |
 | `promptForModels` | `false` | Lead asks user about model preferences before spawning. |
+| `artifactMaxBytes` | `262144` (256 KiB) | Maximum UTF-8 bytes in one immutable Team artifact. |
+| `artifactTeamMaxCount` | `1000` | Maximum artifacts retained by one Team. |
+| `artifactTeamMaxBytes` | `16777216` (16 MiB) | Maximum artifact content bytes retained by one Team. |
+| `artifactGlobalMaxBytes` | `268435456` (256 MiB) | Maximum artifact content bytes retained across all Teams. |
 
 ### Environment variables
 

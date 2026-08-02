@@ -37,6 +37,12 @@ interface ResumeContext {
   truncated: boolean
 }
 
+interface ClaimedTask {
+  claimEventId: string
+  contractArtifactId: string | null
+  contractArtifactSha256: string | null
+}
+
 /** Parse "provider/model" string into { providerID, modelID } for the SDK. */
 function parseModelId(model: string): { providerID: string; modelID: string } | undefined {
   const slash = model.indexOf("/")
@@ -87,10 +93,16 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   ])
 }
 
-function claimSpawnTask(deps: ToolDeps, teamId: string, taskId: string, assignee: string): string {
+function claimSpawnTask(deps: ToolDeps, teamId: string, taskId: string, assignee: string): ClaimedTask {
   return deps.db.transaction(() => {
-    const task = deps.db.query("SELECT status, assignee FROM team_task WHERE id = ? AND team_id = ?")
-      .get(taskId, teamId) as { status: string; assignee: string | null } | null
+    const task = deps.db.query(
+      "SELECT status, assignee, contract_artifact_id, contract_artifact_sha256 FROM team_task WHERE id = ? AND team_id = ?",
+    ).get(taskId, teamId) as {
+      status: string
+      assignee: string | null
+      contract_artifact_id: string | null
+      contract_artifact_sha256: string | null
+    } | null
     if (!task) throw new Error(`Task "${taskId}" not found`)
     if (task.status === "blocked") throw new Error(`Task "${taskId}" is waiting for unresolved dependencies`)
     if (task.status !== "pending") throw new Error(`Task "${taskId}" is not pending (status: ${task.status})`)
@@ -110,7 +122,11 @@ function claimSpawnTask(deps: ToolDeps, teamId: string, taskId: string, assignee
       payload: { task_id: taskId, assignee },
     })
     recomputeCurrentPhase(deps.db, teamId, now)
-    return claimEventId
+    return {
+      claimEventId,
+      contractArtifactId: task.contract_artifact_id,
+      contractArtifactSha256: task.contract_artifact_sha256,
+    }
   })()
 }
 
@@ -215,9 +231,10 @@ async function executeTeamSpawnLocked(
     ? await buildResumeContext(deps, teamInfo.teamId, args.resume_from)
     : undefined
 
-  const claimEventId = args.claim_task
+  const claimedTask = args.claim_task
     ? claimSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name)
     : undefined
+  const claimEventId = claimedTask?.claimEventId
 
   const useWorktree = args.worktree !== false && !isReadOnly && !isWorktreeDirectory(deps.directory)
   const usePlanApproval = args.plan_approval === true
@@ -290,6 +307,9 @@ async function executeTeamSpawnLocked(
     "team_consult",
     "team_consult_reply",
     "team_metrics",
+    "team_artifact_publish",
+    "team_artifact_list",
+    "team_artifact_read",
   ] as const
   // Read-only profiles still need the host's evidence tools to inspect source
   // and read files written by OpenCode's native output truncation.
@@ -503,6 +523,9 @@ async function executeTeamSpawnLocked(
     "- team_consult: ask a Planner to resolve a technical contract for your owned task boundary",
     "- team_consult_reply: Planner-only reply or escalation for a pending consultation",
     "- team_metrics: read bounded privacy-safe telemetry; as a teammate you may query only this Team",
+    "- team_artifact_publish: publish an immutable Team contract or owned task result",
+    "- team_artifact_list: list bounded artifact metadata without content",
+    "- team_artifact_read: read one exact Team artifact by opaque ID",
   )
 
   // Collaboration guidance for peer-to-peer communication
@@ -576,6 +599,13 @@ async function executeTeamSpawnLocked(
 
   if (args.claim_task) {
     context.push("", `You have been assigned task ${args.claim_task}. Complete it with one team_tasks_complete call carrying the terminal result.`)
+    if (claimedTask?.contractArtifactId) {
+      context.push(
+        `Bound contract artifact: ${claimedTask.contractArtifactId}`,
+        `Bound contract SHA-256: ${claimedTask.contractArtifactSha256}`,
+        "Read that exact artifact with team_artifact_read; do not substitute another contract.",
+      )
+    }
     const scoutContext = buildScoutDependencyContext(deps, teamInfo.teamId, args.claim_task)
     if (scoutContext) context.push("", scoutContext)
   }

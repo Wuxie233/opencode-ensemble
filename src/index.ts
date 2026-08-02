@@ -36,6 +36,9 @@ import { executeTeamConsult } from "./tools/team-consult"
 import { executeTeamConsultReply } from "./tools/team-consult-reply"
 import { executeTeamMetricsTool } from "./tools/team-metrics"
 import { executeTeamReportIssue } from "./tools/team-report-issue"
+import { executeTeamArtifactPublish } from "./tools/team-artifact-publish"
+import { executeTeamArtifactList } from "./tools/team-artifact-list"
+import { executeTeamArtifactRead } from "./tools/team-artifact-read"
 import type { TeamMetricsRequest } from "./metrics"
 import type { ToolDeps, } from "./types"
 import { TokenBucket } from "./rate-limit"
@@ -523,6 +526,7 @@ const plugin: Plugin = async (input) => {
             key: tool.schema.string().optional().describe("Optional batch-local task key used by depends_on in the same call"),
             depends_on: tool.schema.array(tool.schema.string()).optional().describe("Existing same-Team task IDs or batch-local keys this task depends on"),
             phase: tool.schema.string().optional().describe("Optional workflow phase used to derive the Team's current phase from its active ready frontier"),
+            contract_artifact_id: tool.schema.string().optional().describe("Exact same-Team contract artifact ID to bind immutably to this task"),
           })).describe("Tasks to add"),
         },
         async execute(args, ctx) {
@@ -680,6 +684,47 @@ const plugin: Plugin = async (input) => {
         async execute(args, ctx) {
           const result = await executeTeamView(deps, args, ctx.sessionID)
           ctx.metadata({ title: `Viewing ${args.member}` })
+          return result
+        },
+      }),
+
+      team_artifact_publish: tool({
+        description: "Publish an immutable text artifact for the caller's active Team. Only the Lead may publish contracts; task results require an in-progress task assigned to the caller.",
+        args: {
+          kind: tool.schema.enum(["contract", "task_result"]),
+          content: tool.schema.string().describe("UTF-8 text content stored immutably in SQLite"),
+          media_type: tool.schema.enum(["text/plain", "text/markdown"]).optional().describe("Text media type, default text/plain"),
+          task_id: tool.schema.string().optional().describe("Required for task_result and forbidden for contract"),
+        },
+        async execute(args, ctx) {
+          const result = executeTeamArtifactPublish(deps, args, ctx.sessionID)
+          ctx.metadata({ title: `Published ${args.kind} artifact` })
+          return result
+        },
+      }),
+
+      team_artifact_list: tool({
+        description: "List bounded metadata for immutable artifacts in the caller's active Team. Artifact content is never included.",
+        args: {
+          kind: tool.schema.enum(["contract", "task_result"]).optional(),
+          task_id: tool.schema.string().optional(),
+          limit: tool.schema.number().optional().describe("Maximum rows from 1 to 100, default 50"),
+        },
+        async execute(args, ctx) {
+          const result = executeTeamArtifactList(deps, args, ctx.sessionID)
+          ctx.metadata({ title: "Team artifacts" })
+          return result
+        },
+      }),
+
+      team_artifact_read: tool({
+        description: "Read one exact immutable artifact by opaque ID from the caller's active Team.",
+        args: {
+          artifact_id: tool.schema.string().describe("Exact opaque artifact ID"),
+        },
+        async execute(args, ctx) {
+          const result = executeTeamArtifactRead(deps, args, ctx.sessionID)
+          ctx.metadata({ title: `Artifact ${args.artifact_id}` })
           return result
         },
       }),

@@ -152,6 +152,53 @@ describe("schema migrations", () => {
     expect(row).toBeTruthy()
   })
 
+  test("migration 18 creates immutable artifacts and exact task contract columns", () => {
+    applyMigrations(db)
+    const artifact = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='team_artifact'").get()
+    const purgeGuard = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='team_purge_guard'").get()
+    const taskColumns = db.query("PRAGMA table_info(team_task)").all() as Array<{ name: string }>
+    const indexes = db.query("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='team_artifact'").all() as Array<{ name: string }>
+    const triggers = db.query("SELECT name FROM sqlite_master WHERE type='trigger'").all() as Array<{ name: string }>
+
+    expect(artifact).toBeTruthy()
+    expect(purgeGuard).toBeTruthy()
+    expect(taskColumns.map(column => column.name)).toEqual(expect.arrayContaining([
+      "contract_artifact_id", "contract_artifact_sha256",
+    ]))
+    expect(indexes.map(index => index.name)).toEqual(expect.arrayContaining([
+      "team_artifact_team_time_idx", "team_artifact_team_kind_time_idx", "team_artifact_team_task_time_idx",
+    ]))
+    expect(triggers.map(trigger => trigger.name)).toEqual(expect.arrayContaining([
+      "team_artifact_no_update", "team_artifact_no_delete", "team_task_contract_binding_pair_insert",
+      "team_artifact_authorized_insert", "team_task_contract_binding_validate_insert",
+      "team_task_contract_binding_no_update", "team_event_no_delete",
+    ]))
+    const eventDeleteTrigger = db.query(
+      "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='team_event_no_delete'",
+    ).get() as { sql: string }
+    expect(eventDeleteTrigger.sql).toContain("team_purge_guard")
+  })
+
+  test("artifact rows and task contract bindings are immutable", () => {
+    applyMigrations(db)
+    db.exec("PRAGMA foreign_keys=ON")
+    db.run("INSERT INTO project (id, name, path, status, time_created, time_updated) VALUES ('p1', 'p1', '/p1', 'active', 1, 1)")
+    db.run("INSERT INTO team (id, name, project_id, lead_session_id, status, delegate, time_created, time_updated) VALUES ('t1', 't1', 'p1', 'lead', 'active', 0, 1, 1)")
+    db.run("INSERT INTO team_artifact (id, team_id, kind, task_id, created_by, sha256, media_type, byte_count, content, time_created) VALUES ('a1', 't1', 'contract', NULL, 'lead', ?, 'text/plain', 1, 'x', 1)", ["0".repeat(64)])
+    db.run("INSERT INTO team_task (id, team_id, content, status, priority, time_created, time_updated, contract_artifact_id, contract_artifact_sha256) VALUES ('task-1', 't1', 'task', 'pending', 'medium', 1, 1, 'a1', ?)", ["0".repeat(64)])
+
+    expect(() => db.run("UPDATE team_artifact SET content = 'y' WHERE id = 'a1'")).toThrow("immutable")
+    expect(() => db.run("DELETE FROM team_artifact WHERE id = 'a1'")).toThrow("immutable")
+    expect(() => db.run("UPDATE team_task SET contract_artifact_id = NULL, contract_artifact_sha256 = NULL WHERE id = 'task-1'"))
+      .toThrow("contract binding is immutable")
+    expect(() => db.run("INSERT INTO team_task (id, team_id, content, status, priority, time_created, time_updated, contract_artifact_id) VALUES ('task-2', 't1', 'task', 'pending', 'medium', 1, 1, 'a1')"))
+      .toThrow("requires both")
+    expect(() => db.run("INSERT INTO team_task (id, team_id, content, status, priority, time_created, time_updated, contract_artifact_id, contract_artifact_sha256) VALUES ('task-3', 't1', 'task', 'pending', 'medium', 1, 1, 'a1', ?)", ["1".repeat(64)]))
+      .toThrow("does not match")
+    expect(() => db.run("INSERT INTO team_artifact (id, team_id, kind, task_id, created_by, sha256, media_type, byte_count, content, time_created) VALUES ('a2', 't1', 'contract', NULL, 'alice', ?, 'text/plain', 1, 'x', 1)", ["0".repeat(64)]))
+      .toThrow("not authorized")
+  })
+
   test("is idempotent — running twice does not error", () => {
     applyMigrations(db)
     applyMigrations(db)

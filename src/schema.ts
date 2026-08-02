@@ -288,6 +288,90 @@ export const MIGRATIONS: string[] = [
       BEFORE DELETE ON team_event
       BEGIN
         SELECT RAISE(ABORT, 'team_event rows are immutable');
+     END;`,
+  // Migration 18: Immutable Team artifacts and exact task-contract bindings.
+  `CREATE TABLE team_purge_guard (
+      team_id TEXT PRIMARY KEY
+    );
+    DROP TRIGGER team_event_no_delete;
+    CREATE TRIGGER team_event_no_delete
+      BEFORE DELETE ON team_event
+      WHEN NOT EXISTS (SELECT 1 FROM team_purge_guard WHERE team_id = OLD.team_id)
+      BEGIN
+        SELECT RAISE(ABORT, 'team_event rows are immutable');
+      END;
+    CREATE TABLE team_artifact (
+      id           TEXT PRIMARY KEY,
+      team_id      TEXT NOT NULL REFERENCES team(id) ON DELETE CASCADE,
+      kind         TEXT NOT NULL CHECK(kind IN ('contract', 'task_result')),
+      task_id      TEXT,
+      created_by   TEXT NOT NULL,
+      sha256       TEXT NOT NULL CHECK(length(sha256) = 64),
+      media_type   TEXT NOT NULL CHECK(media_type IN ('text/plain', 'text/markdown')),
+      byte_count   INTEGER NOT NULL CHECK(byte_count > 0),
+      content      TEXT NOT NULL CHECK(length(CAST(content AS BLOB)) = byte_count),
+      time_created INTEGER NOT NULL,
+      CHECK((kind = 'contract' AND task_id IS NULL) OR (kind = 'task_result' AND task_id IS NOT NULL))
+    );
+    CREATE INDEX team_artifact_team_time_idx ON team_artifact(team_id, time_created DESC, id DESC);
+    CREATE INDEX team_artifact_team_kind_time_idx ON team_artifact(team_id, kind, time_created DESC, id DESC);
+    CREATE INDEX team_artifact_team_task_time_idx ON team_artifact(team_id, task_id, time_created DESC, id DESC)
+      WHERE task_id IS NOT NULL;
+    CREATE TRIGGER team_artifact_no_update
+      BEFORE UPDATE ON team_artifact
+      BEGIN
+        SELECT RAISE(ABORT, 'team_artifact rows are immutable');
+      END;
+    CREATE TRIGGER team_artifact_authorized_insert
+      BEFORE INSERT ON team_artifact
+      WHEN (NEW.kind = 'contract' AND NEW.created_by != 'lead')
+        OR (NEW.kind = 'task_result' AND NOT EXISTS (
+          SELECT 1 FROM team_task
+          WHERE id = NEW.task_id
+            AND team_id = NEW.team_id
+            AND status = 'in_progress'
+            AND assignee = NEW.created_by
+        ))
+      BEGIN
+        SELECT RAISE(ABORT, 'team_artifact publisher is not authorized for this artifact');
+      END;
+    CREATE TRIGGER team_artifact_no_delete
+      BEFORE DELETE ON team_artifact
+      WHEN NOT EXISTS (SELECT 1 FROM team_purge_guard WHERE team_id = OLD.team_id)
+      BEGIN
+        SELECT RAISE(ABORT, 'team_artifact rows are immutable');
+      END;
+    ALTER TABLE team_task ADD COLUMN contract_artifact_id TEXT REFERENCES team_artifact(id);
+    ALTER TABLE team_task ADD COLUMN contract_artifact_sha256 TEXT
+      CHECK(contract_artifact_sha256 IS NULL OR length(contract_artifact_sha256) = 64);
+    CREATE INDEX team_task_contract_artifact_idx ON team_task(contract_artifact_id)
+      WHERE contract_artifact_id IS NOT NULL;
+    CREATE TRIGGER team_task_contract_binding_pair_insert
+      BEFORE INSERT ON team_task
+      WHEN (NEW.contract_artifact_id IS NULL) != (NEW.contract_artifact_sha256 IS NULL)
+      BEGIN
+        SELECT RAISE(ABORT, 'team_task contract binding requires both artifact ID and digest');
+      END;
+    CREATE TRIGGER team_task_contract_binding_validate_insert
+      BEFORE INSERT ON team_task
+      WHEN NEW.contract_artifact_id IS NOT NULL
+        AND NEW.contract_artifact_sha256 IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM team_artifact
+          WHERE id = NEW.contract_artifact_id
+            AND team_id = NEW.team_id
+            AND kind = 'contract'
+            AND sha256 = NEW.contract_artifact_sha256
+        )
+      BEGIN
+        SELECT RAISE(ABORT, 'team_task contract binding does not match an exact same-Team contract');
+      END;
+    CREATE TRIGGER team_task_contract_binding_no_update
+      BEFORE UPDATE OF contract_artifact_id, contract_artifact_sha256 ON team_task
+      WHEN NEW.contract_artifact_id IS NOT OLD.contract_artifact_id
+        OR NEW.contract_artifact_sha256 IS NOT OLD.contract_artifact_sha256
+      BEGIN
+        SELECT RAISE(ABORT, 'team_task contract binding is immutable');
       END;`,
 ]
 

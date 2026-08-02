@@ -18,7 +18,7 @@ export async function executeTeamClaim(
   const claimerName = teamInfo.role === "lead" ? "lead" : (teamInfo.memberName ?? "unknown")
 
   const now = Date.now()
-  const content = immediateTransaction(deps.db, () => {
+  const task = immediateTransaction(deps.db, () => {
     const task = deps.db.query("SELECT * FROM team_task WHERE id = ? AND team_id = ?")
       .get(args.task_id, teamInfo.teamId) as Record<string, unknown> | null
     if (!task) throw new Error(`Task "${args.task_id}" not found`)
@@ -37,8 +37,11 @@ export async function executeTeamClaim(
       payload: { task_id: args.task_id, assignee: claimerName },
     })
     recomputeCurrentPhase(deps.db, teamInfo.teamId, now)
-    return String(task.content)
+    return task
   })
 
-  return `Claimed task: ${content}`
+  const contract = task.contract_artifact_id
+    ? `\nBound contract: ${task.contract_artifact_id} (sha256:${task.contract_artifact_sha256})`
+    : ""
+  return `Claimed task: ${String(task.content)}${contract}`
 }

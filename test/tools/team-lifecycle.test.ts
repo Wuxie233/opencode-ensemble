@@ -1153,6 +1153,12 @@ describe("team_cleanup", () => {
     insertMember(deps.db, "old-1", "alice", "old-alice", "shutdown", "idle")
     insertTask(deps.db, "old-1", "task-old-1")
     insertMessage(deps.db, "old-1", "msg-old-1")
+    deps.db.run(
+      `INSERT INTO team_artifact
+         (id, team_id, kind, task_id, created_by, sha256, media_type, byte_count, content, time_created)
+       VALUES ('artifact-old-1', 'old-1', 'contract', NULL, 'lead', ?, 'text/plain', 4, 'spec', 1)`,
+      ["0".repeat(64)],
+    )
 
     const result = await executeTeamCleanup(deps, { force: false, purge: ["old-team"] }, "main-sess", undefined, noopMerge, noopDelete, false, undefined, async () => {}, noopListBranches)
 
@@ -1160,6 +1166,8 @@ describe("team_cleanup", () => {
     expect(result).toContain("Use the question tool")
     expect(result).toContain("confirm_token")
     expect(result).toContain("Approve purge")
+    expect(result).toContain("1 artifact (4 bytes)")
+    expect(result).toContain("does not promise secure erasure")
     expect(deps.db.query("SELECT id FROM team WHERE id = 'old-1'").get()).not.toBeNull()
   })
 

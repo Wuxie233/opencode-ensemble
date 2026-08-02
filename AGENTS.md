@@ -229,7 +229,7 @@ populated from session events. When a team tool call arrives from an unknown
 session, walks the parent chain (max depth 10). If any ancestor is a team
 member, the call is blocked. This covers sub-agents at arbitrary depth.
 
-## The 18 Tools
+## The 21 Tools
 
 | Tool                | Who Can Use | Purpose                              |
 |---------------------|-------------|--------------------------------------|
@@ -250,6 +250,9 @@ member, the call is blocked. This covers sub-agents at arbitrary depth.
 | team_status         | Any member  | View members, statuses, task summary |
 | team_view           | Any member  | Navigate TUI to teammate's session   |
 | team_metrics        | Lead or own member Team | Read bounded, privacy-safe aggregate telemetry; timeline requires explicit authorized Team IDs |
+| team_artifact_publish | Active Team member | Publish immutable text contracts or owned task results under role/task authorization |
+| team_artifact_list  | Active Team member | List bounded same-Team artifact metadata without content |
+| team_artifact_read  | Active Team member | Read one exact same-Team artifact by opaque ID |
 | team_report_issue   | Lead only (or standalone) | File an Ensemble defect or design observation to the plugin's own tracker for later triage |
 
 ## Hooks
@@ -269,7 +272,7 @@ Three hooks wired in index.ts:
 
 1. SQLite via the internal database adapter — not file JSON, not in-memory-only, not external native packages
 2. promptAsync for message delivery — not session injection, not polling
-3. 18 separate tools — not a unified action tool, no exceptions
+3. 21 separate tools — not a unified action tool, no exceptions
 4. Fire-and-forget spawn — not blocking, not tmux
 5. tool.execute.before for rate limiting — token bucket, in-memory
 6. tool.execute.before for sub-agent isolation — full descendant tracking via parent chain
@@ -448,9 +451,10 @@ Keep it concise and include:
 
 1. Their name and role in the team
 2. The task they are working on
-3. The 9 tools they can use (team_message, team_broadcast,
+3. The 12 tools they can use (team_message, team_broadcast,
    team_tasks_list, team_tasks_add, team_tasks_complete, team_claim,
-   team_consult, team_consult_reply, team_metrics)
+   team_consult, team_consult_reply, team_metrics, team_artifact_publish,
+   team_artifact_list, team_artifact_read)
    with a one-line description of each
 4. How to report completion (`team_tasks_complete` with `result` for a claimed
    task; one `team_message` result only when no task was claimed)

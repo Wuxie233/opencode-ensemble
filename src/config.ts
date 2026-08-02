@@ -42,6 +42,14 @@ export interface EnsembleConfig {
   modelAssignment?: "default" | "rotate" | "random"
   /** Lead asks user about model preferences before spawning (default: false) */
   promptForModels?: boolean
+  /** Maximum UTF-8 bytes in one Team artifact (default: 256 KiB) */
+  artifactMaxBytes?: number
+  /** Maximum artifacts retained by one Team (default: 1000) */
+  artifactTeamMaxCount?: number
+  /** Maximum artifact content bytes retained by one Team (default: 16 MiB) */
+  artifactTeamMaxBytes?: number
+  /** Maximum artifact content bytes retained globally (default: 256 MiB) */
+  artifactGlobalMaxBytes?: number
 }
 
 /** Default configuration values. */
@@ -63,7 +71,18 @@ export const DEFAULT_CONFIG: Required<EnsembleConfig> = {
   retryExhaustionAttempt: 6,
   modelAssignment: "default",
   promptForModels: false,
+  artifactMaxBytes: 256 * 1024,
+  artifactTeamMaxCount: 1000,
+  artifactTeamMaxBytes: 16 * 1024 * 1024,
+  artifactGlobalMaxBytes: 256 * 1024 * 1024,
 }
+
+const POSITIVE_INTEGER_CONFIG_KEYS = [
+  "artifactMaxBytes",
+  "artifactTeamMaxCount",
+  "artifactTeamMaxBytes",
+  "artifactGlobalMaxBytes",
+] as const
 
 /** Read a JSON config file, returning an empty object on missing/invalid. */
 function readConfigFile(filePath: string): Partial<EnsembleConfig> {
@@ -100,6 +119,10 @@ function readConfigFile(filePath: string): Partial<EnsembleConfig> {
     }
     if (typeof raw.modelAssignment === "string" && ["default", "rotate", "random"].includes(raw.modelAssignment)) result.modelAssignment = raw.modelAssignment as "default" | "rotate" | "random"
     if (typeof raw.promptForModels === "boolean") result.promptForModels = raw.promptForModels
+    POSITIVE_INTEGER_CONFIG_KEYS.forEach((key) => {
+      const value = raw[key]
+      if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) result[key] = value
+    })
     return result
   } catch (err) {
     if (err && typeof err === "object" && "code" in err && err.code === "ENOENT") return {}

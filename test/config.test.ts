@@ -35,6 +35,10 @@ describe("config", () => {
     expect(DEFAULT_CONFIG.stallTokenThreshold).toBe(200)
     expect(DEFAULT_CONFIG.timeoutMs).toBe(1_800_000)
     expect(DEFAULT_CONFIG.rateLimitCapacity).toBe(10)
+    expect(DEFAULT_CONFIG.artifactMaxBytes).toBe(256 * 1024)
+    expect(DEFAULT_CONFIG.artifactTeamMaxCount).toBe(1000)
+    expect(DEFAULT_CONFIG.artifactTeamMaxBytes).toBe(16 * 1024 * 1024)
+    expect(DEFAULT_CONFIG.artifactGlobalMaxBytes).toBe(256 * 1024 * 1024)
   })
 
   test("returns defaults when no config files exist", () => {
@@ -70,6 +74,23 @@ describe("config", () => {
     expect(config.mergeOnCleanup).toBe(false)
     expect(config.rateLimitCapacity).toBe(5)
     expect(config.stallThresholdMs).toBe(300_000) // default preserved
+  })
+
+  test("loads positive artifact limits and falls back for invalid values", () => {
+    const configDir = path.join(tmpDir, ".opencode")
+    mkdirSync(configDir, { recursive: true })
+    writeFileSync(path.join(configDir, "ensemble.json"), JSON.stringify({
+      artifactMaxBytes: 1024,
+      artifactTeamMaxCount: 12,
+      artifactTeamMaxBytes: -1,
+      artifactGlobalMaxBytes: 1.5,
+    }))
+
+    const config = loadConfig(tmpDir)
+    expect(config.artifactMaxBytes).toBe(1024)
+    expect(config.artifactTeamMaxCount).toBe(12)
+    expect(config.artifactTeamMaxBytes).toBe(DEFAULT_CONFIG.artifactTeamMaxBytes)
+    expect(config.artifactGlobalMaxBytes).toBe(DEFAULT_CONFIG.artifactGlobalMaxBytes)
   })
 
   test("loads ordered per-agent fallback models", () => {

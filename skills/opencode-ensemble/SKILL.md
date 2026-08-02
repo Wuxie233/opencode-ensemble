@@ -55,19 +55,20 @@ Use `general` only when no narrower profile fits. Unknown profiles never fall ba
 ## Lead Workflow
 
 1. Create one Team for the confirmed request and reuse it across research, implementation, review, verification, and recovery.
-2. Build the coordination graph in `team_tasks_add`. One batch may assign local `key` values and use them in `depends_on`, including forward references. Use existing same-Team task IDs for later additions. Add `phase` when the workflow moves to a new phase.
-3. Maximize useful concurrency across the ready frontier: pending tasks whose dependencies are complete. Dependency-waiting tasks are normal queued work, not blockers. Independent read-only `worktree: false` spawns may be issued concurrently; create writer worktrees one at a time, while created writers may execute concurrently.
-4. Delegate broad searches, raw logs, trial-and-error, and detailed evidence so the Lead receives concise decision-ready summaries.
-5. Make Scout tasks explicit dependencies of the writer tasks that need their findings. Ensemble injects completed Scout conclusions into those dependent prompts.
-6. Use `worktree: false` only for read-only teammates. Keep `worktree: true` and exclusive write ownership for every writer.
-7. Use `plan_approval: true` for risky implementation work.
-8. When one owned task needs a technical contract, let its teammate call `team_consult`. The Planner answers with `team_consult_reply` or escalates a business decision to the Lead; unrelated ready work continues.
-9. Wait for messages instead of polling status. Use `team_status` only for a requested snapshot or a concrete stall/recovery check.
-10. Ask for structured `progress` and `blocker` messages tied to `task_id`. Claimed tasks report terminal results atomically through `team_tasks_complete`; use one `team_message` result only for unclaimed work. Keep raw evidence in the teammate session; use `team_results` when full detail is consequential.
-11. Shut down completed teammates with `team_shutdown`, merge writer branches with `team_merge`, inspect the integrated diff, and run project verification.
-12. Use idempotent lifecycle calls freely when recovering from interrupted coordination; repeated completion, shutdown, merge, and cleanup calls should converge.
-13. On the sixth distinct consecutive provider retry, expect the plugin to preserve and abort the failed teammate before releasing its in-progress tasks. Start a fresh teammate with `resume_from`; require it to inspect actual state before continuing.
-14. Run `team_cleanup` only after integration and verification.
+2. Publish any execution-time shared contract with `team_artifact_publish`, then bind its exact artifact ID when adding dependent tasks through `team_tasks_add`. The task snapshots the SHA-256; claim and spawn context expose that exact binding without an implicit latest lookup. Durable repository documentation still belongs in Git.
+3. Build the coordination graph in `team_tasks_add`. One batch may assign local `key` values and use them in `depends_on`, including forward references. Use existing same-Team task IDs for later additions. Add `phase` when the workflow moves to a new phase.
+4. Maximize useful concurrency across the ready frontier: pending tasks whose dependencies are complete. Dependency-waiting tasks are normal queued work, not blockers. Independent read-only `worktree: false` spawns may be issued concurrently; create writer worktrees one at a time, while created writers may execute concurrently.
+5. Delegate broad searches, raw logs, trial-and-error, and detailed evidence so the Lead receives concise decision-ready summaries.
+6. Make Scout tasks explicit dependencies of the writer tasks that need their findings. Ensemble injects completed Scout conclusions into those dependent prompts.
+7. Use `worktree: false` only for read-only teammates. Keep `worktree: true` and exclusive write ownership for every writer.
+8. Use `plan_approval: true` for risky implementation work.
+9. When one owned task needs a technical contract, let its teammate call `team_consult`. The Planner answers with `team_consult_reply` or escalates a business decision to the Lead; unrelated ready work continues.
+10. Wait for messages instead of polling status. Use `team_status` only for a requested snapshot or a concrete stall/recovery check.
+11. Ask for structured `progress` and `blocker` messages tied to `task_id`. Claimed tasks report terminal results atomically through `team_tasks_complete`; use one `team_message` result only for unclaimed work. Keep raw evidence in the teammate session; use `team_results` when full detail is consequential.
+12. Shut down completed teammates with `team_shutdown`, merge writer branches with `team_merge`, inspect the integrated diff, and run project verification.
+13. Use idempotent lifecycle calls freely when recovering from interrupted coordination; repeated completion, shutdown, merge, and cleanup calls should converge.
+14. On the sixth distinct consecutive provider retry, expect the plugin to preserve and abort the failed teammate before releasing its in-progress tasks. Start a fresh teammate with `resume_from`; require it to inspect actual state before continuing.
+15. Run `team_cleanup` only after integration and verification.
 
 ## Load References As Needed
 
@@ -82,6 +83,7 @@ Use `general` only when no narrower profile fits. Unknown profiles never fall ba
 - Do not invent task IDs. `team_tasks_add` generates IDs; use the IDs returned by earlier calls when setting `depends_on` or `claim_task`.
 - Within one `team_tasks_add` call, prefer readable batch-local `key` values for a DAG. Dependencies must resolve to a local key or an existing task in the same Team; missing, cross-Team, self, and cyclic dependencies are invalid.
 - Keep teammate prompts short. The plugin already injects team role, allowed tools, worktree context, and the required task-result format.
+- Do not point an isolated writer only at an uncommitted Lead-worktree file. Publish execution contracts as immutable Team artifacts and bind the exact ID to the task, or commit durable project documents before spawning.
 - Do not pass `worktree: false` to a writer. Fix a failed isolated spawn instead of allowing concurrent writes in the Lead directory.
 - Do not give teammates vague prompts like "fix the bug" or "work on tests".
 - Do not ask teammates to use lead-only tools such as `team_spawn`, `team_shutdown`, `team_merge`, `team_cleanup`, or `team_view`.

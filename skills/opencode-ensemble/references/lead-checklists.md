@@ -13,6 +13,8 @@ Use these gates to prevent common coordination failures.
 - Every writer uses `worktree: true`; a writer never falls back to the Lead directory after worktree creation failure.
 - Risky implementation work uses `plan_approval: true`.
 - Task dependencies are represented with `depends_on`.
+- Every shared execution contract is published as an immutable Team artifact and bound by exact ID, or committed to Git before an isolated writer is spawned.
+- No task relies on an uncommitted file that exists only in the Lead worktree.
 - Batch-local task `key` values are unique; all dependencies resolve within the current Team and form an acyclic graph.
 - Research, implementation, review, verification, and recovery will reuse the same Team.
 - Verification commands are known before work starts.

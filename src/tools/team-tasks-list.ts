@@ -18,6 +18,9 @@ export async function executeTeamTasksList(
 
   return tasks.map(t => {
     const status = t.status === "blocked" ? "waiting" : t.status
-    return `[${status}] ${t.content} (${t.id})${t.assignee ? ` → ${t.assignee}` : ""}${t.priority !== "medium" ? ` [${t.priority}]` : ""}${t.phase ? ` [phase: ${t.phase}]` : ""}`
+    const contract = t.contract_artifact_id
+      ? ` [contract: ${t.contract_artifact_id} sha256:${t.contract_artifact_sha256}]`
+      : ""
+    return `[${status}] ${t.content} (${t.id})${t.assignee ? ` → ${t.assignee}` : ""}${t.priority !== "medium" ? ` [${t.priority}]` : ""}${t.phase ? ` [phase: ${t.phase}]` : ""}${contract}`
   }).join("\n")
 }

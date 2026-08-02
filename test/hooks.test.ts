@@ -520,7 +520,8 @@ describe("checkToolIsolation", () => {
       "team_create", "team_spawn", "team_message", "team_broadcast",
       "team_tasks_list", "team_tasks_add", "team_tasks_complete",
       "team_claim", "team_approve_plan", "team_shutdown", "team_cleanup",
-      "team_status", "team_view", "team_metrics",
+      "team_status", "team_view", "team_metrics", "team_artifact_publish",
+      "team_artifact_list", "team_artifact_read", "team_report_issue",
     ]
     for (const tool of teamTools) {
       expect(() => checkToolIsolation(registry, tracker, tool, "sub-agent"))

@@ -9,10 +9,14 @@ function insertTask(
   id: string,
   status = "pending",
   assignee: string | null = null,
+  contract?: { id: string; sha256: string },
 ) {
   deps.db.run(
-    "INSERT INTO team_task (id, team_id, content, status, priority, assignee, time_created, time_updated) VALUES (?, ?, ?, ?, 'medium', ?, ?, ?)",
-    [id, teamId, `Task ${id}`, status, assignee, Date.now(), Date.now()],
+    `INSERT INTO team_task
+       (id, team_id, content, status, priority, assignee, contract_artifact_id,
+        contract_artifact_sha256, time_created, time_updated)
+     VALUES (?, ?, ?, ?, 'medium', ?, ?, ?, ?, ?)`,
+    [id, teamId, `Task ${id}`, status, assignee, contract?.id ?? null, contract?.sha256 ?? null, Date.now(), Date.now()],
   )
 }
 
@@ -240,6 +244,38 @@ describe("team_spawn", () => {
 
     expect(text).toContain("task-123")
     expect(text).toContain("Complete it with one team_tasks_complete call carrying the terminal result")
+  })
+
+  test("context exposes only the exact claimed task contract snapshot", async () => {
+    const digest = "f".repeat(64)
+    deps.db.run(
+      `INSERT INTO team_artifact
+         (id, team_id, kind, task_id, created_by, sha256, media_type, byte_count, content, time_created)
+       VALUES ('artifact_bound', 't1', 'contract', NULL, 'lead', ?, 'text/plain', 20, 'secret contract body', 1)`,
+      [digest],
+    )
+    deps.db.run(
+      `INSERT INTO team_artifact
+         (id, team_id, kind, task_id, created_by, sha256, media_type, byte_count, content, time_created)
+       VALUES ('artifact_latest', 't1', 'contract', NULL, 'lead', ?, 'text/plain', 20, 'latest contract body', 2)`,
+      ["0".repeat(64)],
+    )
+    insertTask(deps, "t1", "task-bound", "pending", null, { id: "artifact_bound", sha256: digest })
+
+    await executeTeamSpawn(deps, {
+      name: "alice",
+      agent: "build",
+      prompt: "Implement the bound contract",
+      claim_task: "task-bound",
+    }, "lead-sess", async () => true)
+
+    const promptCall = deps.client.calls.find(call => call.method === "session.promptAsync")
+    const text = (promptCall!.args[0] as { parts: Array<{ text: string }> }).parts[0]!.text
+    expect(text).toContain("Bound contract artifact: artifact_bound")
+    expect(text).toContain(`Bound contract SHA-256: ${digest}`)
+    expect(text).not.toContain("secret contract body")
+    expect(text).not.toContain("artifact_latest")
+    expect(text).not.toContain("latest contract body")
   })
 
   test("injects completed Scout dependency conclusions into the claimed Builder prompt", async () => {
@@ -1046,7 +1082,7 @@ describe("team_spawn", () => {
     expect(text).toContain("<summary>")
   })
 
-  test("read-only agent receives the same six coordination tools", async () => {
+  test("read-only agent receives coordination and artifact tools", async () => {
     await executeTeamSpawn(deps, {
       name: "alice", agent: "explore", prompt: "Research",
     }, "lead-sess", async () => true)
@@ -1058,6 +1094,9 @@ describe("team_spawn", () => {
     expect(text).toContain("team_tasks_add")
     expect(text).toContain("team_tasks_complete")
     expect(text).toContain("team_claim")
+    expect(text).toContain("team_artifact_publish")
+    expect(text).toContain("team_artifact_list")
+    expect(text).toContain("team_artifact_read")
   })
 
   test("read-only agent receives readable evidence-tool guidance", async () => {
@@ -1508,6 +1547,9 @@ describe("team_spawn — agent mode enforcement", () => {
     { permission: "team_consult", pattern: "*", action: "allow" },
     { permission: "team_consult_reply", pattern: "*", action: "allow" },
     { permission: "team_metrics", pattern: "*", action: "allow" },
+    { permission: "team_artifact_publish", pattern: "*", action: "allow" },
+    { permission: "team_artifact_list", pattern: "*", action: "allow" },
+    { permission: "team_artifact_read", pattern: "*", action: "allow" },
   ]
 
   test("plan agent gets deny rules + team tool allow (no worktree) on session.create", async () => {

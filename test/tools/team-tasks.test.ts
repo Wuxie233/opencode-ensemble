@@ -48,6 +48,25 @@ describe("team_tasks_list", () => {
       .toEqual({ status: "blocked" })
   })
 
+  test("lists the exact bound contract ID and digest without content", async () => {
+    const digest = "a".repeat(64)
+    deps.db.run(
+      `INSERT INTO team_artifact
+         (id, team_id, kind, task_id, created_by, sha256, media_type, byte_count, content, time_created)
+       VALUES ('artifact_contract', 't1', 'contract', NULL, 'lead', ?, 'text/plain', 16, 'private contract', 1)`,
+      [digest],
+    )
+    await executeTeamTasksAdd(deps, { tasks: [{
+      content: "Bound task",
+      priority: "high",
+      contract_artifact_id: "artifact_contract",
+    }] }, "sess-alice")
+
+    const result = await executeTeamTasksList(deps, "sess-alice")
+    expect(result).toContain(`contract: artifact_contract sha256:${digest}`)
+    expect(result).not.toContain("private contract")
+  })
+
   test("rejects if not in a team", async () => {
     await expect(executeTeamTasksList(deps, "random-sess"))
       .rejects.toThrow("not in a team")
@@ -141,6 +160,57 @@ describe("team_tasks_add", () => {
       { content: "Lead task", priority: "high" },
     ] }, "lead-sess")
     expect(result).toContain("Added 1 task")
+  })
+
+  test("binds a same-Team contract and snapshots its digest atomically", async () => {
+    const digest = "b".repeat(64)
+    deps.db.run(
+      `INSERT INTO team_artifact
+         (id, team_id, kind, task_id, created_by, sha256, media_type, byte_count, content, time_created)
+       VALUES ('artifact_contract', 't1', 'contract', NULL, 'lead', ?, 'text/markdown', 10, '# Contract', 1)`,
+      [digest],
+    )
+
+    await executeTeamTasksAdd(deps, { tasks: [{
+      content: "Implement contract",
+      priority: "high",
+      contract_artifact_id: "artifact_contract",
+    }] }, "lead-sess")
+
+    expect(deps.db.query(
+      "SELECT contract_artifact_id, contract_artifact_sha256 FROM team_task WHERE team_id = 't1'",
+    ).get()).toEqual({ contract_artifact_id: "artifact_contract", contract_artifact_sha256: digest })
+  })
+
+  test("rejects wrong-kind and cross-Team contract bindings without partial inserts", async () => {
+    insertTeam(deps.db, "t2", "other-team", "other-lead")
+    deps.db.run(
+      `INSERT INTO team_task
+         (id, team_id, content, status, priority, time_created, time_updated)
+       VALUES ('task_result_owner', 't1', 'Existing task', 'in_progress', 'medium', 1, 1)`,
+    )
+    deps.db.run("UPDATE team_task SET assignee = 'lead' WHERE id = 'task_result_owner'")
+    deps.db.run(
+      `INSERT INTO team_artifact
+         (id, team_id, kind, task_id, created_by, sha256, media_type, byte_count, content, time_created)
+       VALUES ('artifact_result', 't1', 'task_result', 'task_result_owner', 'lead', ?, 'text/plain', 6, 'result', 1)`,
+      ["c".repeat(64)],
+    )
+    deps.db.run(
+      `INSERT INTO team_artifact
+         (id, team_id, kind, task_id, created_by, sha256, media_type, byte_count, content, time_created)
+       VALUES ('artifact_other', 't2', 'contract', NULL, 'lead', ?, 'text/plain', 8, 'contract', 1)`,
+      ["d".repeat(64)],
+    )
+
+    await expect(executeTeamTasksAdd(deps, { tasks: [
+      { content: "Would insert", priority: "high" },
+      { content: "Wrong kind", priority: "high", contract_artifact_id: "artifact_result" },
+    ] }, "lead-sess")).rejects.toThrow("not found in this Team")
+    await expect(executeTeamTasksAdd(deps, { tasks: [
+      { content: "Cross Team", priority: "high", contract_artifact_id: "artifact_other" },
+    ] }, "lead-sess")).rejects.toThrow("not found in this Team")
+    expect(deps.db.query("SELECT id FROM team_task WHERE team_id = 't1'").all()).toEqual([{ id: "task_result_owner" }])
   })
 })
 
@@ -438,6 +508,27 @@ describe("team_claim", () => {
     const row = deps.db.query("SELECT status, assignee FROM team_task WHERE id = ?").get(taskId) as Record<string, string>
     expect(row.status).toBe("in_progress")
     expect(row.assignee).toBe("alice")
+  })
+
+  test("returns the exact bound contract ID and digest without content", async () => {
+    const digest = "e".repeat(64)
+    deps.db.run(
+      `INSERT INTO team_artifact
+         (id, team_id, kind, task_id, created_by, sha256, media_type, byte_count, content, time_created)
+       VALUES ('artifact_bound', 't1', 'contract', NULL, 'lead', ?, 'text/plain', 15, 'hidden contract', 1)`,
+      [digest],
+    )
+    const added = await executeTeamTasksAdd(deps, { tasks: [{
+      content: "Bound task",
+      priority: "high",
+      contract_artifact_id: "artifact_bound",
+    }] }, "lead-sess")
+    const taskId = added.match(/task_\S+/)?.[0]
+    expect(taskId).toBeTruthy()
+
+    const result = await executeTeamClaim(deps, { task_id: taskId ?? "" }, "sess-alice")
+    expect(result).toContain(`Bound contract: artifact_bound (sha256:${digest})`)
+    expect(result).not.toContain("hidden contract")
   })
 
   test("rejects claiming an already-claimed task", async () => {

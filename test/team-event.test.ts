@@ -32,7 +32,7 @@ describe("team_event migration", () => {
 
     applyMigrations(db)
 
-    expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(17)
+    expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(MIGRATIONS.length)
     expect(db.query("SELECT * FROM team_event").all()).toEqual([])
     const indexes = db.query("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'team_event'").all() as Array<{ name: string }>
     expect(indexes.map(row => row.name)).toEqual(expect.arrayContaining(["team_event_team_time_idx"]))
@@ -72,7 +72,7 @@ describe("team_event migration", () => {
 
     expect(db.query("SELECT id FROM team_event").all()).toEqual([{ id: "event_legacy" }])
     expect(db.query("SELECT * FROM team_usage_event").all()).toEqual([])
-    expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(17)
+    expect((db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(MIGRATIONS.length)
   })
 
   test("ordinary Team deletion cannot bypass immutable event retention", () => {
@@ -204,13 +204,14 @@ describe("appendTeamEvent", () => {
     expect((deps.db.query("SELECT kind FROM team_event WHERE id = ?").get(id) as { kind: string }).kind).toBe("team.created")
   })
 
-  test("restores the delete guard when an explicit purge deletion fails", () => {
+  test("keeps the delete guard active when an explicit purge deletion fails", () => {
     deps.db.run("UPDATE team SET status = 'archived' WHERE id = 't1'")
     const id = appendTeamEvent(deps.db, { teamId: "t1", kind: "team.created", payload: {} })
     deps.db.exec("CREATE TRIGGER reject_team_delete BEFORE DELETE ON team BEGIN SELECT RAISE(ABORT, 'reject purge'); END")
 
     expect(() => deleteArchivedTeamForExplicitPurge(deps.db, "t1")).toThrow("reject purge")
     expect(() => deps.db.run("DELETE FROM team_event WHERE id = ?", [id])).toThrow("immutable")
+    expect(deps.db.query("SELECT team_id FROM team_purge_guard").all()).toEqual([])
   })
 })
 
