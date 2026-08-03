@@ -99,6 +99,11 @@ when running on Bun, `node:sqlite` when running on Node/Electron. Six tables:
 - team_message — message log (from, to, content, delivered flag)
 - team_event — privacy-safe immutable lifecycle rows retained until explicit Team purge; observation only, never a runtime source of truth
 
+`project.path` is the Team data-plane repository root. `team.controller_directory`
+is the Lead plugin directory that owns recovery, watchdog, and purge lifecycle.
+SDK worktree/workspace/session calls and Git operations use the persisted Team
+repository root; lifecycle discovery remains scoped to the controller directory.
+
 The SQLite connection, dashboard listener, and `ActivityBuffer` are process-shared across directory plugin instances. Directory-local watchdogs, registries, trackers, and rate limiters remain isolated. Release shared resources only after the final directory and any in-flight recovery task finish.
 
 Main-directory recovery is deduplicated per resolved project and starts after registry rehydration. Keep recovery asynchronous so SDK calls back into OpenCode cannot block directory bootstrap; worktree instances continue to skip recovery entirely.
@@ -343,6 +348,12 @@ and earlier — agent work was silently destroyed on shutdown.
 After any `session.abort()` call, check that the preserved branch
 exists: `git branch --list ensemble/preserved/*`. If it's missing,
 the preservation was skipped or failed.
+
+A missing failed-writer ref is never evidence that the writer was empty.
+`team_merge` may record a verified-empty settlement only from the persisted Git
+identity and spawn baseline plus a surviving matching ref or a clean matching
+worktree. `team_cleanup` consumes that explicit settlement and never infers it
+from missing messages, refs, or worktrees.
 
 ## SDK Transport (Critical — Do Not Change)
 

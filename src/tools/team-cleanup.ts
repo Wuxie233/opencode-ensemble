@@ -495,8 +495,23 @@ export async function executeTeamCleanup(
   }
   const repositoryRoot = getTeamRepositoryBinding(deps.db, teamInfo.teamId).repositoryRoot
 
-  const members = deps.db.query("SELECT name, session_id, status, worktree_dir, worktree_branch, workspace_id, merge_state FROM team_member WHERE team_id = ?")
-    .all(teamInfo.teamId) as Array<{ name: string; session_id: string; status: string; worktree_dir: string | null; worktree_branch: string | null; workspace_id: string | null; merge_state: string }>
+  const members = deps.db.query(
+    `SELECT name, session_id, status, worktree_dir, worktree_branch,
+            worktree_source_branch, worktree_baseline_oid, workspace_id,
+            merge_state, merged_source_branch
+     FROM team_member WHERE team_id = ?`,
+  ).all(teamInfo.teamId) as Array<{
+    name: string
+    session_id: string
+    status: string
+    worktree_dir: string | null
+    worktree_branch: string | null
+    worktree_source_branch: string | null
+    worktree_baseline_oid: string | null
+    workspace_id: string | null
+    merge_state: string
+    merged_source_branch: string | null
+  }>
 
   const active = members.filter(m => m.status !== "shutdown" && m.status !== "error")
   const abortable = members.filter(m => m.status !== "shutdown" && m.status !== "error")
@@ -614,17 +629,32 @@ export async function executeTeamCleanup(
     }
   }
 
-  const awaitingMerge = members.filter(member => member.worktree_branch !== null && member.merge_state === "none")
-  const interruptedMerges = members.filter(member => member.worktree_branch !== null && member.merge_state === "merging")
-  if (awaitingMerge.length > 0 || interruptedMerges.length > 0) {
+  const isWriter = (member: (typeof members)[number]) => member.worktree_branch !== null
+    || member.worktree_source_branch !== null
+    || member.worktree_baseline_oid !== null
+  const awaitingMerge = members.filter(member => isWriter(member) && member.merge_state === "none")
+  const interruptedMerges = members.filter(member => isWriter(member) && member.merge_state === "merging")
+  const invalidMissingRefSettlements = members.filter(member => {
+    if (member.worktree_branch !== null || !isWriter(member) || member.merge_state !== "merged") return false
+    if (!member.merged_source_branch) return true
+    const completed = deps.db.query(
+      "SELECT 1 AS present FROM team_event WHERE team_id = ? AND kind = 'merge.completed' AND payload = ? LIMIT 1",
+    ).get(teamInfo.teamId, JSON.stringify({ member_name: member.name })) as { present: number } | null
+    return !completed
+  })
+  if (awaitingMerge.length > 0 || interruptedMerges.length > 0 || invalidMissingRefSettlements.length > 0) {
     const guidance = [`Team "${teamInfo.teamName}" was not cleaned up. Writer branches require explicit merge verification before resources can be removed or the team archived.`]
     if (awaitingMerge.length > 0) {
-      const names = awaitingMerge.map(member => `${member.name} (${member.worktree_branch})`).join(", ")
+      const names = awaitingMerge.map(member => `${member.name} (${member.worktree_branch ?? member.worktree_source_branch ?? "missing branch evidence"})`).join(", ")
       guidance.push(`Call team_merge for: ${names}. Review the resulting unstaged changes, then retry team_cleanup.`)
     }
     if (interruptedMerges.length > 0) {
-      const names = interruptedMerges.map(member => `${member.name} (${member.worktree_branch})`).join(", ")
+      const names = interruptedMerges.map(member => `${member.name} (${member.worktree_branch ?? member.worktree_source_branch ?? "missing branch evidence"})`).join(", ")
       guidance.push(`Merge already started for: ${names}. Inspect git diff and each source branch, verify the integration result, and settle the merge explicitly before retrying team_cleanup; Ensemble will not reapply it automatically.`)
+    }
+    if (invalidMissingRefSettlements.length > 0) {
+      const names = invalidMissingRefSettlements.map(member => member.name).join(", ")
+      guidance.push(`Missing-ref merge settlement is incomplete for: ${names}. Retry team_merge after restoring verifiable branch or worktree evidence.`)
     }
     return guidance.join("\n")
   }

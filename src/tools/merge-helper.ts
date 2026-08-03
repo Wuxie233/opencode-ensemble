@@ -1,3 +1,5 @@
+import { realpath, stat } from "node:fs/promises"
+import path from "node:path"
 import type { Database } from "../db"
 import { log } from "../log"
 import { runCommand } from "../process"
@@ -22,6 +24,25 @@ export type ResolveWorktreeBranchFn = (worktreeDir: string) => Promise<string | 
 
 /** Injectable function for deleting a branch. */
 export type DeleteBranchFn = (branch: string, cwd: string) => Promise<boolean>
+
+/** Persisted evidence available when recovering a failed writer branch. */
+export interface FailedWriterEvidenceInput {
+  repositoryRoot: string
+  gitIdentity: string | null
+  baselineOid: string | null
+  sourceBranch: string | null
+  preservedBranch: string | null
+  worktreeDir: string | null
+}
+
+/** Fail-closed outcome of failed-writer branch evidence verification. */
+export type FailedWriterEvidence =
+  | { kind: "empty"; sourceBranch: string }
+  | { kind: "merge"; sourceBranch: string }
+  | { kind: "unverifiable"; reason: string }
+
+/** Injectable failed-writer evidence verifier. */
+export type VerifyFailedWriterEvidenceFn = (input: FailedWriterEvidenceInput) => Promise<FailedWriterEvidence>
 
 /** Human-readable resource identity for a team. */
 export interface TeamResourceParts {
@@ -117,6 +138,120 @@ export async function deleteBranch(branch: string, cwd: string): Promise<boolean
     return false
   }
   return true
+}
+
+async function gitOid(repositoryRoot: string, ref: string): Promise<string | null> {
+  const result = await runCommand(["git", "rev-parse", "--verify", ref], { cwd: repositoryRoot })
+  return result.exitCode === 0 && result.stdout.trim() ? result.stdout.trim() : null
+}
+
+async function symbolicBranch(repositoryRoot: string): Promise<string | null> {
+  const result = await runCommand(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: repositoryRoot })
+  return result.exitCode === 0 && result.stdout.trim() ? result.stdout.trim() : null
+}
+
+async function isAncestor(repositoryRoot: string, ancestor: string, descendant: string): Promise<boolean> {
+  const result = await runCommand(["git", "merge-base", "--is-ancestor", ancestor, descendant], { cwd: repositoryRoot })
+  return result.exitCode === 0
+}
+
+async function repositoryGitIdentity(repositoryRoot: string): Promise<string | null> {
+  const result = await runCommand(["git", "rev-parse", "--git-common-dir"], { cwd: repositoryRoot })
+  if (result.exitCode !== 0 || !result.stdout.trim()) return null
+  const common = result.stdout.trim()
+  return realpath(path.isAbsolute(common) ? common : path.resolve(repositoryRoot, common))
+}
+
+/**
+ * Verify the only evidence that can settle a failed writer whose preserved
+ * branch may be missing. This never consults messages or other activity hints.
+ */
+export async function verifyFailedWriterEvidence(input: FailedWriterEvidenceInput): Promise<FailedWriterEvidence> {
+  if (!input.gitIdentity) return { kind: "unverifiable", reason: "the Team has no persisted Git identity" }
+  if (!input.baselineOid) return { kind: "unverifiable", reason: "the writer has no persisted branch baseline" }
+  if (!input.sourceBranch) return { kind: "unverifiable", reason: "the writer has no immutable source branch" }
+
+  let currentIdentity: string | null
+  try {
+    currentIdentity = await repositoryGitIdentity(input.repositoryRoot)
+  } catch {
+    currentIdentity = null
+  }
+  if (!currentIdentity || path.normalize(currentIdentity) !== path.normalize(input.gitIdentity)) {
+    return { kind: "unverifiable", reason: "the Team repository Git identity no longer matches its persisted identity" }
+  }
+
+  const baseline = await gitOid(input.repositoryRoot, input.baselineOid)
+  if (baseline !== input.baselineOid) {
+    return { kind: "unverifiable", reason: "the persisted branch baseline is not a valid commit in the Team repository" }
+  }
+
+  const branchNames = [...new Set([input.preservedBranch, input.sourceBranch].filter((branch): branch is string => Boolean(branch)))]
+  const candidates: Array<{ branch: string; oid: string }> = []
+  for (const branch of branchNames) {
+    const oid = await gitOid(input.repositoryRoot, `refs/heads/${branch}`)
+    if (!oid) continue
+    if (!(await isAncestor(input.repositoryRoot, input.baselineOid, oid))) {
+      return { kind: "unverifiable", reason: `candidate branch ${branch} does not descend from the persisted baseline` }
+    }
+    candidates.push({ branch, oid })
+  }
+
+  let liveBaseline = false
+  if (input.worktreeDir) {
+    let worktreeExists = false
+    try {
+      worktreeExists = (await stat(input.worktreeDir)).isDirectory()
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
+        return { kind: "unverifiable", reason: "the recorded writer worktree cannot be inspected" }
+      }
+    }
+    if (worktreeExists) {
+      let worktreeIdentity: string | null
+      try {
+        worktreeIdentity = await repositoryGitIdentity(input.worktreeDir)
+      } catch {
+        worktreeIdentity = null
+      }
+      if (!worktreeIdentity || path.normalize(worktreeIdentity) !== path.normalize(input.gitIdentity)) {
+        return { kind: "unverifiable", reason: "the live writer worktree belongs to a different Git repository" }
+      }
+      const status = await runCommand(["git", "status", "--porcelain", "--untracked-files=all"], { cwd: input.worktreeDir })
+      if (status.exitCode !== 0) return { kind: "unverifiable", reason: "the live writer worktree status cannot be inspected" }
+      if (status.stdout.trim()) return { kind: "unverifiable", reason: "the live writer worktree has dirty or untracked changes" }
+      const branch = await symbolicBranch(input.worktreeDir)
+      if (branch !== input.sourceBranch) {
+        return { kind: "unverifiable", reason: "the live writer worktree is not attached to its immutable source branch" }
+      }
+      const head = await gitOid(input.worktreeDir, "HEAD")
+      if (!head || !(await isAncestor(input.repositoryRoot, input.baselineOid, head))) {
+        return { kind: "unverifiable", reason: "the live writer worktree does not descend from the persisted baseline" }
+      }
+      liveBaseline = head === input.baselineOid
+    }
+  }
+
+  if (candidates.length === 0) {
+    return liveBaseline
+      ? { kind: "empty", sourceBranch: input.sourceBranch }
+      : { kind: "unverifiable", reason: "no recorded branch ref or live baseline worktree survives" }
+  }
+
+  let selected = candidates[0]
+  if (!selected) return { kind: "unverifiable", reason: "no recorded branch evidence survives" }
+  for (const candidate of candidates.slice(1)) {
+    if (candidate.oid === selected.oid || await isAncestor(input.repositoryRoot, candidate.oid, selected.oid)) continue
+    if (await isAncestor(input.repositoryRoot, selected.oid, candidate.oid)) {
+      selected = candidate
+      continue
+    }
+    return { kind: "unverifiable", reason: "recorded candidate branch tips have diverged" }
+  }
+
+  return selected.oid === input.baselineOid
+    ? { kind: "empty", sourceBranch: selected.branch }
+    : { kind: "merge", sourceBranch: selected.branch }
 }
 
 /**

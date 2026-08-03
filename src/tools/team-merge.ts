@@ -1,7 +1,7 @@
 import type { ToolDeps } from "../types"
 import { requireLead } from "./shared"
-import { mergeBranch, deleteBranch, getOverlappingFiles } from "./merge-helper"
-import type { MergeBranchFn, DeleteBranchFn, OverlapCheckFn } from "./merge-helper"
+import { mergeBranch, deleteBranch, getOverlappingFiles, verifyFailedWriterEvidence } from "./merge-helper"
+import type { MergeBranchFn, DeleteBranchFn, OverlapCheckFn, VerifyFailedWriterEvidenceFn } from "./merge-helper"
 import { log } from "../log"
 import { immediateTransaction } from "../db"
 import { appendTeamEvent } from "../team-event"
@@ -18,23 +18,40 @@ export async function executeTeamMerge(
   merge: MergeBranchFn = mergeBranch,
   delBranch: DeleteBranchFn = deleteBranch,
   overlapCheck: OverlapCheckFn = getOverlappingFiles,
+  verifyFailedWriter: VerifyFailedWriterEvidenceFn = verifyFailedWriterEvidence,
 ): Promise<string> {
   const teamInfo = requireLead(deps, sessionId)
-  const repositoryRoot = getTeamRepositoryBinding(deps.db, teamInfo.teamId).repositoryRoot
+  const binding = getTeamRepositoryBinding(deps.db, teamInfo.teamId)
+  const repositoryRoot = binding.repositoryRoot
 
-  const member = deps.db.query("SELECT status, worktree_branch, merge_state, merged_source_branch FROM team_member WHERE team_id = ? AND name = ?")
-    .get(teamInfo.teamId, args.member) as { status: string; worktree_branch: string | null; merge_state: string; merged_source_branch: string | null } | null
+  const member = deps.db.query(
+    `SELECT status, worktree_dir, worktree_branch, worktree_source_branch,
+            worktree_baseline_oid, merge_state, merged_source_branch
+     FROM team_member WHERE team_id = ? AND name = ?`,
+  ).get(teamInfo.teamId, args.member) as {
+    status: string
+    worktree_dir: string | null
+    worktree_branch: string | null
+    worktree_source_branch: string | null
+    worktree_baseline_oid: string | null
+    merge_state: string
+    merged_source_branch: string | null
+  } | null
   if (!member) throw new Error(`Teammate "${args.member}" not found in team "${teamInfo.teamName}"`)
 
   if (member.status !== "shutdown" && member.status !== "error") {
     throw new Error(`Teammate "${args.member}" is still active (status: ${member.status}). Shut them down first with team_shutdown.`)
   }
 
-  if (!member.worktree_branch) {
+  const failedWriter = member.status === "error" && (
+    member.worktree_branch !== null || member.worktree_source_branch !== null || member.worktree_baseline_oid !== null
+  )
+  if (!member.worktree_branch && !failedWriter) {
     return `No branch to merge for "${args.member}". Their work was already integrated or this was a read-only teammate.`
   }
 
   if (member.merge_state === "merged") {
+    if (!member.worktree_branch) return `Teammate "${args.member}" was already merged.`
     const deleted = await delBranch(member.worktree_branch, repositoryRoot)
     if (deleted) {
       deps.db.run("UPDATE team_member SET worktree_branch = NULL WHERE team_id = ? AND name = ?", [teamInfo.teamId, args.member])
@@ -45,7 +62,26 @@ export async function executeTeamMerge(
     return `Merge for "${args.member}" was already started. Inspect git diff and the branch before retrying; Ensemble will not reapply it automatically.`
   }
 
-  const branch = member.worktree_branch
+  let branch = member.worktree_branch
+  let verifiedEmpty = false
+  if (failedWriter) {
+    const evidence = await verifyFailedWriter({
+      repositoryRoot,
+      gitIdentity: binding.gitIdentity,
+      baselineOid: member.worktree_baseline_oid,
+      sourceBranch: member.worktree_source_branch,
+      preservedBranch: member.worktree_branch,
+      worktreeDir: member.worktree_dir,
+    })
+    if (evidence.kind === "unverifiable") {
+      return `Cannot verify merge safety for ${args.member}: ${evidence.reason}. No merge state was recorded; recover the branch or worktree evidence and retry team_merge.`
+    }
+    branch = evidence.sourceBranch
+    verifiedEmpty = evidence.kind === "empty"
+  }
+  if (!branch) {
+    return `Cannot verify merge safety for ${args.member}: no immutable source branch is available. No merge state was recorded.`
+  }
   let startedEventId: string | undefined
   const claimed = immediateTransaction(deps.db, () => {
     const result = deps.db.run(
@@ -62,6 +98,17 @@ export async function executeTeamMerge(
   })
   if (!claimed) return `Merge for "${args.member}" is already being handled.`
   log(`merge:start member=${args.member} branch=${branch}`)
+
+  if (verifiedEmpty) {
+    recordMergeCompletion(deps, teamInfo.teamId, args.member, branch, startedEventId)
+    const recordedBranch = member.worktree_branch
+    const deleted = recordedBranch ? await delBranch(recordedBranch, repositoryRoot) : false
+    if (deleted) {
+      deps.db.run("UPDATE team_member SET worktree_branch = NULL WHERE team_id = ? AND name = ?", [teamInfo.teamId, args.member])
+    }
+    log(`merge:verified-empty member=${args.member} source=${branch}`)
+    return `Verified ${args.member}'s failed writer branch is empty at its persisted baseline. No changes were applied.${recordedBranch && !deleted ? ` Branch cleanup failed; ${recordedBranch} remains recorded but will not be merged.` : ""}`
+  }
 
   // Block merge if lead has local changes to files the agent also modified
   try {
@@ -98,26 +145,38 @@ export async function executeTeamMerge(
   }
 
   // Record integration before branch deletion so a retry cannot reapply the squash.
-  immediateTransaction(deps.db, () => {
-    const merged = deps.db.run(
-      "UPDATE team_member SET merge_state = 'merged' WHERE team_id = ? AND name = ? AND merge_state = 'merging'",
-      [teamInfo.teamId, args.member],
-    )
-    if (merged.changes !== 1) throw new Error(`Merge state for "${args.member}" changed before completion could be recorded.`)
-    appendTeamEvent(deps.db, {
-      teamId: teamInfo.teamId,
-      kind: "merge.completed",
-      payload: { member_name: args.member },
-      causeEventId: startedEventId,
-    })
-  })
-  const deleted = await delBranch(branch, repositoryRoot)
+  recordMergeCompletion(deps, teamInfo.teamId, args.member, branch, startedEventId)
+  const recordedBranch = member.worktree_branch
+  const deleted = recordedBranch ? await delBranch(recordedBranch, repositoryRoot) : false
   if (deleted) {
     deps.db.run("UPDATE team_member SET worktree_branch = NULL WHERE team_id = ? AND name = ?", [teamInfo.teamId, args.member])
   }
 
   log(`merge:done member=${args.member} branch=${branch}`)
   return `Merged ${args.member}'s changes into your working directory (unstaged).${deleted ? "" : ` Branch cleanup failed; ${branch} remains recorded but will not be merged twice.`} Review with: git diff`
+}
+
+function recordMergeCompletion(
+  deps: ToolDeps,
+  teamId: string,
+  memberName: string,
+  sourceBranch: string,
+  causeEventId?: string,
+): void {
+  immediateTransaction(deps.db, () => {
+    const merged = deps.db.run(
+      `UPDATE team_member SET merge_state = 'merged', merged_source_branch = ?
+       WHERE team_id = ? AND name = ? AND merge_state = 'merging'`,
+      [sourceBranch, teamId, memberName],
+    )
+    if (merged.changes !== 1) throw new Error(`Merge state for "${memberName}" changed before completion could be recorded.`)
+    appendTeamEvent(deps.db, {
+      teamId,
+      kind: "merge.completed",
+      payload: { member_name: memberName },
+      causeEventId,
+    })
+  })
 }
 
 function recordMergeFailure(deps: ToolDeps, teamId: string, memberName: string, causeEventId?: string): void {
