@@ -59,14 +59,15 @@ export function mockClient(): PluginClient & { calls: Array<{ method: string; ar
       async create(options) {
         calls.push({ method: "worktree.create", args: [options] })
         const name = options.worktreeCreateInput?.name ?? "default"
-        return { data: { name, branch: `ensemble-${name}`, directory: `/tmp/worktree-${name}` } }
+        const prefix = options.directory === "/tmp/other-project" ? "/tmp/other-project-worktree" : "/tmp/worktree"
+        return { data: { name, branch: `ensemble-${name}`, directory: `${prefix}-${name}` } }
       },
       async remove(options) {
         calls.push({ method: "worktree.remove", args: [options] })
         return {}
       },
-      async list() {
-        calls.push({ method: "worktree.list", args: [] })
+      async list(options) {
+        calls.push({ method: "worktree.list", args: options ? [options] : [] })
         return { data: [] }
       },
       async reset(options) {
@@ -83,8 +84,8 @@ export function mockClient(): PluginClient & { calls: Array<{ method: string; ar
         calls.push({ method: "workspace.remove", args: [options] })
         return {}
       },
-      async list() {
-        calls.push({ method: "workspace.list", args: [] })
+      async list(options) {
+        calls.push({ method: "workspace.list", args: options ? [options] : [] })
         return { data: [] }
       },
     },
@@ -102,18 +103,29 @@ export function setupDeps(db?: EnsembleDatabase): ToolDeps & { client: ReturnTyp
     client: mockClient(),
     directory: "/tmp/test-project",
     config: { ...DEFAULT_CONFIG },
+    repositoryBindingOps: {
+      async canonicalControllerDirectory(directory) { return directory },
+      async verifyRepositoryRoot(directory) { return { repositoryRoot: directory, gitIdentity: `${directory}/.git` } },
+      async resolveGitRefOid() { return "baseline-oid" },
+      async resolveWorktreeIdentity(worktreeDir) {
+        return {
+          gitIdentity: worktreeDir.includes("other-project") ? "/tmp/other-project/.git" : "/tmp/test-project/.git",
+          headOid: "baseline-oid",
+        }
+      },
+    },
   }
 }
 
 /** Insert a team directly into the DB. */
 export function insertTeam(db: EnsembleDatabase, id: string, name: string, leadSession: string, status = "active") {
   db.run(
-    "INSERT OR IGNORE INTO project (id, name, path, status, time_created, time_updated) VALUES (?, ?, ?, 'active', ?, ?)",
-    ["/tmp/test-project", "test-project", "/tmp/test-project", Date.now(), Date.now()]
+    "INSERT OR IGNORE INTO project (id, name, path, git_identity, status, time_created, time_updated) VALUES (?, ?, ?, ?, 'active', ?, ?)",
+    ["/tmp/test-project", "test-project", "/tmp/test-project", "/tmp/test-project/.git", Date.now(), Date.now()]
   )
   db.run(
-    "INSERT INTO team (id, name, project_id, lead_session_id, status, delegate, time_created, time_updated) VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
-    [id, name, "/tmp/test-project", leadSession, status, Date.now(), Date.now()]
+    "INSERT INTO team (id, name, project_id, controller_directory, lead_session_id, status, delegate, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)",
+    [id, name, "/tmp/test-project", "/tmp/test-project", leadSession, status, Date.now(), Date.now()]
   )
 }
 

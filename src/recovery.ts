@@ -32,8 +32,9 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
   // Find stale members with branch info so we can preserve before aborting
   const stale = db.query(
     `SELECT tm.session_id, tm.worktree_branch, tm.worktree_dir, tm.name, tm.team_id,
-             tm.status, tm.execution_status, tm.retry_tripped,
-             t.name as team_name, COALESCE(p.slug, p.name) as project_name
+              tm.status, tm.execution_status, tm.retry_tripped,
+              t.name as team_name, COALESCE(p.slug, p.name) as project_name,
+              p.path as repository_root
       FROM team_member tm
       JOIN team t ON tm.team_id = t.id
       JOIN project p ON t.project_id = p.id
@@ -43,8 +44,9 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
         )
         AND t.status = 'active'
         AND tm.abort_recovery_state NOT IN ('checking', 'prompted')
-        AND (? IS NULL OR t.project_id = ? OR t.project_id = 'default')`
-    ).all(cwd ?? null, cwd ?? null) as Array<{
+        AND (? IS NULL OR t.controller_directory = ?
+          OR (t.controller_directory IS NULL AND (t.project_id = ? OR t.project_id = 'default')))`
+    ).all(cwd ?? null, cwd ?? null, cwd ?? null) as Array<{
       session_id: string
       worktree_branch: string | null
       worktree_dir: string | null
@@ -55,6 +57,7 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
       status: string
       execution_status: string
       retry_tripped: number
+      repository_root: string
     }>
 
   let liveSessions: Record<string, { type: string }> = {}
@@ -102,7 +105,7 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
       continue
     }
     const sourceBranch = resolution.sourceBranch
-    if (sourceBranch && !cwd) {
+    if (sourceBranch && !member.repository_root) {
       appendTeamEventBestEffort(db, {
         teamId: member.team_id,
         kind: "recovery.stage",
@@ -115,9 +118,9 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
       })
       continue
     }
-    if (cwd && sourceBranch) {
+    if (member.repository_root && sourceBranch) {
       const safeBranch = preservedBranchName(member.project_name, member.team_name, member.team_id, member.name)
-      const ok = await preserveBranch(sourceBranch, safeBranch, cwd)
+      const ok = await preserveBranch(sourceBranch, safeBranch, member.repository_root)
       if (!ok) {
         appendTeamEventBestEffort(db, {
           teamId: member.team_id,
@@ -249,34 +252,46 @@ function claimRecoveryMember(
  * Clean up orphaned worktrees from archived teams or members that no longer exist.
  * Compares worktrees on disk (via client.worktree.list) against active team members.
  */
-export async function recoverOrphanedWorktrees(db: Database, client: PluginClient): Promise<{ removed: number }> {
+export async function recoverOrphanedWorktrees(db: Database, client: PluginClient, controllerDirectory?: string): Promise<{ removed: number }> {
   let removed = 0
+  const globallyActiveWorktrees = new Set(
+    (db.query(
+      `SELECT tm.worktree_dir FROM team_member tm JOIN team t ON tm.team_id = t.id
+       WHERE tm.worktree_dir IS NOT NULL AND t.status = 'active'`,
+    ).all() as Array<{ worktree_dir: string }>).map(row => row.worktree_dir),
+  )
 
-  try {
-    const worktrees = await client.worktree.list()
-    if (!worktrees.data) return { removed: 0 }
+  const repositories = db.query(
+    `SELECT DISTINCT p.path AS repository_root
+     FROM team t JOIN project p ON p.id = t.project_id
+     WHERE (? IS NULL OR t.controller_directory = ?
+       OR (t.controller_directory IS NULL AND t.project_id = ?))
+       AND p.path <> ''`,
+  ).all(controllerDirectory ?? null, controllerDirectory ?? null, controllerDirectory ?? null) as Array<{ repository_root: string }>
 
-    // Get all active worktree directories from the DB
-    const activeWorktrees = new Set(
-      (db.query(
-        `SELECT tm.worktree_dir FROM team_member tm
-         JOIN team t ON tm.team_id = t.id
-         WHERE tm.worktree_dir IS NOT NULL AND t.status = 'active'`
-      ).all() as Array<{ worktree_dir: string }>).map(r => r.worktree_dir)
-    )
+  for (const repository of repositories) {
+    try {
+      const worktrees = await client.worktree.list({ directory: repository.repository_root })
+      if (!worktrees.data) continue
 
-    for (const wt of worktrees.data) {
-      // Only clean up worktrees created by ensemble (name starts with "ensemble-")
-      if (!wt.name.startsWith("ensemble-")) continue
-      if (activeWorktrees.has(wt.directory)) continue
+      const activeWorktrees = new Set(
+        (db.query(
+          `SELECT tm.worktree_dir FROM team_member tm
+           JOIN team t ON tm.team_id = t.id
+           JOIN project p ON p.id = t.project_id
+           WHERE tm.worktree_dir IS NOT NULL AND t.status = 'active' AND p.path = ?`,
+        ).all(repository.repository_root) as Array<{ worktree_dir: string }>).map(row => row.worktree_dir),
+      )
 
-      try {
-        await client.worktree.remove({ worktreeRemoveInput: { directory: wt.directory } })
-        removed++
-      } catch { /* best effort */ }
-    }
-  } catch {
-    // worktree.list may not be available — silently ignore
+      for (const wt of worktrees.data) {
+        if (!wt.name.startsWith("ensemble-") || activeWorktrees.has(wt.directory) || globallyActiveWorktrees.has(wt.directory)) continue
+
+        try {
+          await client.worktree.remove({ directory: repository.repository_root, worktreeRemoveInput: { directory: wt.directory } })
+          removed++
+        } catch { /* best effort */ }
+      }
+    } catch { /* worktree.list may not be available */ }
   }
 
   return { removed }
@@ -374,25 +389,25 @@ export function rehydrateRegistry(db: Database, registry: MemberRegistry): numbe
  * with no active members. Scoped carefully to avoid interfering with other
  * running OpenCode sessions that may have active teams.
  */
-export async function recoverOrphanedBranches(db: Database, cwd: string): Promise<{ removed: number }> {
+export async function recoverOrphanedBranches(db: Database, controllerDirectory: string): Promise<{ removed: number }> {
   let removed = 0
 
-  // Get archived team namespaces for this project that have NO active members.
-  // The team id namespace is current; team names are kept for legacy preserved branches.
   const archivedTeams = db.query(
-    `SELECT t.id, t.name, COALESCE(p.slug, p.name) as project_name FROM team t
-     JOIN project p ON t.project_id = p.id
+    `SELECT t.id, t.name, COALESCE(p.slug, p.name) as project_name, p.path as repository_root
+     FROM team t JOIN project p ON t.project_id = p.id
      WHERE t.status = 'archived'
-      AND t.project_id = ?
-     AND NOT EXISTS (
-        SELECT 1 FROM team_member tm
-        WHERE tm.team_id = t.id AND tm.status NOT IN ('shutdown', 'error')
-      )`
-  ).all(cwd) as Array<{ id: string; name: string; project_name: string }>
+       AND (t.controller_directory = ? OR (t.controller_directory IS NULL AND t.project_id = ?))
+       AND NOT EXISTS (
+         SELECT 1 FROM team_member tm
+         WHERE tm.team_id = t.id AND tm.status NOT IN ('shutdown', 'error')
+       )`,
+  ).all(controllerDirectory, controllerDirectory) as Array<{ id: string; name: string; project_name: string; repository_root: string }>
 
-  if (archivedTeams.length === 0) return { removed: 0 }
+  const roots = [...new Set(archivedTeams.map(team => team.repository_root))]
+  for (const repositoryRoot of roots) {
+    const repositoryTeams = archivedTeams.filter(team => team.repository_root === repositoryRoot)
 
-  const archivedPrefixes = archivedTeams.flatMap(t => [
+    const archivedPrefixes = repositoryTeams.flatMap(t => [
     `ensemble/preserved/${t.project_name}/${teamResourceSegment(t.name, t.id)}/`,
     `ensemble/preserved/${t.name}/`,
   ])
@@ -400,29 +415,30 @@ export async function recoverOrphanedBranches(db: Database, cwd: string): Promis
     (db.query(
       `SELECT worktree_branch, merged_source_branch FROM team_member tm
        JOIN team t ON t.id = tm.team_id
-       WHERE t.project_id = ? AND tm.merge_state IN ('none', 'merging')
+       JOIN project p ON p.id = t.project_id
+       WHERE p.path = ? AND tm.merge_state IN ('none', 'merging')
          AND (tm.worktree_branch IS NOT NULL OR tm.merged_source_branch IS NOT NULL)`,
-    ).all(cwd) as Array<{ worktree_branch: string | null; merged_source_branch: string | null }>)
+    ).all(repositoryRoot) as Array<{ worktree_branch: string | null; merged_source_branch: string | null }>)
       .flatMap(row => [row.worktree_branch, row.merged_source_branch])
       .filter((branch): branch is string => branch !== null),
   )
 
   // List all local branches matching ensemble/preserved/*
-  const result = await runCommand(["git", "branch", "--list", "ensemble/preserved/*"], { cwd })
+    const result = await runCommand(["git", "branch", "--list", "ensemble/preserved/*"], { cwd: repositoryRoot })
 
-  const branches = result.stdout.split("\n").map(b => b.trim().replace(/^\* /, "")).filter(Boolean)
+    const branches = result.stdout.split("\n").map(b => b.trim().replace(/^\* /, "")).filter(Boolean)
 
-  for (const branch of branches) {
-    if (!archivedPrefixes.some(prefix => branch.startsWith(prefix))) continue
-    if (protectedBranches.has(branch)) continue
+    for (const branch of branches) {
+      if (!archivedPrefixes.some(prefix => branch.startsWith(prefix)) || protectedBranches.has(branch)) continue
 
     try {
-      const deleteResult = await runCommand(["git", "branch", "-D", branch], { cwd })
+      const deleteResult = await runCommand(["git", "branch", "-D", branch], { cwd: repositoryRoot })
       if (deleteResult.exitCode === 0) {
         removed++
         log(`recovery:branch:deleted branch=${branch}`)
       }
-    } catch { /* best effort */ }
+      } catch { /* best effort */ }
+    }
   }
 
   return { removed }

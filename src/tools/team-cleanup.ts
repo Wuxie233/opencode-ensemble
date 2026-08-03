@@ -11,6 +11,7 @@ import { sendLeadAlert } from "../messaging"
 import { recomputeCurrentPhase } from "../task-phase"
 import { appendMemberTransition, releaseMemberTasks } from "../telemetry"
 import { resolveAbortBranch, type AbortBranchResolution } from "../abort-preservation"
+import { getTeamRepositoryBinding } from "../repository-binding"
 
 type PurgeApprovalFn = (preview: string) => Promise<void>
 type ListBranchesFn = (namespace: string, cwd: string) => Promise<string[]>
@@ -21,6 +22,7 @@ interface PurgeTarget {
   name: string
   project_id: string
   project_name: string
+  repository_root: string
   time_updated: number
 }
 
@@ -83,15 +85,15 @@ function resolvePurgeTargets(deps: ToolDeps, purge: string[]): PurgeTarget[] {
   }
 
   if (purge.includes("*")) {
-    return deps.db.query("SELECT t.id, t.name, t.project_id, COALESCE(p.slug, p.name) as project_name, t.time_updated FROM team t JOIN project p ON t.project_id = p.id WHERE t.status = 'archived' AND t.project_id = ? ORDER BY t.time_updated DESC, t.name ASC")
+    return deps.db.query("SELECT t.id, t.name, t.project_id, COALESCE(p.slug, p.name) as project_name, p.path as repository_root, t.time_updated FROM team t JOIN project p ON t.project_id = p.id WHERE t.status = 'archived' AND t.controller_directory = ? ORDER BY t.time_updated DESC, t.name ASC")
       .all(deps.directory) as PurgeTarget[]
   }
 
   const uniqueNames = [...new Set(purge)]
   const rows = uniqueNames.map(name => ({
     name,
-    teams: deps.db.query("SELECT t.id, t.name, t.project_id, COALESCE(p.slug, p.name) as project_name, t.status, t.time_updated FROM team t JOIN project p ON t.project_id = p.id WHERE t.name = ? AND t.project_id = ? ORDER BY t.time_updated DESC")
-      .all(name, deps.directory) as Array<{ id: string; name: string; project_id: string; project_name: string; status: string; time_updated: number }>,
+    teams: deps.db.query("SELECT t.id, t.name, t.project_id, COALESCE(p.slug, p.name) as project_name, p.path as repository_root, t.status, t.time_updated FROM team t JOIN project p ON t.project_id = p.id WHERE t.name = ? AND t.controller_directory = ? ORDER BY t.time_updated DESC")
+      .all(name, deps.directory) as Array<PurgeTarget & { status: string }>,
   }))
 
   const missing = rows.filter(row => row.teams.length === 0).map(row => row.name)
@@ -225,8 +227,9 @@ function countStaleBranchRefs(deps: ToolDeps, target: PurgeTarget): number {
 async function existingWorktreeDirs(deps: ToolDeps, resources: PurgeMemberResource[]): Promise<Set<string>> {
   if (!resources.some(resource => resource.worktree_dir)) return new Set()
   try {
-    const result = await deps.client.worktree.list()
-    return new Set((result.data ?? []).map(worktree => worktree.directory))
+    const roots = [...new Set(resources.map(resource => getTeamRepositoryBinding(deps.db, resource.team_id).repositoryRoot))]
+    const listed = await Promise.all(roots.map(directory => deps.client.worktree.list({ directory })))
+    return new Set(listed.flatMap(result => result.data ?? []).map(worktree => worktree.directory))
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     throw new Error(`Cannot purge archived teams: failed to list worktrees before stale resource cleanup: ${message}`)
@@ -236,8 +239,9 @@ async function existingWorktreeDirs(deps: ToolDeps, resources: PurgeMemberResour
 async function existingWorkspaceIds(deps: ToolDeps, resources: PurgeMemberResource[]): Promise<Set<string>> {
   if (!resources.some(resource => resource.workspace_id)) return new Set()
   try {
-    const result = await deps.client.workspace.list()
-    return new Set((result.data ?? []).map(workspace => workspace.id))
+    const roots = [...new Set(resources.map(resource => getTeamRepositoryBinding(deps.db, resource.team_id).repositoryRoot))]
+    const listed = await Promise.all(roots.map(directory => deps.client.workspace.list({ directory })))
+    return new Set(listed.flatMap(result => result.data ?? []).map(workspace => workspace.id))
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     throw new Error(`Cannot purge archived teams: failed to list workspaces before stale resource cleanup: ${message}`)
@@ -252,10 +256,11 @@ async function cleanupStalePurgeResources(deps: ToolDeps, targets: PurgeTarget[]
   const workspaceIds = await existingWorkspaceIds(deps, resources)
 
   for (const resource of resources) {
+    const repositoryRoot = getTeamRepositoryBinding(deps.db, resource.team_id).repositoryRoot
     if (resource.workspace_id) {
       if (workspaceIds.has(resource.workspace_id)) {
         try {
-          await deps.client.workspace.remove({ id: resource.workspace_id })
+          await deps.client.workspace.remove({ directory: repositoryRoot, id: resource.workspace_id })
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
           throw new Error(`Failed to remove stale workspace for ${resource.team_name}/${resource.member_name}: ${message}`)
@@ -277,7 +282,7 @@ async function cleanupStalePurgeResources(deps: ToolDeps, targets: PurgeTarget[]
           throw new Error(`Cannot purge archived teams: ${resource.team_name}/${resource.member_name} has uncommitted changes in archived worktree ${resource.worktree_dir}.`)
         }
         try {
-          await deps.client.worktree.remove({ worktreeRemoveInput: { directory: resource.worktree_dir } })
+          await deps.client.worktree.remove({ directory: repositoryRoot, worktreeRemoveInput: { directory: resource.worktree_dir } })
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
           throw new Error(`Failed to remove stale worktree for ${resource.team_name}/${resource.member_name}: ${message}`)
@@ -445,7 +450,11 @@ export async function executeTeamCleanup(
 
     validatePurgeTargetsStillArchived(deps, targets)
     validatePurgeResources(deps, targets)
-    const branchesByTeam = await collectPreservedBranches(targets, deps.directory, _listBranches ?? listPreservedBranches)
+    const branchesByTeam = new Map<string, string[]>()
+    for (const target of targets) {
+      const branches = await collectPreservedBranches([target], target.repository_root, _listBranches ?? listPreservedBranches)
+      branchesByTeam.set(target.id, branches.get(target.id) ?? [])
+    }
     const preview = buildPurgePreview(deps, targets, branchesByTeam)
     if (!args.confirm_purge) {
       const confirmToken = deps.purgeApprovals.create(sessionId, targets.map(target => target.id))
@@ -462,9 +471,11 @@ export async function executeTeamCleanup(
     await cleanupStalePurgeResources(deps, targets, isDirty)
 
     validatePurgeResources(deps, targets)
-    await deleteStaleEnsembleBranches(collectStaleEnsembleBranches(deps, targets), deps.directory, delBranch, _branchExists ?? branchExists)
-    const finalBranchesByTeam = await collectPreservedBranches(targets, deps.directory, _listBranches ?? listPreservedBranches)
-    await deletePreservedBranches(finalBranchesByTeam, deps.directory, delBranch)
+    for (const target of targets) {
+      await deleteStaleEnsembleBranches(collectStaleEnsembleBranches(deps, [target]), target.repository_root, delBranch, _branchExists ?? branchExists)
+      const finalBranches = await collectPreservedBranches([target], target.repository_root, _listBranches ?? listPreservedBranches)
+      await deletePreservedBranches(finalBranches, target.repository_root, delBranch)
+    }
 
     deleteArchivedTeams(deps, targets)
 
@@ -477,11 +488,12 @@ export async function executeTeamCleanup(
     teamInfo = requireLead(deps, sessionId)
   } catch (error) {
     const archived = deps.db.query(
-      "SELECT name FROM team WHERE lead_session_id = ? AND project_id = ? AND status = 'archived' ORDER BY time_updated DESC LIMIT 1",
+      "SELECT name FROM team WHERE lead_session_id = ? AND controller_directory = ? AND status = 'archived' ORDER BY time_updated DESC LIMIT 1",
     ).get(sessionId, deps.directory) as { name: string } | null
     if (archived) return `Team "${archived.name}" was already cleaned up. No action was needed.`
     throw error
   }
+  const repositoryRoot = getTeamRepositoryBinding(deps.db, teamInfo.teamId).repositoryRoot
 
   const members = deps.db.query("SELECT name, session_id, status, worktree_dir, worktree_branch, workspace_id, merge_state FROM team_member WHERE team_id = ?")
     .all(teamInfo.teamId) as Array<{ name: string; session_id: string; status: string; worktree_dir: string | null; worktree_branch: string | null; workspace_id: string | null; merge_state: string }>
@@ -537,7 +549,7 @@ export async function executeTeamCleanup(
       if (!sourceBranch) continue
       const resource = getTeamResourceParts(deps.db, teamInfo.teamId)
       const safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, member.name)
-      const ok = await preserve(sourceBranch, safeBranch, deps.directory)
+      const ok = await preserve(sourceBranch, safeBranch, repositoryRoot)
       if (!ok) {
         sendLeadAlert(deps.db, deps.client, {
           teamId: teamInfo.teamId,
@@ -622,7 +634,7 @@ export async function executeTeamCleanup(
   for (const member of mergedWithBranch) {
     const branch = member.worktree_branch
     if (!branch) continue
-    if (await delBranch(branch, deps.directory)) {
+    if (await delBranch(branch, repositoryRoot)) {
       deps.db.run("UPDATE team_member SET worktree_branch = NULL WHERE team_id = ? AND name = ?", [teamInfo.teamId, member.name])
       member.worktree_branch = null
     } else {
@@ -634,13 +646,13 @@ export async function executeTeamCleanup(
   for (const member of members) {
     if (member.workspace_id) {
       try {
-        await deps.client.workspace.remove({ id: member.workspace_id })
+        await deps.client.workspace.remove({ directory: repositoryRoot, id: member.workspace_id })
         deps.db.run("UPDATE team_member SET workspace_id = NULL WHERE team_id = ? AND name = ?", [teamInfo.teamId, member.name])
       } catch { /* best effort */ }
     }
     if (member.worktree_dir) {
       try {
-        await deps.client.worktree.remove({ worktreeRemoveInput: { directory: member.worktree_dir } })
+        await deps.client.worktree.remove({ directory: repositoryRoot, worktreeRemoveInput: { directory: member.worktree_dir } })
         deps.db.run("UPDATE team_member SET worktree_dir = NULL WHERE team_id = ? AND name = ?", [teamInfo.teamId, member.name])
       } catch { /* best effort */ }
     }

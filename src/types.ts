@@ -1,6 +1,7 @@
 import type { Database } from "./db"
 import type { MemberRegistry, DescendantTracker, PendingPurgeApprovals } from "./state"
 import type { EnsembleConfig } from "./config"
+import type { RepositoryBindingOps } from "./repository-binding"
 
 /**
  * Shared dependencies injected into every tool's execute function.
@@ -17,6 +18,8 @@ export interface ToolDeps {
   directory: string
   /** Plugin configuration. */
   config: Required<EnsembleConfig>
+  /** Injectable Git binding operations; production uses the default implementation. */
+  repositoryBindingOps?: RepositoryBindingOps
 }
 
 /** A single permission rule for session-level enforcement. */
@@ -63,15 +66,15 @@ export interface PluginClient {
     selectSession(options: { sessionID?: string }): Promise<unknown>
   }
   worktree: {
-    create(options: { worktreeCreateInput?: { name?: string; startCommand?: string } }): Promise<{ data?: { name: string; branch: string; directory: string } }>
-    remove(options: { worktreeRemoveInput?: { directory: string } }): Promise<unknown>
-    list(): Promise<{ data?: Array<{ name: string; branch: string; directory: string }> }>
-    reset(options: { worktreeResetInput?: { directory: string } }): Promise<unknown>
+    create(options: { directory?: string; worktreeCreateInput?: { name?: string; startCommand?: string } }): Promise<{ data?: { name: string; branch: string; directory: string } }>
+    remove(options: { directory?: string; worktreeRemoveInput?: { directory: string } }): Promise<unknown>
+    list(options?: { directory?: string }): Promise<{ data?: Array<{ name: string; branch: string; directory: string }> }>
+    reset(options: { directory?: string; worktreeResetInput?: { directory: string } }): Promise<unknown>
   }
   workspace: {
-    create(options: { id?: string; type?: string; branch?: string | null; extra?: unknown | null }): Promise<{ data?: { id: string; type: string; branch: string | null; directory: string | null; projectID: string } }>
-    remove(options: { id: string }): Promise<unknown>
-    list(): Promise<{ data?: Array<{ id: string; type: string; branch: string | null; directory: string | null; projectID: string }> }>
+    create(options: { directory?: string; id?: string; type?: string; branch?: string | null; extra?: unknown | null }): Promise<{ data?: { id: string; type: string; branch: string | null; directory: string | null; projectID: string } }>
+    remove(options: { directory?: string; id: string }): Promise<unknown>
+    list(options?: { directory?: string }): Promise<{ data?: Array<{ id: string; type: string; branch: string | null; directory: string | null; projectID: string }> }>
   }
 }
 

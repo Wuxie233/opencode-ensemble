@@ -8,6 +8,7 @@ import { getTeamResourceParts, preserveBranch, preservedBranchName, resolveWorkt
 import type { CommitCountFn, IsDirtyFn } from "./shared"
 import { checkWorktreeDirty, countBranchCommits, requireLead } from "./shared"
 import { appendMemberTransition, releaseMemberTasks } from "../telemetry"
+import { getTeamRepositoryBinding } from "../repository-binding"
 
 const TERMINAL_EXECUTION_STATUSES = new Set(["completed", "cancelled", "failed", "timed_out"])
 
@@ -27,6 +28,7 @@ export async function executeTeamShutdown(
   resolveBranch: ResolveWorktreeBranchFn = resolveWorktreeBranch,
 ): Promise<string> {
   const teamInfo = requireLead(deps, sessionId)
+  const repositoryRoot = getTeamRepositoryBinding(deps.db, teamInfo.teamId).repositoryRoot
 
   const member = deps.db.query("SELECT session_id, status, execution_status, worktree_branch, worktree_dir FROM team_member WHERE team_id = ? AND name = ?")
     .get(teamInfo.teamId, args.member) as { session_id: string; status: string; execution_status: string; worktree_branch: string | null; worktree_dir: string | null } | null
@@ -81,7 +83,7 @@ export async function executeTeamShutdown(
   if (resolution.sourceBranch) {
     const resource = getTeamResourceParts(deps.db, teamInfo.teamId)
     const safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, args.member)
-    const ok = await preserve(resolution.sourceBranch, safeBranch, deps.directory)
+    const ok = await preserve(resolution.sourceBranch, safeBranch, repositoryRoot)
     if (!ok) {
       sendLeadAlert(deps.db, deps.client, {
         teamId: teamInfo.teamId,
@@ -136,6 +138,7 @@ export async function abortShutdownRequestedMember(
   preserve: PreserveBranchFn = preserveBranch,
   resolveBranch: ResolveWorktreeBranchFn = resolveWorktreeBranch,
 ): Promise<boolean> {
+  const repositoryRoot = getTeamRepositoryBinding(deps.db, teamId).repositoryRoot
   const sourceBranch = await resolvePreservationSource(
     deps,
     teamId,
@@ -147,7 +150,7 @@ export async function abortShutdownRequestedMember(
   if (sourceBranch) {
     const resource = getTeamResourceParts(deps.db, teamId)
     const safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, memberName)
-    const ok = await preserve(sourceBranch, safeBranch, deps.directory)
+    const ok = await preserve(sourceBranch, safeBranch, repositoryRoot)
     if (!ok) {
       log(`busy_while_shutdown:branch:preserve-failed src=${sourceBranch} target=${safeBranch}`)
       sendLeadAlert(deps.db, deps.client, {
@@ -197,6 +200,7 @@ async function preserveAndAbort(
   preserve: PreserveBranchFn,
   resolveBranch: ResolveWorktreeBranchFn,
 ): Promise<void> {
+  const repositoryRoot = getTeamRepositoryBinding(deps.db, teamId).repositoryRoot
   const sourceBranch = await resolvePreservationSource(
     deps,
     teamId,
@@ -210,7 +214,7 @@ async function preserveAndAbort(
   if (sourceBranch) {
     const resource = getTeamResourceParts(deps.db, teamId)
     const safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, memberName)
-    const ok = await preserve(sourceBranch, safeBranch, deps.directory)
+    const ok = await preserve(sourceBranch, safeBranch, repositoryRoot)
     if (ok) {
       preservedBranch = safeBranch
       log(`shutdown:branch:preserved src=${sourceBranch} target=${safeBranch}`)
@@ -310,9 +314,10 @@ async function getBranchStatus(
   if (!row?.worktree_branch) return ""
 
   const branch = row.worktree_branch
+  const repositoryRoot = getTeamRepositoryBinding(deps.db, teamId).repositoryRoot
   const parts: string[] = []
 
-  const commits = await commitCount(branch, deps.directory)
+  const commits = await commitCount(branch, repositoryRoot)
   // Best-effort dirty check — worktree may already be deleted by session.abort() race
   const dirty = worktreeDir ? await isDirty(worktreeDir).catch(() => false) : false
 

@@ -11,6 +11,7 @@ import {
 } from "./tools/merge-helper"
 import { resolveAbortBranch, type AbortBranchResolution } from "./abort-preservation"
 import { appendTeamEventBestEffort } from "./team-event"
+import { getTeamRepositoryBinding } from "./repository-binding"
 
 const activeReaborts = new Map<string, Promise<boolean>>()
 
@@ -82,9 +83,10 @@ export class TerminalLivenessGuard {
     }
     const sourceBranch = resolution.sourceBranch
     if (sourceBranch) {
+      const repositoryRoot = getTeamRepositoryBinding(this.deps.db, member.team_id).repositoryRoot
       const resource = getTeamResourceParts(this.deps.db, member.team_id)
       const safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, member.name)
-      if (!await this.preserve(sourceBranch, safeBranch, this.deps.directory)) {
+      if (!await this.preserve(sourceBranch, safeBranch, repositoryRoot)) {
         this.alertPreservationFailure(member, status, `branch ${sourceBranch} could not be preserved`)
         return true
       }

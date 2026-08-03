@@ -10,6 +10,7 @@ import { recomputeCurrentPhase } from "../task-phase"
 import { appendTeamEvent } from "../team-event"
 import { immediateTransaction } from "../db"
 import { resolveProfile } from "../profiles"
+import { getTeamRepositoryBinding, repositoryBindingOps } from "../repository-binding"
 import { parseTaskResult } from "../result-parser"
 import { renderError } from "../error"
 
@@ -218,8 +219,13 @@ async function executeTeamSpawnLocked(
   if (!isReadOnly && args.worktree === false) {
     throw new Error(`Ensemble profile "${profile.name}" is a writer and requires an isolated worktree`)
   }
-  if (!isReadOnly && isWorktreeDirectory(deps.directory)) {
-    throw new Error(`Ensemble profile "${profile.name}" cannot create an isolated writer worktree from ${deps.directory}`)
+  const binding = getTeamRepositoryBinding(deps.db, teamInfo.teamId)
+  const repositoryOps = deps.repositoryBindingOps ?? repositoryBindingOps
+  if (!isReadOnly && !binding.gitIdentity) {
+    throw new Error(`Team "${teamInfo.teamName}" has no verified Git identity; recreate it with team_create before spawning a writer`)
+  }
+  if (!isReadOnly && isWorktreeDirectory(binding.repositoryRoot)) {
+    throw new Error(`Ensemble profile "${profile.name}" cannot create an isolated writer worktree from ${binding.repositoryRoot}`)
   }
   const memberCount = (deps.db.query("SELECT COUNT(*) as c FROM team_member WHERE team_id = ?").get(teamInfo.teamId) as { c: number }).c
   const resolvedModel = resolveModel(args.model, runtimeAgent, memberCount, deps.config)
@@ -237,7 +243,7 @@ async function executeTeamSpawnLocked(
     : undefined
   const claimEventId = claimedTask?.claimEventId
 
-  const useWorktree = args.worktree !== false && !isReadOnly && !isWorktreeDirectory(deps.directory)
+  const useWorktree = args.worktree !== false && !isReadOnly && !isWorktreeDirectory(binding.repositoryRoot)
   const usePlanApproval = args.plan_approval === true
 
   log(`spawn:start name=${args.name} profile=${profile.name} agent=${runtimeAgent} worktree=${useWorktree}`)
@@ -245,6 +251,8 @@ async function executeTeamSpawnLocked(
   // Create worktree if enabled
   let worktreeDir: string | null = null
   let worktreeBranch: string | null = null
+  let worktreeSourceBranch: string | null = null
+  let worktreeBaselineOid: string | null = null
 
   if (useWorktree) {
     const resource = getTeamResourceParts(deps.db, teamInfo.teamId)
@@ -252,16 +260,33 @@ async function executeTeamSpawnLocked(
     try {
       log(`spawn:worktree:start name=${args.name}`)
       const result = await withTimeout(
-        deps.client.worktree.create({ worktreeCreateInput: { name: worktreeName } }),
+        deps.client.worktree.create({ directory: binding.repositoryRoot, worktreeCreateInput: { name: worktreeName } }),
         getSpawnTimeout(), `worktree.create for "${args.name}"`
       )
       if (!result.data) throw new Error("worktree.create returned no worktree")
       worktreeDir = result.data.directory
       worktreeBranch = result.data.branch
+      if (!worktreeBranch.trim()) throw new Error("worktree.create returned an empty branch")
+      const worktreeIdentity = await repositoryOps.resolveWorktreeIdentity(worktreeDir)
+      if (worktreeIdentity.gitIdentity !== binding.gitIdentity) {
+        throw new Error("created worktree belongs to a different Git repository")
+      }
+      const sourceOid = await repositoryOps.resolveGitRefOid(binding.repositoryRoot, `refs/heads/${worktreeBranch}`)
+      if (!sourceOid) throw new Error(`created worktree source branch ${worktreeBranch} could not be verified`)
+      if (sourceOid !== worktreeIdentity.headOid) {
+        throw new Error(`created worktree branch ${worktreeBranch} does not match its HEAD`)
+      }
+      worktreeSourceBranch = worktreeBranch
+      worktreeBaselineOid = sourceOid
       log(`spawn:worktree:done name=${args.name} dir=${worktreeDir}`)
     } catch (err) {
       const detail = renderError(err)
       log(`spawn:worktree:failed name=${args.name} err=${detail}`)
+      if (worktreeDir) {
+        try {
+          await deps.client.worktree.remove({ directory: binding.repositoryRoot, worktreeRemoveInput: { directory: worktreeDir } })
+        } catch { /* best effort */ }
+      }
       rollbackSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name, claimEventId)
       try {
         await deps.client.tui.showToast({
@@ -282,7 +307,7 @@ async function executeTeamSpawnLocked(
     try {
       log(`spawn:workspace:start name=${args.name}`)
       const wsResult = await withTimeout(
-        deps.client.workspace.create({ branch: worktreeBranch }),
+        deps.client.workspace.create({ directory: binding.repositoryRoot, branch: worktreeBranch }),
         getSpawnTimeout(), `workspace.create for "${args.name}"`
       )
       if (wsResult.data) {
@@ -348,6 +373,7 @@ async function executeTeamSpawnLocked(
         parentID: sessionId,
         title: `${args.name} (@${profile.name} teammate)`,
         permission,
+        directory: workspaceId ? binding.repositoryRoot : (worktreeDir ?? binding.repositoryRoot),
         ...(workspaceId ? { workspaceID: workspaceId } : {}),
       }),
       getSpawnTimeout(), `session.create for "${args.name}"`
@@ -362,10 +388,10 @@ async function executeTeamSpawnLocked(
     spawnFailures.set(teamInfo.teamId, { count: (prev?.count ?? 0) + 1, lastError: errMsg })
     // Rollback workspace and worktree if session creation failed
     if (workspaceId) {
-      try { await deps.client.workspace.remove({ id: workspaceId }) } catch { /* best effort */ }
+      try { await deps.client.workspace.remove({ directory: binding.repositoryRoot, id: workspaceId }) } catch { /* best effort */ }
     }
     if (worktreeDir) {
-      try { await deps.client.worktree.remove({ worktreeRemoveInput: { directory: worktreeDir } }) } catch { /* best effort */ }
+      try { await deps.client.worktree.remove({ directory: binding.repositoryRoot, worktreeRemoveInput: { directory: worktreeDir } }) } catch { /* best effort */ }
     }
     rollbackSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name, claimEventId)
     throw new Error(`Failed to create session for teammate "${args.name}": ${errMsg}`)
@@ -373,10 +399,10 @@ async function executeTeamSpawnLocked(
 
   if (!childSessionId) {
     if (workspaceId) {
-      try { await deps.client.workspace.remove({ id: workspaceId }) } catch { /* best effort */ }
+      try { await deps.client.workspace.remove({ directory: binding.repositoryRoot, id: workspaceId }) } catch { /* best effort */ }
     }
     if (worktreeDir) {
-      try { await deps.client.worktree.remove({ worktreeRemoveInput: { directory: worktreeDir } }) } catch { /* best effort */ }
+      try { await deps.client.worktree.remove({ directory: binding.repositoryRoot, worktreeRemoveInput: { directory: worktreeDir } }) } catch { /* best effort */ }
     }
     rollbackSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name, claimEventId)
     throw new Error("Failed to create teammate session")
@@ -391,9 +417,9 @@ async function executeTeamSpawnLocked(
   try {
     immediateTransaction(deps.db, () => {
       deps.db.run(
-        `INSERT INTO team_member (team_id, name, session_id, agent, profile, status, execution_status, model, prompt, worktree_dir, worktree_branch, workspace_id, plan_approval, time_created, time_updated)
-         VALUES (?, ?, ?, ?, ?, 'busy', 'starting', ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [teamInfo.teamId, args.name, childSessionId, runtimeAgent, profile.name, resolvedModel ?? null, args.prompt, worktreeDir, worktreeBranch, workspaceId, planApproval, now, now]
+        `INSERT INTO team_member (team_id, name, session_id, agent, profile, status, execution_status, model, prompt, worktree_dir, worktree_branch, worktree_source_branch, worktree_baseline_oid, workspace_id, plan_approval, time_created, time_updated)
+         VALUES (?, ?, ?, ?, ?, 'busy', 'starting', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [teamInfo.teamId, args.name, childSessionId, runtimeAgent, profile.name, resolvedModel ?? null, args.prompt, worktreeDir, worktreeBranch, worktreeSourceBranch, worktreeBaselineOid, workspaceId, planApproval, now, now]
       )
       appendTeamEvent(deps.db, {
         teamId: teamInfo.teamId,
@@ -418,7 +444,7 @@ async function executeTeamSpawnLocked(
     if (worktreeBranch) {
       const resource = getTeamResourceParts(deps.db, teamInfo.teamId)
       safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, args.name)
-      const ok = await preserve(worktreeBranch, safeBranch, deps.directory)
+      const ok = await preserve(worktreeBranch, safeBranch, binding.repositoryRoot)
       if (!ok) {
         try {
           sendLeadAlert(deps.db, deps.client, {
@@ -629,7 +655,7 @@ async function executeTeamSpawnLocked(
         if (worktreeBranch) {
           const resource = getTeamResourceParts(deps.db, teamInfo.teamId)
           safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, args.name)
-          const ok = await preserve(worktreeBranch, safeBranch, deps.directory)
+          const ok = await preserve(worktreeBranch, safeBranch, binding.repositoryRoot)
           if (!ok) {
             sendLeadAlert(deps.db, deps.client, {
               teamId: teamInfo.teamId,
@@ -694,7 +720,7 @@ async function executeTeamSpawnLocked(
         }
         if (workspaceId) {
           try {
-            await deps.client.workspace.remove({ id: workspaceId })
+            await deps.client.workspace.remove({ directory: binding.repositoryRoot, id: workspaceId })
           } catch (cleanupError) {
             alertCleanupFailure("workspace removal", cleanupError)
             return
@@ -702,7 +728,7 @@ async function executeTeamSpawnLocked(
         }
         if (worktreeDir) {
           try {
-            await deps.client.worktree.remove({ worktreeRemoveInput: { directory: worktreeDir } })
+            await deps.client.worktree.remove({ directory: binding.repositoryRoot, worktreeRemoveInput: { directory: worktreeDir } })
           } catch (cleanupError) {
             alertCleanupFailure("worktree removal", cleanupError)
             return

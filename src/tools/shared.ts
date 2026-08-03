@@ -1,6 +1,7 @@
 import type { ToolDeps } from "../types"
 import { findTeamBySession } from "../types"
 import { runCommand } from "../process"
+export { getTeamRepositoryBinding } from "../repository-binding"
 
 /** Function type for dirty worktree check — injectable for testing. */
 export type IsDirtyFn = (dir: string) => Promise<boolean>

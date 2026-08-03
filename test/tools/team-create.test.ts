@@ -20,11 +20,47 @@ describe("team_create", () => {
     expect(row.lead_session_id).toBe("lead-sess")
     expect(row.project_id).toBe("/tmp/test-project")
     expect(row.status).toBe("active")
+    expect(row.controller_directory).toBe("/tmp/test-project")
 
-    const project = deps.db.query("SELECT id, name, path FROM project WHERE id = ?").get("/tmp/test-project") as Record<string, unknown>
+    const project = deps.db.query("SELECT id, name, path, git_identity FROM project WHERE id = ?").get("/tmp/test-project") as Record<string, unknown>
     expect(project.path).toBe("/tmp/test-project")
     expect(typeof project.name).toBe("string")
     expect(project.name).not.toBe("test-project")
+    expect(project.git_identity).toBe("/tmp/test-project/.git")
+  })
+
+  test("binds an explicit nested target separately from the controller directory", async () => {
+    deps.directory = "/controller"
+    deps.repositoryBindingOps = {
+      ...deps.repositoryBindingOps!,
+      async canonicalControllerDirectory() { return "/controller" },
+      async verifyRepositoryRoot() { return { repositoryRoot: "/controller/nested", gitIdentity: "/controller/nested/.git" } },
+    }
+
+    await executeTeamCreate(deps, { name: "nested", repository_root: "/controller/nested" }, "nested-lead")
+
+    expect(deps.db.query(
+      `SELECT t.project_id, t.controller_directory, p.path, p.git_identity
+       FROM team t JOIN project p ON p.id = t.project_id WHERE t.name = 'nested'`,
+    ).get()).toEqual({
+      project_id: "/controller/nested",
+      controller_directory: "/controller",
+      path: "/controller/nested",
+      git_identity: "/controller/nested/.git",
+    })
+  })
+
+  test("rejects a repository replaced under an existing canonical path", async () => {
+    deps.db.run(
+      "INSERT INTO project (id, name, path, git_identity, status, time_created, time_updated) VALUES ('/tmp/test-project', 'existing', '/tmp/test-project', '/tmp/test-project/.git', 'active', 1, 1)",
+    )
+    deps.repositoryBindingOps = {
+      ...deps.repositoryBindingOps!,
+      async verifyRepositoryRoot() { return { repositoryRoot: "/tmp/test-project", gitIdentity: "/replacement/.git" } },
+    }
+
+    await expect(executeTeamCreate(deps, { name: "replacement" }, "replacement-lead"))
+      .rejects.toThrow("Git identity changed")
   })
 
   test("uses explicit project name on first team in a project", async () => {

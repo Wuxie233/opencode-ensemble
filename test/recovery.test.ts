@@ -268,7 +268,7 @@ describe("recoverStaleMembers", () => {
     expect((db.query("SELECT status FROM team_member WHERE name = 'alice'").get() as { status: string }).status).toBe("busy")
     expect((db.query("SELECT status, assignee FROM team_task WHERE id = 'task-a'").get() as { status: string; assignee: string })).toEqual({ status: "in_progress", assignee: "alice" })
     expect(client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
-    expect((db.query("SELECT content FROM team_message WHERE team_id = 't1' AND to_name = 'lead'").get() as { content: string }).content).toContain("could not be preserved")
+    expect((db.query("SELECT content FROM team_message WHERE team_id = 't1' AND to_name = 'lead'").get() as { content: string }).content).toContain("project directory")
     const failed = db.query(
       "SELECT payload FROM team_event WHERE team_id = 't1' AND kind = 'recovery.stage' AND json_extract(payload, '$.stage') = 'failed'",
     ).get() as { payload: string }
@@ -370,6 +370,8 @@ describe("recoverStaleMembers", () => {
       await git(repo, ["branch", "live-alice"])
       await git(repo, ["checkout", "live-alice"])
       insertTeam(db, "t1", "my-team", "lead-sess")
+      db.run("INSERT INTO project (id, name, path, status, time_created, time_updated) VALUES (?, 'recovery', ?, 'active', 1, 1)", [repo, repo])
+      db.run("UPDATE team SET project_id = ?, controller_directory = ? WHERE id = 't1'", [repo, repo])
       insertMember(db, "t1", "alice", "sess-1", "busy", "running")
       db.run("UPDATE team_member SET worktree_branch = 'live-alice', worktree_dir = ? WHERE team_id = 't1' AND name = 'alice'", [repo])
       let abortAttempts = 0
@@ -434,6 +436,8 @@ describe("recoverStaleMembers", () => {
       await git(repo, ["branch", "live-alice"])
       await git(repo, ["checkout", "live-alice"])
       insertTeam(db, "t1", "my-team", "lead-sess")
+      db.run("INSERT INTO project (id, name, path, status, time_created, time_updated) VALUES (?, 'recovery', ?, 'active', 1, 1)", [repo, repo])
+      db.run("UPDATE team SET project_id = ?, controller_directory = ? WHERE id = 't1'", [repo, repo])
       insertMember(db, "t1", "alice", "sess-1", "busy", "running")
       const resource = getTeamResourceParts(db, "t1")
       const safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, "alice")
@@ -817,6 +821,8 @@ describe("recoverOrphanedWorktrees", () => {
     db = setupDb()
     client = mockClient()
     insertTeam(db, "t1", "my-team", "lead-sess")
+    db.run("INSERT INTO project (id, name, path, status, time_created, time_updated) VALUES ('p1', 'p1', '/tmp/test-project', 'active', 1, 1)")
+    db.run("UPDATE team SET project_id = 'p1', controller_directory = '/tmp/test-project' WHERE id = 't1'")
   })
 
   test("removes orphaned ensemble worktrees not in active teams", async () => {
@@ -871,6 +877,24 @@ describe("recoverOrphanedWorktrees", () => {
     const { recoverOrphanedWorktrees } = await import("../src/recovery")
     expect(await recoverOrphanedWorktrees(db, client)).toEqual({ removed: 0 })
     expect(client.calls.filter(call => call.method === "worktree.remove")).toHaveLength(0)
+  })
+
+  test("lists each repository root once for one controller", async () => {
+    const now = Date.now()
+    db.run("UPDATE project SET path = '/repo-one' WHERE id = 'p1'")
+    db.run("UPDATE team SET project_id = 'p1', controller_directory = '/controller' WHERE id = 't1'")
+    db.run("INSERT INTO project (id, name, path, status, time_created, time_updated) VALUES ('p2', 'p2', '/repo-two', 'active', ?, ?)", [now, now])
+    db.run("INSERT INTO team (id, name, project_id, controller_directory, lead_session_id, status, delegate, time_created, time_updated) VALUES ('t2', 't2', 'p2', '/controller', 'lead-2', 'active', 0, ?, ?)", [now, now])
+    const directories: string[] = []
+    client.worktree.list = async options => {
+      directories.push(options?.directory ?? "missing")
+      return { data: [] }
+    }
+
+    const { recoverOrphanedWorktrees } = await import("../src/recovery")
+    await recoverOrphanedWorktrees(db, client, "/controller")
+
+    expect(directories.sort()).toEqual(["/repo-one", "/repo-two"])
   })
 
   test("ignores non-ensemble worktrees", async () => {

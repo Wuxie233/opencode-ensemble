@@ -1203,15 +1203,15 @@ describe("team_spawn", () => {
     expect(result).toContain("spawned")
   })
 
-  test("rejects nested writer spawn before creating resources", async () => {
+  test("allows a worktree controller to spawn a writer in its bound repository", async () => {
     deps.directory = "/home/user/.local/share/opencode/worktree/abc123/some-worktree"
-    await expect(executeTeamSpawn(deps, {
+    const result = await executeTeamSpawn(deps, {
       name: "alice", agent: "build", prompt: "Fix tests",
-    }, "lead-sess", async () => true)).rejects.toThrow("cannot create an isolated writer worktree")
+    }, "lead-sess", async () => true)
     const wtCalls = deps.client.calls.filter(c => c.method === "worktree.create")
-    expect(wtCalls).toHaveLength(0)
-    expect(deps.client.calls).toHaveLength(0)
-    expect(deps.db.query("SELECT name FROM team_member WHERE name = 'alice'").get()).toBeNull()
+    expect(wtCalls).toHaveLength(1)
+    expect(wtCalls[0]?.args[0]).toMatchObject({ directory: "/tmp/test-project" })
+    expect(result).toContain("spawned")
   })
 
   test("creates a worktree by default and stores dir/branch in DB", async () => {
@@ -1227,9 +1227,11 @@ describe("team_spawn", () => {
     expect((wtCalls[0]!.args[0] as Record<string, unknown>).worktreeCreateInput).toEqual({ name: "ensemble-test-project-my-team#t1-alice" })
 
     // DB should have worktree columns populated
-    const row = deps.db.query("SELECT worktree_dir, worktree_branch FROM team_member WHERE name = ?").get("alice") as Record<string, string | null>
+    const row = deps.db.query("SELECT worktree_dir, worktree_branch, worktree_source_branch, worktree_baseline_oid FROM team_member WHERE name = ?").get("alice") as Record<string, string | null>
     expect(row.worktree_dir).toBeTruthy()
     expect(row.worktree_branch).toBeTruthy()
+    expect(row.worktree_source_branch).toBe(row.worktree_branch)
+    expect(row.worktree_baseline_oid).toBe("baseline-oid")
 
     // Result should mention the branch
     expect(result).toContain("branch:")
@@ -1237,8 +1239,8 @@ describe("team_spawn", () => {
 
   test("uses team id for worktree names so same-name teams in different projects do not collide", async () => {
     deps.db.run(
-      "INSERT OR IGNORE INTO project (id, name, path, status, time_created, time_updated) VALUES (?, ?, ?, 'active', ?, ?)",
-      ["/tmp/other-project", "other-project", "/tmp/other-project", Date.now(), Date.now()]
+      "INSERT OR IGNORE INTO project (id, name, path, git_identity, status, time_created, time_updated) VALUES (?, ?, ?, ?, 'active', ?, ?)",
+      ["/tmp/other-project", "other-project", "/tmp/other-project", "/tmp/other-project/.git", Date.now(), Date.now()]
     )
     deps.db.run(
       "INSERT INTO team (id, name, project_id, lead_session_id, status, delegate, time_created, time_updated) VALUES (?, ?, ?, ?, 'active', 0, ?, ?)",
@@ -1291,6 +1293,28 @@ describe("team_spawn", () => {
     expect(toasts.length).toBeGreaterThan(0)
   })
 
+  test.each([
+    ["repository identity", async () => ({ gitIdentity: "/other/.git", headOid: "baseline-oid" })],
+    ["source ref", async () => null],
+    ["baseline OID", async () => ({ gitIdentity: "/tmp/test-project/.git", headOid: "other-oid" })],
+  ])("rolls back the worktree when %s verification fails", async (_label, replacement) => {
+    if (_label === "source ref") {
+      deps.repositoryBindingOps = { ...deps.repositoryBindingOps!, resolveGitRefOid: replacement as () => Promise<null> }
+    } else {
+      deps.repositoryBindingOps = { ...deps.repositoryBindingOps!, resolveWorktreeIdentity: replacement as () => Promise<{ gitIdentity: string; headOid: string }> }
+    }
+
+    await expect(executeTeamSpawn(deps, {
+      name: "alice", agent: "build", prompt: "Fix tests",
+    }, "lead-sess")).rejects.toThrow("Failed to create isolated worktree")
+
+    expect(deps.client.calls.find(call => call.method === "worktree.remove")?.args[0]).toMatchObject({
+      directory: "/tmp/test-project",
+    })
+    expect(deps.client.calls.filter(call => call.method === "session.create")).toHaveLength(0)
+    expect(deps.db.query("SELECT name FROM team_member WHERE name = 'alice'").get()).toBeNull()
+  })
+
   test("rolls back member asynchronously if promptAsync fails (fire-and-forget)", async () => {
     deps.client.session.promptAsync = async () => { throw new Error("promptAsync failed") }
 
@@ -1314,6 +1338,7 @@ describe("team_spawn", () => {
     // Worktree should have been removed during rollback
     const removeCalls = deps.client.calls.filter(c => c.method === "worktree.remove")
     expect(removeCalls).toHaveLength(1)
+    expect(removeCalls[0]?.args[0]).toMatchObject({ directory: "/tmp/test-project" })
   })
 
   test("context message mentions branch when worktree is active", async () => {
@@ -1407,11 +1432,11 @@ describe("team_spawn", () => {
     const wsArgs = wsCalls[0]!.args[0] as { branch?: string }
     expect(wsArgs.branch).toContain("ensemble-")
 
-    // session.create should have workspaceID, NOT directory
+    // session.create carries both the workspace and its owning repository root.
     const createCall = deps.client.calls.find(c => c.method === "session.create")
     const createArgs = createCall!.args[0] as { workspaceID?: string; directory?: string }
     expect(createArgs.workspaceID).toBeTruthy()
-    expect(createArgs.directory).toBeUndefined()
+    expect(createArgs.directory).toBe("/tmp/test-project")
   })
 
   test("stores workspace_id in DB", async () => {
@@ -1439,8 +1464,9 @@ describe("team_spawn", () => {
 
     // session.create should NOT have workspaceID (fallback)
     const createCall = deps.client.calls.find(c => c.method === "session.create")
-    const createArgs = createCall!.args[0] as { workspaceID?: string }
+    const createArgs = createCall!.args[0] as { workspaceID?: string; directory?: string }
     expect(createArgs.workspaceID).toBeUndefined()
+    expect(createArgs.directory).toStartWith("/tmp/worktree-")
   })
 
   test("skips workspace.create when worktree: false", async () => {

@@ -10,6 +10,7 @@ import { resolveAbortBranch } from "./abort-preservation"
 import { recomputeCurrentPhase } from "./task-phase"
 import { appendTeamEvent } from "./team-event"
 import { appendMemberTransition, releaseMemberTasks } from "./telemetry"
+import { getTeamRepositoryBinding } from "./repository-binding"
 
 const activeTerminations = new Map<string, Promise<RetryExhaustion | undefined>>()
 const MAX_RECOVERY_ERROR_BYTES = 2 * 1024
@@ -80,6 +81,7 @@ export async function breakRetryLoop(
     model: string | null
   } | null
   if (!member) return false
+  const repositoryRoot = getTeamRepositoryBinding(deps.db, request.teamId).repositoryRoot
 
   const pending = deps.db.query(
     `SELECT 1 AS found FROM team_member
@@ -111,7 +113,7 @@ export async function breakRetryLoop(
     if (sourceBranch) {
       const resource = getTeamResourceParts(deps.db, request.teamId)
       const safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, request.memberName)
-      if (!await preserve(sourceBranch, safeBranch, deps.directory)) {
+      if (!await preserve(sourceBranch, safeBranch, repositoryRoot)) {
         restoreRetryOwnership(deps, request)
         sendLeadAlert(deps.db, deps.client, {
           teamId: request.teamId,

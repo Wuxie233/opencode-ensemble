@@ -47,6 +47,7 @@ import { SafeAbortRecovery } from "./safe-abort-recovery"
 import { handleRetryStatus } from "./retry-breaker"
 import { recordUsageFromV2Event } from "./telemetry"
 import { TerminalLivenessGuard } from "./terminal-liveness"
+import { canonicalControllerDirectory } from "./repository-binding"
 
 const DEFAULT_RATE_LIMIT_REFILL = 2
 const DEFAULT_RATE_LIMIT_INTERVAL_MS = 1000
@@ -85,6 +86,7 @@ const plugin: Plugin = async (input) => {
   const rawClient = new OpencodeClient({ client: pluginTransport })
   initLog(rawClient)
   const client = wrapThrowingClient(rawClient)
+  const controllerDirectory = await canonicalControllerDirectory(input.directory)
   const mainInstance = !isWorktreeInstance(input.directory)
   const runtime = await processRuntime.acquire({
     dbPath,
@@ -93,7 +95,7 @@ const plugin: Plugin = async (input) => {
   })
   const db = runtime.db
   const activityBuffer = runtime.activityBuffer
-  const deps: ToolDeps = { db, registry, tracker, purgeApprovals, client, directory: input.directory, config }
+  const deps: ToolDeps = { db, registry, tracker, purgeApprovals, client, directory: controllerDirectory, config }
   const wakeFailedMemberLead = (alert: { leadSessionId: string; memberName: string }) => {
     client.session.promptAsync({
       sessionID: alert.leadSessionId,
@@ -121,12 +123,12 @@ const plugin: Plugin = async (input) => {
     void runtime
       .recover(path.resolve(input.worktree || input.directory), async (sharedDb) => {
         log("init:recovery:start (main instance)")
-        const recovery = await recoverStaleMembers(sharedDb, client, input.directory)
+        const recovery = await recoverStaleMembers(sharedDb, client, controllerDirectory)
         if (recovery.interrupted > 0) log(`init:recovery:interrupted=${recovery.interrupted}`)
         await Promise.all([
           recoverUndeliveredMessages(sharedDb, client, registry),
-          recoverOrphanedWorktrees(sharedDb, client),
-          recoverOrphanedBranches(sharedDb, input.directory),
+          recoverOrphanedWorktrees(sharedDb, client, controllerDirectory),
+          recoverOrphanedBranches(sharedDb, controllerDirectory),
         ])
         log("init:recovery:done")
       })
@@ -156,7 +158,7 @@ const plugin: Plugin = async (input) => {
     stallThresholdMs: config.stallThresholdMs,
     stallMinSteps: config.stallMinSteps,
     stallTokenThreshold: config.stallTokenThreshold,
-    cwd: input.directory,
+    cwd: controllerDirectory,
     peerMessageLimit: config.peerMessageLimit,
     peerMessageWindowMs: config.peerMessageWindowMs,
   }))
@@ -423,6 +425,7 @@ const plugin: Plugin = async (input) => {
         args: {
           name: tool.schema.string().describe("Team name (lowercase alphanumeric with hyphens, 1-64 chars)"),
           project_name: tool.schema.string().optional().describe("Project display name for first use of this working directory. Unicode and spaces are allowed; an internal resource slug is generated separately."),
+          repository_root: tool.schema.string().optional().describe("Verified absolute Git repository root owned by this Team. Defaults to the current repository root."),
         },
         async execute(args, ctx) {
           const result = await executeTeamCreate(deps, args, ctx.sessionID)

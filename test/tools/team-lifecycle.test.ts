@@ -194,6 +194,28 @@ describe("team_shutdown", () => {
       .toEqual({ status: "shutdown_requested" })
   })
 
+  test("preserves a writer in the Team repository rather than the controller directory", async () => {
+    deps.directory = "/controller-a"
+    deps.db.run("UPDATE project SET path = '/repo-b' WHERE id = '/tmp/test-project'")
+    deps.db.run("UPDATE team SET controller_directory = '/controller-a' WHERE id = 't1'")
+    deps.db.run("UPDATE team_member SET worktree_branch = 'live-alice' WHERE name = 'alice'")
+    deps.client.session.status = async () => ({ data: { "sess-alice": { type: "idle" } } })
+    const roots: string[] = []
+
+    await executeTeamShutdown(
+      deps,
+      { member: "alice" },
+      "lead-sess",
+      undefined,
+      async (_source, _target, repositoryRoot) => { roots.push(repositoryRoot); return true },
+      undefined,
+      async () => "live-alice",
+    )
+
+    expect(roots).toEqual(["/repo-b"])
+    expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(1)
+  })
+
   test("idle member is aborted immediately, no promptAsync", async () => {
     deps.client.session.status = async () => {
       deps.client.calls.push({ method: "session.status", args: [] })
@@ -1228,7 +1250,7 @@ describe("team_cleanup", () => {
       ["/tmp/other-project", "other-project", "/tmp/other-project", Date.now(), Date.now()]
     )
     insertTeam(deps.db, "old-3", "old-three", "old-lead-3", "archived")
-    deps.db.run("UPDATE team SET project_id = ? WHERE id = ?", ["/tmp/other-project", "old-3"])
+    deps.db.run("UPDATE team SET project_id = ?, controller_directory = ? WHERE id = ?", ["/tmp/other-project", "/tmp/other-project", "old-3"])
     const token = await preparePurgeConfirmation(deps, ["*"], "lead-sess")
 
     const result = await executeTeamCleanup(deps, { force: false, purge: ["*"], confirm_purge: true, confirm_token: token }, "lead-sess", undefined, noopMerge, noopDelete, false, undefined, async () => {}, noopListBranches)

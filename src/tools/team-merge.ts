@@ -5,6 +5,7 @@ import type { MergeBranchFn, DeleteBranchFn, OverlapCheckFn } from "./merge-help
 import { log } from "../log"
 import { immediateTransaction } from "../db"
 import { appendTeamEvent } from "../team-event"
+import { getTeamRepositoryBinding } from "../repository-binding"
 
 /**
  * Execute the team_merge tool. Merges a shutdown teammate's preserved
@@ -19,6 +20,7 @@ export async function executeTeamMerge(
   overlapCheck: OverlapCheckFn = getOverlappingFiles,
 ): Promise<string> {
   const teamInfo = requireLead(deps, sessionId)
+  const repositoryRoot = getTeamRepositoryBinding(deps.db, teamInfo.teamId).repositoryRoot
 
   const member = deps.db.query("SELECT status, worktree_branch, merge_state, merged_source_branch FROM team_member WHERE team_id = ? AND name = ?")
     .get(teamInfo.teamId, args.member) as { status: string; worktree_branch: string | null; merge_state: string; merged_source_branch: string | null } | null
@@ -33,7 +35,7 @@ export async function executeTeamMerge(
   }
 
   if (member.merge_state === "merged") {
-    const deleted = await delBranch(member.worktree_branch, deps.directory)
+    const deleted = await delBranch(member.worktree_branch, repositoryRoot)
     if (deleted) {
       deps.db.run("UPDATE team_member SET worktree_branch = NULL WHERE team_id = ? AND name = ?", [teamInfo.teamId, args.member])
     }
@@ -63,7 +65,7 @@ export async function executeTeamMerge(
 
   // Block merge if lead has local changes to files the agent also modified
   try {
-    const overlap = await overlapCheck(branch, deps.directory)
+    const overlap = await overlapCheck(branch, repositoryRoot)
     if (overlap.length > 0) {
       recordMergeFailure(deps, teamInfo.teamId, args.member, startedEventId)
       const files = overlap.map(f => `  - ${f}`).join("\n")
@@ -82,7 +84,7 @@ export async function executeTeamMerge(
     return `Cannot verify merge safety for ${args.member}: ${detail}. The branch remains preserved; fix the overlap check and retry team_merge.`
   }
 
-  const result = await merge(branch, deps.directory)
+  const result = await merge(branch, repositoryRoot)
   if (!result.ok) {
     recordMergeFailure(deps, teamInfo.teamId, args.member, startedEventId)
     return [
@@ -109,7 +111,7 @@ export async function executeTeamMerge(
       causeEventId: startedEventId,
     })
   })
-  const deleted = await delBranch(branch, deps.directory)
+  const deleted = await delBranch(branch, repositoryRoot)
   if (deleted) {
     deps.db.run("UPDATE team_member SET worktree_branch = NULL WHERE team_id = ? AND name = ?", [teamInfo.teamId, args.member])
   }

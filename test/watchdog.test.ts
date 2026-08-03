@@ -296,8 +296,8 @@ describe("Watchdog", () => {
         [repo, repo, now, now],
       )
       deps.db.run(
-        "UPDATE team SET project_id = ? WHERE id = 't1'",
-        [repo],
+        "UPDATE team SET project_id = ?, controller_directory = ? WHERE id = 't1'",
+        [repo, repo],
       )
       deps.db.run(
         "INSERT INTO team_member (team_id, name, session_id, agent, status, execution_status, worktree_branch, worktree_dir, time_created, time_updated) VALUES ('t1', 'alice', 'sess-a', 'build', 'busy', 'running', 'live-alice', ?, ?, ?)",
@@ -342,7 +342,7 @@ describe("Watchdog", () => {
         "INSERT INTO project (id, name, path, status, time_created, time_updated) VALUES (?, 'watchdog-project', ?, 'active', ?, ?)",
         [repo, repo, now, now],
       )
-      deps.db.run("UPDATE team SET project_id = ? WHERE id = 't1'", [repo])
+      deps.db.run("UPDATE team SET project_id = ?, controller_directory = ? WHERE id = 't1'", [repo, repo])
       const safeBranch = "ensemble/preserved/watchdog-project/my-team#t1/alice"
       deps.db.run(
         `INSERT INTO team_member
@@ -469,7 +469,7 @@ describe("Watchdog", () => {
     expect(failed.payload).not.toContain("missing-branch")
   })
 
-  test("fails closed when a timed-out writer has a branch but watchdog cwd is missing", async () => {
+  test("uses the persisted repository root when watchdog cwd is missing", async () => {
     const pastTime = Date.now() - 60_000
     deps.db.run(
       "INSERT INTO team_member (team_id, name, session_id, agent, status, execution_status, worktree_branch, time_created, time_updated) VALUES ('t1', 'alice', 'sess-a', 'build', 'busy', 'running', 'live-alice', ?, ?)",
@@ -482,7 +482,7 @@ describe("Watchdog", () => {
     expect(deps.db.query("SELECT status, execution_status FROM team_member WHERE name = 'alice'").get())
       .toEqual({ status: "busy", execution_status: "running" })
     expect((deps.db.query("SELECT content FROM team_message WHERE team_id = 't1' AND to_name = 'lead'").get() as { content: string }).content)
-      .toContain("project directory")
+      .toContain("could not be preserved")
   })
 
   test("start and stop control the interval", () => {

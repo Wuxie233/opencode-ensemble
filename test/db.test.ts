@@ -179,6 +179,26 @@ describe("schema migrations", () => {
     expect(eventDeleteTrigger.sql).toContain("team_purge_guard")
   })
 
+  test("migration 19 separates controller ownership and adds writer baselines", () => {
+    for (let i = 0; i < 18; i++) {
+      db.exec(MIGRATIONS[i]!)
+      db.exec(`PRAGMA user_version = ${i + 1}`)
+    }
+    db.run("INSERT INTO project (id, name, path, status, time_created, time_updated) VALUES ('p1', 'p1', '/repo', 'active', 1, 1)")
+    db.run("INSERT INTO team (id, name, project_id, lead_session_id, status, delegate, time_created, time_updated) VALUES ('t1', 't1', 'p1', 'lead', 'active', 0, 1, 1)")
+    db.run("INSERT INTO team_member (team_id, name, session_id, agent, status, execution_status, worktree_branch, time_created, time_updated) VALUES ('t1', 'writer', 's1', 'build', 'ready', 'idle', 'ensemble-writer', 1, 1)")
+    db.run("INSERT INTO team_member (team_id, name, session_id, agent, status, execution_status, worktree_branch, time_created, time_updated) VALUES ('t1', 'preserved', 's2', 'build', 'shutdown', 'completed', 'ensemble/preserved/p/t/m', 1, 1)")
+
+    applyMigrations(db)
+
+    expect(db.query("SELECT controller_directory FROM team WHERE id = 't1'").get()).toEqual({ controller_directory: "/repo" })
+    expect(db.query("SELECT git_identity FROM project WHERE id = 'p1'").get()).toEqual({ git_identity: null })
+    expect(db.query("SELECT name, worktree_source_branch, worktree_baseline_oid FROM team_member ORDER BY name").all()).toEqual([
+      { name: "preserved", worktree_source_branch: null, worktree_baseline_oid: null },
+      { name: "writer", worktree_source_branch: "ensemble-writer", worktree_baseline_oid: null },
+    ])
+  })
+
   test("artifact rows and task contract bindings are immutable", () => {
     applyMigrations(db)
     db.exec("PRAGMA foreign_keys=ON")

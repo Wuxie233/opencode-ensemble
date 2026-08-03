@@ -372,7 +372,20 @@ export const MIGRATIONS: string[] = [
         OR NEW.contract_artifact_sha256 IS NOT OLD.contract_artifact_sha256
       BEGIN
         SELECT RAISE(ABORT, 'team_task contract binding is immutable');
-      END;`,
+     END;`,
+  // Migration 19: Separate controller ownership from the verified repository
+  // binding and persist the immutable writer branch baseline used by recovery.
+  `ALTER TABLE project ADD COLUMN git_identity TEXT;
+   ALTER TABLE team ADD COLUMN controller_directory TEXT;
+   UPDATE team SET controller_directory = COALESCE(
+     (SELECT path FROM project WHERE project.id = team.project_id),
+     project_id
+   ) WHERE controller_directory IS NULL;
+   ALTER TABLE team_member ADD COLUMN worktree_source_branch TEXT;
+   ALTER TABLE team_member ADD COLUMN worktree_baseline_oid TEXT;
+   UPDATE team_member SET worktree_source_branch = worktree_branch
+    WHERE worktree_branch IS NOT NULL
+      AND worktree_branch NOT LIKE 'ensemble/preserved/%';`,
 ]
 
 /**
