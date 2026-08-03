@@ -4,6 +4,7 @@ import type { RetryExhaustion } from "../src/hooks"
 import type { ToolDeps } from "../src/types"
 import { breakRetryLoop, handleRetryStatus } from "../src/retry-breaker"
 import { TerminalLivenessGuard } from "../src/terminal-liveness"
+import { executeTeamResults } from "../src/tools/team-results"
 import { executeTeamTasksComplete } from "../src/tools/team-tasks-complete"
 import { insertMember, insertTeam, setupDeps } from "./helpers"
 
@@ -199,6 +200,58 @@ describe("retry breaker", () => {
     expect(alert.content).toContain("task-retry")
   })
 
+  test("exposes bounded structured recovery guidance end to end through team_results", async () => {
+    const deps = setupRetryingMember()
+    const originalModel = "provider/primary"
+    const oversizedError = `provider rejected request: ${"故障".repeat(2_000)}`
+    deps.db.run("UPDATE team_member SET model = ? WHERE name = 'alice'", [originalModel])
+    const tracker = new RetryTracker()
+    let request: RetryExhaustion | undefined
+    for (let attempt = 1; attempt <= 6; attempt++) {
+      const observed = tracker.observeStatus(deps.db, deps.registry, "sess-alice", "retry", oversizedError, attempt)
+      if (observed?.kind === "exhaustion") request = observed
+    }
+    if (!request) throw new Error("expected retry exhaustion")
+    request = { ...request, fallbackModel: "provider/backup" }
+
+    expect(await breakRetryLoop(deps, request)).toBe(true)
+    const result = await executeTeamResults(deps, {}, "lead-sess")
+    const metadataLine = result.split("\n").find(line => line.startsWith('{"kind":"provider_retry_exhausted"'))
+    if (!metadataLine) throw new Error("expected structured recovery metadata")
+    const metadata = JSON.parse(metadataLine) as {
+      kind: string
+      member: string
+      provider: string | null
+      model: string | null
+      attempts: number
+      error: string
+      fallback_model: string | null
+      action: Record<string, unknown>
+    }
+
+    expect(metadata).toEqual({
+      kind: "provider_retry_exhausted",
+      member: "alice",
+      provider: "provider",
+      model: originalModel,
+      attempts: 6,
+      error: expect.stringMatching(/^provider rejected request: .*\.\.\.$/),
+      fallback_model: "provider/backup",
+      action: {
+        tool: "team_spawn",
+        resume_from: "alice",
+        inspect_actual_state: true,
+        automatic_replay: false,
+        mutate_active_session_model: false,
+      },
+    })
+    expect(new TextEncoder().encode(metadata.error).length).toBeLessThanOrEqual(2 * 1024)
+    expect(deps.db.query("SELECT model FROM team_member WHERE name = 'alice'").get()).toEqual({ model: originalModel })
+    expect(deps.client.calls.filter(call => call.method === "session.promptAsync" && (call.args[0] as { sessionID?: string }).sessionID === "sess-alice"))
+      .toHaveLength(0)
+    expect(await executeTeamResults(deps, {}, "lead-sess")).toBe("No unread messages.")
+  })
+
   test("keeps member and task owned when branch preservation fails", async () => {
     const deps = setupRetryingMember()
     deps.db.run("UPDATE team_member SET worktree_branch = 'ensemble-my-team-alice' WHERE name = 'alice'")
@@ -216,7 +269,7 @@ describe("retry breaker", () => {
     const retry = tracker.observeStatus(deps.db, deps.registry, "sess-alice", "retry", "provider still unavailable", 7)
     expect(retry).toMatchObject({ attempts: 6, reason: "provider still unavailable" })
     if (!retry || retry.kind !== "exhaustion") throw new Error("expected retry exhaustion")
-    expect(await breakRetryLoop(deps, retry!, async () => true)).toBe(true)
+    expect(await breakRetryLoop(deps, retry, async () => true)).toBe(true)
     expect(deps.db.query("SELECT retry_count, retry_tripped FROM team_member WHERE name = 'alice'").get())
       .toEqual({ retry_count: 6, retry_tripped: 1 })
   })

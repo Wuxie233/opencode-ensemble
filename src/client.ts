@@ -1,10 +1,5 @@
 import type { PluginClient } from "./types"
-
-/** Extract error message from a HeyAPI error response. */
-function extractError(err: unknown): string {
-  if (err && typeof err === "object" && "message" in err) return String((err as { message: string }).message)
-  return String(err)
-}
+import { renderError } from "./error"
 
 /** Generic async SDK method type. Actual type safety enforced by PluginClient interface. */
 type SdkMethod = (...args: unknown[]) => Promise<unknown>
@@ -14,7 +9,7 @@ function throwing(fn: SdkMethod): SdkMethod {
   return async (...args: unknown[]) => {
     const result = await fn(...args)
     if (result && typeof result === "object" && "error" in result && result.error !== undefined) {
-      throw new Error(extractError(result.error))
+      throw new Error(renderError(result.error))
     }
     return result
   }

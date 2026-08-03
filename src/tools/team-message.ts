@@ -5,6 +5,7 @@ import { sendMessage, markDelivered, hasReportedCompletion, isMemberPromptEligib
 import { log } from "../log"
 import { immediateTransaction } from "../db"
 import { appendTeamEvent } from "../team-event"
+import { isTerminalTaskResult, recordTaskReconciliationAlert } from "../task-reconciliation"
 
 function isPlanSubmission(content: string): boolean {
   const match = content.match(
@@ -151,11 +152,17 @@ export async function executeTeamMessage(
     msgId = submission.messageId
     shouldDeliver = submission.shouldDeliver
   } else {
-    msgId = sendMessage(deps.db, {
-      teamId: teamInfo.teamId,
-      from: senderName,
-      to: args.to,
-      content: messageText,
+    msgId = immediateTransaction(deps.db, () => {
+      const messageId = sendMessage(deps.db, {
+        teamId: teamInfo.teamId,
+        from: senderName,
+        to: args.to,
+        content: messageText,
+      })
+      if (args.to === "lead" && teamInfo.role === "member" && isTerminalTaskResult(messageText)) {
+        recordTaskReconciliationAlert(deps.db, teamInfo.teamId, senderName)
+      }
+      return messageId
     })
   }
 

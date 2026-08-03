@@ -5,6 +5,7 @@ import { sendMessage } from "./messaging"
 import { recomputeCurrentPhase } from "./task-phase"
 import { appendTeamEvent, type ExecutionStatus, type MemberStatus } from "./team-event"
 import { appendMemberTransition, releaseMemberTasks } from "./telemetry"
+import { recordTaskReconciliationAlert } from "./task-reconciliation"
 
 const TEAM_TOOL_PREFIX = "team_"
 /** @deprecated Prefer config.retryExhaustionAttempt; kept for tests and call sites. */
@@ -229,6 +230,7 @@ export interface StatusTransition {
   teamId: string
   from: string
   to: string
+  reconciliationAlert?: boolean
 }
 
 /** Return whether shutdown is terminal enough to discard liveness tracking. */
@@ -269,12 +271,13 @@ export function handleSessionStatusEvent(
     }
     const newStatus = "ready"
     if (member.status === newStatus) return undefined
-    db.transaction(() => {
+    const reconciliationAlert = db.transaction(() => {
       db.run(
         "UPDATE team_member SET status = ?, execution_status = 'idle', time_updated = ? WHERE team_id = ? AND name = ?",
         [newStatus, Date.now(), entry.teamId, entry.memberName]
       )
       appendMemberTransition(db, entry.teamId, entry.memberName, member.status, "ready", member.execution_status, "idle", "session_status")
+      return recordTaskReconciliationAlert(db, entry.teamId, entry.memberName) !== undefined
     })()
     // Mark teammate as having reported if they sent at least one message to lead (issue #3).
     // Set on busy→ready transition so Q&A messages during work don't prematurely block delivery.
@@ -289,7 +292,13 @@ export function handleSessionStatusEvent(
         )
       }
     }
-    return { memberName: entry.memberName, teamId: entry.teamId, from: member.status, to: newStatus }
+    return {
+      memberName: entry.memberName,
+      teamId: entry.teamId,
+      from: member.status,
+      to: newStatus,
+      ...(reconciliationAlert ? { reconciliationAlert: true } : {}),
+    }
   } else if (status === "busy") {
     if (member.status === "busy" && member.execution_status === "starting") {
       db.transaction(() => {

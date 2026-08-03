@@ -54,6 +54,23 @@ describe("wrapThrowingClient", () => {
     await expect(client.session.create({ title: "test" })).rejects.toThrow("something went wrong")
   })
 
+  test("preserves nested structured SDK diagnostics", async () => {
+    const client = wrapThrowingClient(fakeSDK({
+      "worktree.create": async () => ({
+        error: {
+          data: { message: "worktree path is already locked" },
+          command: "git worktree add /tmp/wt branch",
+          exitCode: 128,
+          stderr: "fatal: '/tmp/wt' is a missing but already registered worktree",
+        },
+      }),
+    }))
+
+    await expect(client.worktree.create({ worktreeCreateInput: { name: "x" } })).rejects.toThrow(
+      /worktree path is already locked.*git worktree add.*128.*already registered worktree/,
+    )
+  })
+
   test("wraps all session methods", async () => {
     const client = wrapThrowingClient(fakeSDK())
     expect(typeof client.session.create).toBe("function")

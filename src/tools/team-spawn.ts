@@ -11,6 +11,7 @@ import { appendTeamEvent } from "../team-event"
 import { immediateTransaction } from "../db"
 import { resolveProfile } from "../profiles"
 import { parseTaskResult } from "../result-parser"
+import { renderError } from "../error"
 
 /** Tracks consecutive spawn failures per team for circuit breaker. */
 export const spawnFailures = new Map<string, { count: number; lastError: string }>()
@@ -259,7 +260,7 @@ async function executeTeamSpawnLocked(
       worktreeBranch = result.data.branch
       log(`spawn:worktree:done name=${args.name} dir=${worktreeDir}`)
     } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err)
+      const detail = renderError(err)
       log(`spawn:worktree:failed name=${args.name} err=${detail}`)
       rollbackSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name, claimEventId)
       try {
@@ -270,7 +271,7 @@ async function executeTeamSpawnLocked(
           duration: 4000,
         })
       } catch { /* TUI may not be available */ }
-      throw new Error(`Failed to create isolated worktree for teammate "${args.name}": ${detail}. Pass worktree: false only for intentionally read-only work.`)
+      throw new Error(`Failed to create isolated worktree for teammate "${args.name}": ${detail}. Writer profiles require an isolated worktree; inspect the reported Git/worktree failure before retrying.`)
     }
   }
 
@@ -289,7 +290,7 @@ async function executeTeamSpawnLocked(
       }
       log(`spawn:workspace:done name=${args.name} id=${workspaceId}`)
     } catch (err) {
-      log(`spawn:workspace:failed name=${args.name} err=${err instanceof Error ? err.message : String(err)}`)
+      log(`spawn:workspace:failed name=${args.name} err=${renderError(err)}`)
       // Non-fatal — prompt-based CWD instruction is the fallback
     }
   }
@@ -354,9 +355,9 @@ async function executeTeamSpawnLocked(
     childSessionId = createResult.data?.id
     log(`spawn:session:done name=${args.name} sessionId=${childSessionId}`)
   } catch (err) {
-    log(`spawn:session:failed name=${args.name} err=${err instanceof Error ? err.message : String(err)}`)
+    log(`spawn:session:failed name=${args.name} err=${renderError(err)}`)
     // Track failure for circuit breaker
-    const errMsg = err instanceof Error ? err.message : String(err)
+    const errMsg = renderError(err)
     const prev = spawnFailures.get(teamInfo.teamId)
     spawnFailures.set(teamInfo.teamId, { count: (prev?.count ?? 0) + 1, lastError: errMsg })
     // Rollback workspace and worktree if session creation failed
@@ -367,7 +368,7 @@ async function executeTeamSpawnLocked(
       try { await deps.client.worktree.remove({ worktreeRemoveInput: { directory: worktreeDir } }) } catch { /* best effort */ }
     }
     rollbackSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name, claimEventId)
-    throw new Error(`Failed to create session for teammate "${args.name}": ${err instanceof Error ? err.message : String(err)}`)
+    throw new Error(`Failed to create session for teammate "${args.name}": ${errMsg}`)
   }
 
   if (!childSessionId) {
@@ -412,7 +413,7 @@ async function executeTeamSpawnLocked(
       }
     })
   } catch (err) {
-    const registrationError = err instanceof Error ? err.message : String(err)
+    const registrationError = renderError(err)
     let safeBranch: string | null = null
     if (worktreeBranch) {
       const resource = getTeamResourceParts(deps.db, teamInfo.teamId)
@@ -426,7 +427,7 @@ async function executeTeamSpawnLocked(
             wakeText: `[System: Teammate ${args.name} registration and branch preservation failed; recovery guidance is available in team messages]`,
           })
         } catch (alertError) {
-          const message = alertError instanceof Error ? alertError.message : String(alertError)
+          const message = renderError(alertError)
           throw new Error(`${registrationError}; branch preservation failed and recovery alert also failed: ${message}. Session ${childSessionId}, live branch ${worktreeBranch}, worktree ${worktreeDir ?? "none"}, workspace ${workspaceId ?? "none"}, and claimed task ${args.claim_task ?? "none"} were left intact.`)
         }
         throw new Error(`${registrationError}. Cleanup stopped because branch ${worktreeBranch} could not be preserved; the session and worktree were left intact for retry.`)
@@ -439,13 +440,13 @@ async function executeTeamSpawnLocked(
         wakeText: `[System: Teammate ${args.name} registration failed; unowned resources require manual recovery]`,
       })
     } catch (alertError) {
-      const message = alertError instanceof Error ? alertError.message : String(alertError)
+      const message = renderError(alertError)
       throw new Error(`${registrationError}; recovery alert also failed: ${message}. Preserved branch: ${safeBranch ?? "none"}. Session ${childSessionId} and its resources were left intact; claimed task ${args.claim_task ?? "none"} was not rolled back.`)
     }
     try {
       rollbackSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name, claimEventId)
     } catch (rollbackError) {
-      const message = rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
+      const message = renderError(rollbackError)
       throw new Error(`${registrationError}; task rollback also failed: ${message}`)
     }
     throw err
@@ -620,7 +621,7 @@ async function executeTeamSpawnLocked(
     agent: runtimeAgent,
     ...(modelParam ? { model: modelParam } : {}),
   }).catch((err) => {
-    const errMsg = err instanceof Error ? err.message : String(err)
+    const errMsg = renderError(err)
     log(`spawn:promptAsync:failed name=${args.name} err=${errMsg} — rolling back`)
     try {
       const preserveThenAbort = async () => {
@@ -649,7 +650,7 @@ async function executeTeamSpawnLocked(
             throw new Error("member state changed before the safe branch reference was recorded")
           }
         } catch (recordError) {
-          const message = recordError instanceof Error ? recordError.message : String(recordError)
+          const message = renderError(recordError)
           sendLeadAlert(deps.db, deps.client, {
             teamId: teamInfo.teamId,
             content: `Teammate "${args.name}" failed to start and its safe branch reference could not be recorded, so its session was not aborted. Its member, task ownership, session, and resources remain intact for manual recovery. Preserved branch: ${safeBranch ?? "none"}. Error: ${message}.`,
@@ -660,7 +661,7 @@ async function executeTeamSpawnLocked(
         try {
           await deps.client.session.abort({ sessionID: childSessionId })
         } catch (abortError) {
-          const message = abortError instanceof Error ? abortError.message : String(abortError)
+          const message = renderError(abortError)
           sendLeadAlert(deps.db, deps.client, {
             teamId: teamInfo.teamId,
             content: `Teammate "${args.name}" failed to start and its branch was preserved, but abort failed. Its member, task ownership, live source branch, and registry entry remain available for retry. Error: ${message}.`,
@@ -676,11 +677,11 @@ async function executeTeamSpawnLocked(
             wakeText: `[System: Teammate ${args.name} prompt rollback cleanup checkpoint is available in team messages]`,
           })
         } catch (checkpointError) {
-          log(`spawn:promptAsync:checkpoint-failed name=${args.name} sessionId=${childSessionId} safeBranch=${safeBranch ?? "none"} worktree=${worktreeDir ?? "none"} workspace=${workspaceId ?? "none"} task=${args.claim_task ?? "none"} err=${checkpointError instanceof Error ? checkpointError.message : String(checkpointError)}`)
+          log(`spawn:promptAsync:checkpoint-failed name=${args.name} sessionId=${childSessionId} safeBranch=${safeBranch ?? "none"} worktree=${worktreeDir ?? "none"} workspace=${workspaceId ?? "none"} task=${args.claim_task ?? "none"} err=${renderError(checkpointError)}`)
           return
         }
         const alertCleanupFailure = (phase: string, cleanupError: unknown) => {
-          const message = cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+          const message = renderError(cleanupError)
           try {
             sendLeadAlert(deps.db, deps.client, {
               teamId: teamInfo.teamId,
@@ -688,7 +689,7 @@ async function executeTeamSpawnLocked(
               wakeText: `[System: Teammate ${args.name} prompt rollback cleanup is incomplete; manual recovery guidance is available in team messages]`,
             })
           } catch (alertError) {
-            log(`spawn:promptAsync:cleanup-alert-failed name=${args.name} sessionId=${childSessionId} phase=${phase} cleanup=${message} alert=${alertError instanceof Error ? alertError.message : String(alertError)}`)
+            log(`spawn:promptAsync:cleanup-alert-failed name=${args.name} sessionId=${childSessionId} phase=${phase} cleanup=${message} alert=${renderError(alertError)}`)
           }
         }
         if (workspaceId) {
@@ -742,11 +743,11 @@ async function executeTeamSpawnLocked(
             wakeText: `[System: Teammate ${args.name} failed to start; guidance is available in team messages]`,
           })
         } catch (alertError) {
-          log(`spawn:promptAsync:success-alert-failed name=${args.name} sessionId=${childSessionId} checkpoint=${checkpointId} err=${alertError instanceof Error ? alertError.message : String(alertError)}`)
+          log(`spawn:promptAsync:success-alert-failed name=${args.name} sessionId=${childSessionId} checkpoint=${checkpointId} err=${renderError(alertError)}`)
         }
       }
       preserveThenAbort().catch(cleanupError => {
-        log(`spawn:promptAsync:cleanup-failed name=${args.name} sessionId=${childSessionId} err=${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`)
+        log(`spawn:promptAsync:cleanup-failed name=${args.name} sessionId=${childSessionId} err=${renderError(cleanupError)}`)
       })
       const modelInfo = resolvedModel ? ` (model: ${resolvedModel})` : ""
       deps.client.tui.showToast({

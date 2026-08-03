@@ -12,6 +12,25 @@ import { appendTeamEvent } from "./team-event"
 import { appendMemberTransition, releaseMemberTasks } from "./telemetry"
 
 const activeTerminations = new Map<string, Promise<RetryExhaustion | undefined>>()
+const MAX_RECOVERY_ERROR_BYTES = 2 * 1024
+const MAX_RECOVERY_MODEL_BYTES = 256
+
+interface RetryRecoveryMetadata {
+  kind: "provider_retry_exhausted"
+  member: string
+  provider: string | null
+  model: string | null
+  attempts: number
+  error: string
+  fallback_model: string | null
+  action: {
+    tool: "team_spawn"
+    resume_from: string
+    inspect_actual_state: true
+    automatic_replay: false
+    mutate_active_session_model: false
+  }
+}
 
 /** Observe a retry status and synchronously finish any required breaker attempt. */
 export async function handleRetryStatus(
@@ -53,11 +72,12 @@ export async function breakRetryLoop(
   resolveBranch: ResolveWorktreeBranchFn = resolveWorktreeBranch,
 ): Promise<boolean> {
   const member = deps.db.query(
-    `SELECT worktree_branch, worktree_dir FROM team_member
+    `SELECT worktree_branch, worktree_dir, model FROM team_member
      WHERE team_id = ? AND name = ? AND session_id = ?`,
   ).get(request.teamId, request.memberName, request.sessionId) as {
     worktree_branch: string | null
     worktree_dir: string | null
+    model: string | null
   } | null
   if (!member) return false
 
@@ -160,11 +180,12 @@ export async function breakRetryLoop(
       const recoveryGuidance = request.fallbackModel
         ? ` Start a fresh teammate with team_spawn, resume_from: "${request.memberName}", and model: "${request.fallbackModel}"; have it inspect actual state before continuing so completed tool side effects are not replayed.`
         : ` Start a fresh teammate with team_spawn and resume_from: "${request.memberName}"; have it inspect actual state before continuing so completed tool side effects are not replayed.`
+      const recoveryMetadata = buildRetryRecoveryMetadata(member.model, request)
       sendMessage(deps.db, {
         teamId: request.teamId,
         from: "system",
         to: "lead",
-        content: `Teammate "${request.memberName}" (${request.sessionId}) was stopped after ${request.attempts} consecutive retries. Latest reason: ${request.reason}.${taskNotice}${recoveryGuidance}`,
+        content: `Teammate "${request.memberName}" (${request.sessionId}) was stopped after ${request.attempts} consecutive retries.${taskNotice}${recoveryGuidance}\n\nRecovery metadata:\n${JSON.stringify(recoveryMetadata)}`,
       })
       return true
     })()
@@ -249,6 +270,46 @@ function parseFallbackModels(value: string | null): string[] {
   } catch {
     return []
   }
+}
+
+function buildRetryRecoveryMetadata(model: string | null, request: RetryExhaustion): RetryRecoveryMetadata {
+  const boundedModel = model ? truncateUtf8(model, MAX_RECOVERY_MODEL_BYTES) : null
+  const provider = boundedModel?.includes("/") ? boundedModel.slice(0, boundedModel.indexOf("/")) : null
+  return {
+    kind: "provider_retry_exhausted",
+    member: request.memberName,
+    provider,
+    model: boundedModel,
+    attempts: request.attempts,
+    error: truncateUtf8(request.reason, MAX_RECOVERY_ERROR_BYTES),
+    fallback_model: request.fallbackModel
+      ? truncateUtf8(request.fallbackModel, MAX_RECOVERY_MODEL_BYTES)
+      : null,
+    action: {
+      tool: "team_spawn",
+      resume_from: request.memberName,
+      inspect_actual_state: true,
+      automatic_replay: false,
+      mutate_active_session_model: false,
+    },
+  }
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  const encoder = new TextEncoder()
+  const bytes = encoder.encode(value)
+  if (bytes.length <= maxBytes) return value
+  const suffix = "..."
+  const limit = maxBytes - encoder.encode(suffix).length
+  const decoder = new TextDecoder("utf-8", { fatal: true })
+  for (let end = limit; end > 0; end--) {
+    try {
+      return `${decoder.decode(bytes.slice(0, end))}${suffix}`
+    } catch {
+      // Continue to the previous complete UTF-8 boundary.
+    }
+  }
+  return suffix
 }
 
 function restoreRetryOwnership(deps: ToolDeps, request: RetryExhaustion): void {

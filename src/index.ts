@@ -10,7 +10,7 @@ import { MemberRegistry, DescendantTracker, PendingPurgeApprovals } from "./stat
 import { isWorktreeInstance } from "./util"
 import { handleSessionStatusEvent, handleSessionCreatedEvent, checkToolIsolation, shouldNudgeIdleMember, handleSessionErrorEvent, RetryTracker, shouldReleaseShutdownTracking } from "./hooks"
 import { notifyTeamEvent, notifyWorkingProgress } from "./notify"
-import { sendLeadAlert, hasReportedCompletion, flushPendingPeerMessage, releasePendingPeerDelivery, isMemberPromptEligible } from "./messaging"
+import { sendLeadAlert, hasReportedCompletion, flushPendingPeerMessage, releasePendingPeerDelivery, isMemberPromptEligible, wakeTeamLead } from "./messaging"
 import { buildLeadSystemPrompt, buildTeammateSystemPrompt, buildTeamCompactionContext } from "./system-prompt"
 import { log, initLog } from "./log"
 import { findTeamBySession } from "./types"
@@ -195,7 +195,17 @@ const plugin: Plugin = async (input) => {
           if (transition.to === "shutdown") {
             notifyTeamEvent(client, "shutdown", { memberName: transition.memberName })
           } else if (transition.to === "ready" && transition.from === "busy") {
-            notifyTeamEvent(client, "completed", { memberName: transition.memberName })
+            if (transition.reconciliationAlert) {
+              wakeTeamLead(db, client, transition.teamId, `[System: Teammate ${transition.memberName} is idle while still owning in-progress work; reconciliation guidance is available in team messages]`)
+              client.tui.showToast({
+                title: "Team",
+                message: `${transition.memberName} is idle with in-progress tasks`,
+                variant: "warning",
+                duration: 8000,
+              }).catch(() => { /* TUI may not be available */ })
+            } else {
+              notifyTeamEvent(client, "completed", { memberName: transition.memberName })
+            }
 
             // Fast-idle detection: if agent went idle within 15s of spawn with zero messages,
             // the model likely failed silently (auth error, invalid model, etc.)

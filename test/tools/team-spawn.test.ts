@@ -424,6 +424,36 @@ describe("team_spawn", () => {
     expect(JSON.parse(events[1]?.payload ?? "null")).toEqual({ task_id: "task-123", reason: "spawn_rollback" })
   })
 
+  test("reports structured worktree failures without unsafe writer guidance", async () => {
+    deps.client.worktree.create = async () => {
+      throw {
+        error: { data: { message: "branch is already checked out" } },
+        command: "git worktree add /tmp/wt branch",
+        exitCode: 128,
+        stderr: "fatal: branch is already checked out at /tmp/existing",
+      }
+    }
+
+    let failure = ""
+    try {
+      await executeTeamSpawn(deps, {
+        name: "alice",
+        profile: "backend",
+        prompt: "Fix the tests",
+      }, "lead-sess")
+    } catch (error) {
+      failure = error instanceof Error ? error.message : String(error)
+    }
+
+    expect(failure).toContain("branch is already checked out")
+    expect(failure).toContain("git worktree add")
+    expect(failure).toContain("exitCode\":128")
+    expect(failure).toContain("fatal: branch is already checked out")
+    expect(failure).toContain("Writer profiles require an isolated worktree")
+    expect(failure).not.toContain("Pass worktree: false")
+    expect(failure).not.toContain("[object Object]")
+  })
+
   test("preserves untracked resources without aborting when member registration fails", async () => {
     insertTask(deps, "t1", "task-123")
     const originalRun = deps.db.run.bind(deps.db)
