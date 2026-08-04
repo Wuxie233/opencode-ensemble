@@ -1085,11 +1085,11 @@ describe("team_cleanup", () => {
   test("cleanup keeps the Team active and merged branch retryable when deletion fails", async () => {
     insertMember(deps.db, "t1", "alice", "sess-alice", "shutdown", "idle")
     deps.db.run(
-      "UPDATE team_member SET worktree_branch = 'ensemble-my-team-alice', merge_state = 'merged' WHERE name = 'alice'",
+      "UPDATE team_member SET worktree_branch = 'ensemble-my-team-alice', merge_state = 'merged', merged_source_oid = 'merged-oid' WHERE name = 'alice'",
     )
 
     await expect(executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, async () => false, false))
-      .rejects.toThrow("branch ensemble-my-team-alice: deletion was not confirmed")
+      .rejects.toThrow("branch ensemble-my-team-alice: conditional deletion was not confirmed")
     expect(deps.db.query("SELECT status FROM team WHERE id = 't1'").get()).toEqual({ status: "active" })
     expect(deps.db.query("SELECT worktree_branch, merge_state FROM team_member WHERE name = 'alice'").get())
       .toEqual({ worktree_branch: "ensemble-my-team-alice", merge_state: "merged" })
@@ -1414,7 +1414,10 @@ describe("team_cleanup", () => {
       ["/tmp/other-project", "other-project", "/tmp/other-project", Date.now(), Date.now()]
     )
     insertTeam(deps.db, "old-2", "other-old-team", "old-lead-2", "archived")
-    deps.db.run("UPDATE team SET name = ?, project_id = ? WHERE id = ?", ["old-team", "/tmp/other-project", "old-2"])
+    deps.db.run(
+      "UPDATE team SET name = ?, project_id = ?, controller_directory = ? WHERE id = ?",
+      ["old-team", "/tmp/other-project", "/tmp/other-project", "old-2"],
+    )
     const token = await preparePurgeConfirmation(deps, ["old-team"], "main-sess")
 
     const result = await executeTeamCleanup(deps, { force: false, purge: ["old-team"], confirm_purge: true, confirm_token: token }, "main-sess", undefined, noopMerge, noopDelete, false, undefined, async () => {}, noopListBranches)

@@ -8,7 +8,7 @@ import { getTeamResourceParts, preserveBranch, preservedBranchName, resolveWorkt
 import type { CommitCountFn, IsDirtyFn } from "./shared"
 import { checkWorktreeDirty, countBranchCommits, requireLead } from "./shared"
 import { appendMemberTransition, releaseMemberTasks } from "../telemetry"
-import { getTeamRepositoryBinding } from "../repository-binding"
+import { getMemberRepositoryBinding } from "../repository-binding"
 
 const TERMINAL_EXECUTION_STATUSES = new Set(["completed", "cancelled", "failed", "timed_out"])
 
@@ -61,7 +61,7 @@ export async function executeTeamShutdown(
   }
 
   const force = args.force ?? false
-  const repositoryRoot = getTeamRepositoryBinding(deps.db, teamInfo.teamId).repositoryRoot
+  const repositoryRoot = getMemberRepositoryBinding(deps.db, teamInfo.teamId, args.member).repositoryRoot
 
   // Second call on an already-requested member → force abort
   if (member.status === "shutdown_requested") {
@@ -164,7 +164,7 @@ export async function abortShutdownRequestedMember(
   preserve: PreserveBranchFn = preserveBranch,
   resolveBranch: ResolveWorktreeBranchFn = resolveWorktreeBranch,
 ): Promise<boolean> {
-  const repositoryRoot = getTeamRepositoryBinding(deps.db, teamId).repositoryRoot
+  const repositoryRoot = getMemberRepositoryBinding(deps.db, teamId, memberName).repositoryRoot
   const sourceBranch = await resolvePreservationSource(
     deps,
     teamId,
@@ -226,7 +226,7 @@ async function preserveAndAbort(
   preserve: PreserveBranchFn,
   resolveBranch: ResolveWorktreeBranchFn,
 ): Promise<void> {
-  const repositoryRoot = getTeamRepositoryBinding(deps.db, teamId).repositoryRoot
+  const repositoryRoot = getMemberRepositoryBinding(deps.db, teamId, memberName).repositoryRoot
   const sourceBranch = await resolvePreservationSource(
     deps,
     teamId,
@@ -340,7 +340,7 @@ async function getBranchStatus(
   if (!row?.worktree_branch) return ""
 
   const branch = row.worktree_branch
-  const repositoryRoot = getTeamRepositoryBinding(deps.db, teamId).repositoryRoot
+  const repositoryRoot = getMemberRepositoryBinding(deps.db, teamId, memberName).repositoryRoot
   const parts: string[] = []
 
   const commits = await commitCount(branch, repositoryRoot)

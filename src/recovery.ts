@@ -20,6 +20,7 @@ import { recomputeCurrentPhase } from "./task-phase"
 import { resolveAbortBranch } from "./abort-preservation"
 import { appendTeamEventBestEffort } from "./team-event"
 import { appendMemberTransition, releaseMemberTasks } from "./telemetry"
+import { getMemberRepositoryBinding } from "./repository-binding"
 
 /**
  * Scan for team members stuck in 'busy' status (stale from a crash)
@@ -34,7 +35,7 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
     `SELECT tm.session_id, tm.worktree_branch, tm.worktree_dir, tm.name, tm.team_id,
               tm.status, tm.execution_status, tm.retry_tripped,
               t.name as team_name, COALESCE(p.slug, p.name) as project_name,
-              p.path as repository_root
+               tm.repository_root, tm.repository_git_identity
       FROM team_member tm
       JOIN team t ON tm.team_id = t.id
       JOIN project p ON t.project_id = p.id
@@ -57,7 +58,8 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
       status: string
       execution_status: string
       retry_tripped: number
-      repository_root: string
+      repository_root: string | null
+      repository_git_identity: string | null
     }>
 
   let liveSessions: Record<string, { type: string }> = {}
@@ -105,22 +107,26 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
       continue
     }
     const sourceBranch = resolution.sourceBranch
-    if (sourceBranch && !member.repository_root) {
-      appendTeamEventBestEffort(db, {
-        teamId: member.team_id,
-        kind: "recovery.stage",
-        payload: { member_name: member.name, mechanism: "startup", stage: "failed" },
-      })
-      sendLeadAlert(db, client, {
-        teamId: member.team_id,
-        content: `Startup recovery found orphaned teammate "${member.name}" with writer branch "${sourceBranch}", but no project directory was available to preserve it. No abort was attempted.`,
-        wakeText: `[System: Startup recovery could not preserve ${member.name} without its project directory; guidance is available in team messages]`,
-      })
-      continue
-    }
-    if (member.repository_root && sourceBranch) {
+    if (sourceBranch) {
+      let repositoryRoot: string
+      try {
+        repositoryRoot = getMemberRepositoryBinding(db, member.team_id, member.name).repositoryRoot
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error)
+        appendTeamEventBestEffort(db, {
+          teamId: member.team_id,
+          kind: "recovery.stage",
+          payload: { member_name: member.name, mechanism: "startup", stage: "failed" },
+        })
+        sendLeadAlert(db, client, {
+          teamId: member.team_id,
+          content: `Startup recovery found orphaned writer "${member.name}", but its project directory and repository binding could not be resolved (${detail}). No abort was attempted.`,
+          wakeText: `[System: Startup recovery could not resolve ${member.name}'s repository; guidance is available in team messages]`,
+        })
+        continue
+      }
       const safeBranch = preservedBranchName(member.project_name, member.team_name, member.team_id, member.name)
-      const ok = await preserveBranch(sourceBranch, safeBranch, member.repository_root)
+      const ok = await preserveBranch(sourceBranch, safeBranch, repositoryRoot)
       if (!ok) {
         appendTeamEventBestEffort(db, {
           teamId: member.team_id,
@@ -262,8 +268,9 @@ export async function recoverOrphanedWorktrees(db: Database, client: PluginClien
   )
 
   const repositories = db.query(
-    `SELECT DISTINCT p.path AS repository_root
-     FROM team t JOIN project p ON p.id = t.project_id
+     `SELECT DISTINCT COALESCE(tm.repository_root, p.path) AS repository_root
+      FROM team t JOIN project p ON p.id = t.project_id
+      LEFT JOIN team_member tm ON tm.team_id = t.id
      WHERE (? IS NULL OR t.controller_directory = ?
        OR (t.controller_directory IS NULL AND t.project_id = ?))
        AND p.path <> ''`,
@@ -279,7 +286,8 @@ export async function recoverOrphanedWorktrees(db: Database, client: PluginClien
           `SELECT tm.worktree_dir FROM team_member tm
            JOIN team t ON tm.team_id = t.id
            JOIN project p ON p.id = t.project_id
-           WHERE tm.worktree_dir IS NOT NULL AND t.status = 'active' AND p.path = ?`,
+           WHERE tm.worktree_dir IS NOT NULL AND t.status = 'active'
+             AND COALESCE(tm.repository_root, p.path) = ?`,
         ).all(repository.repository_root) as Array<{ worktree_dir: string }>).map(row => row.worktree_dir),
       )
 
@@ -393,8 +401,10 @@ export async function recoverOrphanedBranches(db: Database, controllerDirectory:
   let removed = 0
 
   const archivedTeams = db.query(
-    `SELECT t.id, t.name, COALESCE(p.slug, p.name) as project_name, p.path as repository_root
+    `SELECT DISTINCT t.id, t.name, COALESCE(p.slug, p.name) as project_name,
+            COALESCE(tm.repository_root, p.path) as repository_root
      FROM team t JOIN project p ON t.project_id = p.id
+     LEFT JOIN team_member tm ON tm.team_id = t.id
      WHERE t.status = 'archived'
        AND (t.controller_directory = ? OR (t.controller_directory IS NULL AND t.project_id = ?))
        AND NOT EXISTS (
@@ -416,7 +426,7 @@ export async function recoverOrphanedBranches(db: Database, controllerDirectory:
       `SELECT worktree_branch, merged_source_branch FROM team_member tm
        JOIN team t ON t.id = tm.team_id
        JOIN project p ON p.id = t.project_id
-       WHERE p.path = ? AND tm.merge_state IN ('none', 'merging')
+       WHERE COALESCE(tm.repository_root, p.path) = ? AND tm.merge_state IN ('none', 'merging')
          AND (tm.worktree_branch IS NOT NULL OR tm.merged_source_branch IS NOT NULL)`,
     ).all(repositoryRoot) as Array<{ worktree_branch: string | null; merged_source_branch: string | null }>)
       .flatMap(row => [row.worktree_branch, row.merged_source_branch])

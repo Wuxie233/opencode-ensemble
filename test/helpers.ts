@@ -114,6 +114,10 @@ export function setupDeps(db?: EnsembleDatabase): ToolDeps & { client: ReturnTyp
         }
       },
     },
+    mergeEvidenceOps: {
+      async pinSource(_repositoryRoot, sourceBranch) { return { sourceBranch, sourceOid: "pinned-source-oid" } },
+      async verifyIntegrated() { return { kind: "not-integrated" } },
+    },
   }
 }
 

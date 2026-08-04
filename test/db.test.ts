@@ -222,6 +222,34 @@ describe("schema migrations", () => {
       .toEqual({ repository_root: "/controller/child", repository_git_identity: "/controller/child/.git", worktree_name: "writer-wt" })
   })
 
+  test("migration 21 adds immutable merged source cleanup evidence", () => {
+    for (let i = 0; i < 20; i++) {
+      db.exec(MIGRATIONS[i]!)
+      db.exec(`PRAGMA user_version = ${i + 1}`)
+    }
+    expect(db.query("PRAGMA table_info(team_member)").all())
+      .not.toEqual(expect.arrayContaining([expect.objectContaining({ name: "merged_source_oid" })]))
+
+    applyMigrations(db)
+
+    expect(db.query("PRAGMA table_info(team_member)").all())
+      .toEqual(expect.arrayContaining([expect.objectContaining({ name: "merged_source_oid" })]))
+  })
+
+  test("migration 22 adds durable spawn recovery stage without rewriting migration 20", () => {
+    for (let i = 0; i < 21; i++) {
+      db.exec(MIGRATIONS[i]!)
+      db.exec(`PRAGMA user_version = ${i + 1}`)
+    }
+    expect(db.query("PRAGMA table_info(team_spawn_attempt)").all())
+      .not.toEqual(expect.arrayContaining([expect.objectContaining({ name: "stage" })]))
+
+    applyMigrations(db)
+
+    expect(db.query("PRAGMA table_info(team_spawn_attempt)").all())
+      .toEqual(expect.arrayContaining([expect.objectContaining({ name: "stage" })]))
+  })
+
   test("artifact rows and task contract bindings are immutable", () => {
     applyMigrations(db)
     db.exec("PRAGMA foreign_keys=ON")

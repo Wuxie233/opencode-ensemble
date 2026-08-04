@@ -99,10 +99,21 @@ when running on Bun, `node:sqlite` when running on Node/Electron. Six tables:
 - team_message — message log (from, to, content, delivered flag)
 - team_event — privacy-safe immutable lifecycle rows retained until explicit Team purge; observation only, never a runtime source of truth
 
-`project.path` is the Team data-plane repository root. `team.controller_directory`
-is the Lead plugin directory that owns recovery, watchdog, and purge lifecycle.
-SDK worktree/workspace/session calls and Git operations use the persisted Team
-repository root; lifecycle discovery remains scoped to the controller directory.
+`project.path` is the Team's default data-plane repository root.
+`team.controller_directory` is the Lead plugin directory that owns recovery,
+watchdog, and purge lifecycle. A writer may persist an exact child Git root and
+common-dir identity on `team_member`; every later SDK worktree/workspace call and
+Git preservation, merge, recovery, or cleanup operation for that writer must use
+the member binding. Legacy both-null member bindings fall back to the Team root;
+partial bindings fail closed. Lifecycle discovery remains scoped to the
+controller directory.
+
+`team_spawn_attempt` durably owns external resources between task claim and
+member registration. Create it before the first SDK side effect, update its
+stage and discovered identifiers before crossing the next boundary, and remove
+it only after member ownership transfers or cleanup is proven. Timeouts retain
+the attempt and task because the SDK request may complete late; startup recovery
+and `team_cleanup` reconcile attempts before releasing tasks or archiving.
 
 The SQLite connection, dashboard listener, and `ActivityBuffer` are process-shared across directory plugin instances. Directory-local watchdogs, registries, trackers, and rate limiters remain isolated. Release shared resources only after the final directory and any in-flight recovery task finish.
 
@@ -306,6 +317,11 @@ Three hooks wired in index.ts:
     bounded prompt context; it never forks or changes the predecessor session.
     The 32 KiB packet keeps the original task and early context plus recent
     progress/errors when truncation is required.
+15. `team_merge` pins a source ref to an immutable commit OID before overlap,
+    integration proof, merge, or deletion. Persist that OID with merge
+    completion; delayed cleanup may delete the branch only with an atomic
+    expected-OID check. A moved ref and legacy merged rows without an OID remain
+    preserved for manual cleanup.
 
 ## Branch Preservation (Critical — Do Not Skip)
 
@@ -335,6 +351,8 @@ that is not tied to any worktree. OpenCode cannot delete it.
    verify/re-preserve before controller settlement or a late re-abort
 7. `team-spawn.ts` → prompt or post-create registration failure — preserves
    any created worktree branch before aborting the child session
+8. `spawn-attempt-recovery.ts` → late or interrupted spawn cleanup — preserves
+   an owned source branch before aborting a durably recorded child session
 
 ### What goes wrong if you skip it
 
@@ -354,6 +372,12 @@ A missing failed-writer ref is never evidence that the writer was empty.
 identity and spawn baseline plus a surviving matching ref or a clean matching
 worktree. `team_cleanup` consumes that explicit settlement and never infers it
 from missing messages, refs, or worktrees.
+
+Legacy Teams may recover a null Git identity only by exact-verifying the
+persisted repository root and conditionally recording the matching common-dir.
+An already-integrated branch settles only when its pinned commit is an ancestor
+of HEAD or isolated-index Git plumbing proves applying its net tree change is a
+no-op. Messages, branch names, patch IDs, and missing refs are never sufficient.
 
 ## SDK Transport (Critical — Do Not Change)
 

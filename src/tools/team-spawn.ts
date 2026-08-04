@@ -245,6 +245,7 @@ function updateSpawnAttempt(
   teamId: string,
   name: string,
   fields: Partial<{
+    stage: "worktree_creating" | "workspace_creating" | "session_creating" | "registered"
     worktree_dir: string
     worktree_branch: string
     worktree_source_branch: string
@@ -431,8 +432,24 @@ async function executeTeamSpawnLocked(
   if (useWorktree) {
     try {
       log(`spawn:worktree:start name=${args.name}`)
+      const worktreeCreate = deps.client.worktree.create({
+        directory: repository.repositoryRoot,
+        worktreeCreateInput: { name: worktreeName },
+      })
+      worktreeCreate.then(result => {
+        const late = result.data
+        if (!late || late.name !== worktreeName || !late.directory || !late.branch.trim()) return
+        try {
+          updateSpawnAttempt(deps, teamInfo.teamId, args.name, {
+            worktree_dir: late.directory,
+            worktree_branch: late.branch,
+          })
+        } catch {
+          // Ownership already transferred or settled before the late response.
+        }
+      }).catch(() => { /* the normal await path renders the error */ })
       const result = await withTimeout(
-        deps.client.worktree.create({ directory: repository.repositoryRoot, worktreeCreateInput: { name: worktreeName } }),
+        worktreeCreate,
         getSpawnTimeout(), `worktree.create for "${args.name}"`
       )
       if (!result.data) throw new Error("worktree.create returned no worktree")
@@ -506,9 +523,20 @@ async function executeTeamSpawnLocked(
   let workspaceId: string | null = null
   if (worktreeDir && worktreeBranch) {
     try {
+      updateSpawnAttempt(deps, teamInfo.teamId, args.name, { stage: "workspace_creating" })
       log(`spawn:workspace:start name=${args.name}`)
+      const workspaceCreate = deps.client.workspace.create({ directory: repository.repositoryRoot, branch: worktreeBranch })
+      workspaceCreate.then(result => {
+        const lateWorkspaceId = result.data?.id
+        if (!lateWorkspaceId) return
+        try {
+          updateSpawnAttempt(deps, teamInfo.teamId, args.name, { workspace_id: lateWorkspaceId })
+        } catch {
+          // Ownership already transferred or settled before the late response.
+        }
+      }).catch(() => { /* the normal await path renders the error */ })
       const wsResult = await withTimeout(
-        deps.client.workspace.create({ directory: repository.repositoryRoot, branch: worktreeBranch }),
+        workspaceCreate,
         getSpawnTimeout(), `workspace.create for "${args.name}"`
       )
       if (wsResult.data) {
@@ -584,15 +612,28 @@ async function executeTeamSpawnLocked(
   // Falls back to no workspace binding if workspace.create failed.
   let childSessionId: string | undefined
   try {
+    if (useWorktree) updateSpawnAttempt(deps, teamInfo.teamId, args.name, { stage: "session_creating" })
     log(`spawn:session:start name=${args.name}`)
-    const createResult = await withTimeout(
-      deps.client.session.create({
+    const sessionCreate = deps.client.session.create({
         parentID: sessionId,
         title: `${args.name} (@${profile.name} teammate)`,
         permission,
         directory: workspaceId ? repository.repositoryRoot : (worktreeDir ?? repository.repositoryRoot),
         ...(workspaceId ? { workspaceID: workspaceId } : {}),
-      }),
+      })
+    if (useWorktree) {
+      sessionCreate.then(result => {
+        const lateSessionId = result.data?.id
+        if (!lateSessionId) return
+        try {
+          updateSpawnAttempt(deps, teamInfo.teamId, args.name, { session_id: lateSessionId })
+        } catch {
+          // Ownership already transferred or settled before the late response.
+        }
+      }).catch(() => { /* the normal await path renders the error */ })
+    }
+    const createResult = await withTimeout(
+      sessionCreate,
       getSpawnTimeout(), `session.create for "${args.name}"`
     )
     childSessionId = createResult.data?.id

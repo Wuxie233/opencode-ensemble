@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { executeTeamCleanup } from "../src/tools/team-cleanup"
-import { verifyFailedWriterEvidence } from "../src/tools/merge-helper"
+import { deleteBranch, verifyFailedWriterEvidence, verifySourceAlreadyIntegrated } from "../src/tools/merge-helper"
 import { executeTeamMerge } from "../src/tools/team-merge"
 import { insertMember, insertTeam, setupDeps } from "./helpers"
 
@@ -52,7 +52,7 @@ describe("failed writer Git evidence", () => {
         const input = evidenceInput(repository)
         if (branch === "writer-source") input.preservedBranch = "missing-preserved"
         else input.sourceBranch = "missing-source"
-        expect(await verifyFailedWriterEvidence(input)).toEqual({ kind: "empty", sourceBranch: branch })
+        expect(await verifyFailedWriterEvidence(input)).toEqual({ kind: "empty", sourceBranch: branch, sourceOid: repository.baseline })
       } finally {
         await rm(repository.repo, { recursive: true, force: true })
       }
@@ -67,7 +67,7 @@ describe("failed writer Git evidence", () => {
         ...evidenceInput(repository),
         preservedBranch: "missing-preserved",
         worktreeDir: repository.repo,
-      })).toEqual({ kind: "empty", sourceBranch: "writer-source" })
+      })).toEqual({ kind: "empty", sourceBranch: "writer-source", sourceOid: repository.baseline })
     } finally {
       await rm(repository.repo, { recursive: true, force: true })
     }
@@ -83,6 +83,7 @@ describe("failed writer Git evidence", () => {
       expect(await verifyFailedWriterEvidence(evidenceInput(repository))).toEqual({
         kind: "merge",
         sourceBranch: "ensemble/preserved/project/team/writer",
+        sourceOid: await git(repository.repo, ["rev-parse", "ensemble/preserved/project/team/writer"]),
       })
     } finally {
       await rm(repository.repo, { recursive: true, force: true })
@@ -98,7 +99,11 @@ describe("failed writer Git evidence", () => {
         ...evidenceInput(repository),
         preservedBranch: "missing-preserved",
         worktreeDir: repository.repo,
-      })).toEqual({ kind: "merge", sourceBranch: "writer-source" })
+      })).toEqual({
+        kind: "merge",
+        sourceBranch: "writer-source",
+        sourceOid: await git(repository.repo, ["rev-parse", "writer-source"]),
+      })
 
       await git(repository.repo, ["checkout", "-b", "other-branch", repository.baseline])
       expect(await verifyFailedWriterEvidence({
@@ -119,10 +124,7 @@ describe("failed writer Git evidence", () => {
     try {
       const missing = await verifyFailedWriterEvidence(evidenceInput(repository))
       expect(missing).toEqual({ kind: "unverifiable", reason: "no recorded branch ref or live baseline worktree survives" })
-      expect(await verifyFailedWriterEvidence({ ...evidenceInput(repository), baselineOid: null })).toEqual({
-        kind: "unverifiable",
-        reason: "the writer has no persisted branch baseline",
-      })
+      expect(await verifyFailedWriterEvidence({ ...evidenceInput(repository), baselineOid: null })).toEqual(missing)
     } finally {
       await rm(repository.repo, { recursive: true, force: true })
     }
@@ -176,6 +178,135 @@ describe("failed writer Git evidence", () => {
   })
 })
 
+describe("already-integrated Git evidence", () => {
+  test("proves ancestry without touching the repository index", async () => {
+    const repository = await createRepository()
+    try {
+      await git(repository.repo, ["checkout", "-b", "writer", repository.baseline])
+      const sourceOid = await commitFile(repository.repo, "writer.txt", "writer")
+      await git(repository.repo, ["checkout", "main"])
+      await git(repository.repo, ["merge", "--ff-only", "writer"])
+      const beforeIndex = await git(repository.repo, ["write-tree"])
+
+      expect(await verifySourceAlreadyIntegrated(
+        repository.repo,
+        repository.identity,
+        sourceOid,
+        repository.baseline,
+      )).toEqual({ kind: "integrated" })
+      expect(await git(repository.repo, ["write-tree"])).toBe(beforeIndex)
+    } finally {
+      await rm(repository.repo, { recursive: true, force: true })
+    }
+  })
+
+  test("proves an equivalent cherry-picked net change with an isolated index", async () => {
+    const repository = await createRepository()
+    try {
+      await git(repository.repo, ["checkout", "-b", "writer", repository.baseline])
+      const sourceOid = await commitFile(repository.repo, "writer.txt", "writer")
+      await git(repository.repo, ["checkout", "main"])
+      await commitFile(repository.repo, "lead.txt", "lead")
+      await git(repository.repo, ["cherry-pick", sourceOid])
+      const beforeIndex = await git(repository.repo, ["write-tree"])
+
+      expect(await verifySourceAlreadyIntegrated(
+        repository.repo,
+        repository.identity,
+        sourceOid,
+        repository.baseline,
+      )).toEqual({ kind: "integrated" })
+      expect(await git(repository.repo, ["write-tree"])).toBe(beforeIndex)
+      expect(await git(repository.repo, ["status", "--porcelain"])).toBe("")
+    } finally {
+      await rm(repository.repo, { recursive: true, force: true })
+    }
+  })
+
+  test("proves a multi-commit source already present as one squash commit", async () => {
+    const repository = await createRepository()
+    try {
+      await git(repository.repo, ["checkout", "-b", "writer", repository.baseline])
+      await commitFile(repository.repo, "first.txt", "first")
+      const sourceOid = await commitFile(repository.repo, "second.txt", "second")
+      await git(repository.repo, ["checkout", "main"])
+      await git(repository.repo, ["merge", "--squash", "writer"])
+      await git(repository.repo, ["-c", "user.name=Ensemble Test", "-c", "user.email=ensemble@example.com", "commit", "-m", "squashed writer"])
+
+      expect(await verifySourceAlreadyIntegrated(
+        repository.repo,
+        repository.identity,
+        sourceOid,
+        repository.baseline,
+      )).toEqual({ kind: "integrated" })
+    } finally {
+      await rm(repository.repo, { recursive: true, force: true })
+    }
+  })
+
+  test("uses a merge base for legacy null baseline but never calls a changed tree integrated", async () => {
+    const repository = await createRepository()
+    try {
+      await git(repository.repo, ["checkout", "-b", "writer", repository.baseline])
+      const sourceOid = await commitFile(repository.repo, "writer.txt", "writer")
+      await git(repository.repo, ["checkout", "main"])
+
+      expect(await verifySourceAlreadyIntegrated(repository.repo, repository.identity, sourceOid, null))
+        .toEqual({ kind: "not-integrated" })
+    } finally {
+      await rm(repository.repo, { recursive: true, force: true })
+    }
+  })
+
+  test("ignores worktree dirt while failing closed for conflicts, identity mismatch, and unrelated history", async () => {
+    const repository = await createRepository()
+    try {
+      await git(repository.repo, ["checkout", "-b", "writer", repository.baseline])
+      const sourceOid = await commitFile(repository.repo, "base.txt", "writer")
+      await git(repository.repo, ["checkout", "main"])
+
+      await writeFile(path.join(repository.repo, "dirty.txt"), "dirty")
+      expect((await verifySourceAlreadyIntegrated(repository.repo, repository.identity, sourceOid, repository.baseline)).kind)
+        .toBe("not-integrated")
+      await rm(path.join(repository.repo, "dirty.txt"))
+
+      await commitFile(repository.repo, "base.txt", "lead")
+      expect((await verifySourceAlreadyIntegrated(repository.repo, repository.identity, sourceOid, repository.baseline)).kind)
+        .toBe("unverifiable")
+      expect((await verifySourceAlreadyIntegrated(repository.repo, `${repository.repo}/other.git`, sourceOid, repository.baseline)).kind)
+        .toBe("unverifiable")
+
+      await git(repository.repo, ["checkout", "--orphan", "unrelated"])
+      await git(repository.repo, ["rm", "-rf", "."])
+      const unrelated = await commitFile(repository.repo, "unrelated.txt", "unrelated")
+      expect((await verifySourceAlreadyIntegrated(repository.repo, repository.identity, sourceOid, null)).kind)
+        .toBe("unverifiable")
+      expect(unrelated).not.toBe(sourceOid)
+    } finally {
+      await rm(repository.repo, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("conditional branch deletion", () => {
+  test("deletes only the exact pinned tip and preserves a ref that moved", async () => {
+    const repository = await createRepository()
+    try {
+      await git(repository.repo, ["branch", "writer", repository.baseline])
+      expect(await deleteBranch("writer", repository.repo, repository.baseline)).toBe(true)
+      expect(await git(repository.repo, ["branch", "writer", repository.baseline])).toBe("")
+      await git(repository.repo, ["checkout", "writer"])
+      const movedOid = await commitFile(repository.repo, "moved.txt", "moved")
+      await git(repository.repo, ["checkout", "main"])
+
+      expect(await deleteBranch("writer", repository.repo, repository.baseline)).toBe(false)
+      expect(await git(repository.repo, ["rev-parse", "writer"])).toBe(movedOid)
+    } finally {
+      await rm(repository.repo, { recursive: true, force: true })
+    }
+  })
+})
+
 describe("failed writer explicit merge settlement", () => {
   test("atomically records verified-empty state and allows cleanup only afterward", async () => {
     const deps = setupDeps()
@@ -200,13 +331,13 @@ describe("failed writer explicit merge settlement", () => {
       },
       async () => true,
       async () => [],
-      async () => ({ kind: "empty", sourceBranch: "immutable-writer" }),
+      async () => ({ kind: "empty", sourceBranch: "immutable-writer", sourceOid: "baseline" }),
     )
     expect(settled).toContain("empty at its persisted baseline")
     expect(mergeCalls).toBe(0)
     expect(deps.db.query(
-      "SELECT merge_state, merged_source_branch FROM team_member WHERE team_id = 't1' AND name = 'writer'",
-    ).get()).toEqual({ merge_state: "merged", merged_source_branch: "immutable-writer" })
+      "SELECT merge_state, merged_source_branch, merged_source_oid FROM team_member WHERE team_id = 't1' AND name = 'writer'",
+    ).get()).toEqual({ merge_state: "merged", merged_source_branch: "immutable-writer", merged_source_oid: "baseline" })
     expect(deps.db.query("SELECT kind FROM team_event WHERE team_id = 't1' AND kind LIKE 'merge.%' ORDER BY time_created, id").all())
       .toEqual([{ kind: "merge.started" }, { kind: "merge.completed" }])
 
@@ -235,14 +366,100 @@ describe("failed writer explicit merge settlement", () => {
       },
       async () => true,
       async () => [],
-      async () => ({ kind: "merge", sourceBranch: "immutable-writer" }),
+      async () => ({ kind: "merge", sourceBranch: "immutable-writer", sourceOid: "advanced-oid" }),
     )
 
     expect(result).toContain("Merged writer's changes")
-    expect(mergedBranches).toEqual(["immutable-writer"])
+    expect(mergedBranches).toEqual(["advanced-oid"])
     expect(deps.db.query(
-      "SELECT merge_state, merged_source_branch, worktree_branch FROM team_member WHERE team_id = 't1' AND name = 'writer'",
-    ).get()).toEqual({ merge_state: "merged", merged_source_branch: "immutable-writer", worktree_branch: null })
+      "SELECT merge_state, merged_source_branch, merged_source_oid, worktree_branch FROM team_member WHERE team_id = 't1' AND name = 'writer'",
+    ).get()).toEqual({ merge_state: "merged", merged_source_branch: "immutable-writer", merged_source_oid: "advanced-oid", worktree_branch: null })
+  })
+
+  test("keeps the diagnostic label while overlap and merge use only the pinned OID", async () => {
+    const deps = setupDeps()
+    insertTeam(deps.db, "t1", "pinned-oid", "lead")
+    insertMember(deps.db, "t1", "writer", "writer-session", "shutdown", "idle")
+    deps.db.run("UPDATE team_member SET worktree_branch = 'movable-writer' WHERE team_id = 't1' AND name = 'writer'")
+    const gitOperands: string[] = []
+
+    await executeTeamMerge(
+      deps,
+      { member: "writer" },
+      "lead",
+      async source => {
+        gitOperands.push(`merge:${source}`)
+        return { ok: true }
+      },
+      async () => true,
+      async source => {
+        gitOperands.push(`overlap:${source}`)
+        return []
+      },
+      verifyFailedWriterEvidence,
+      async (_root, label) => ({ sourceBranch: label, sourceOid: "immutable-source-oid" }),
+      async () => ({ kind: "not-integrated" }),
+    )
+
+    expect(gitOperands).toEqual(["overlap:immutable-source-oid", "merge:immutable-source-oid"])
+    expect(deps.db.query("SELECT merged_source_branch FROM team_member WHERE team_id = 't1' AND name = 'writer'").get())
+      .toEqual({ merged_source_branch: "movable-writer" })
+  })
+
+  test("settles a pinned source already integrated without invoking overlap or merge", async () => {
+    const deps = setupDeps()
+    insertTeam(deps.db, "t1", "already-integrated", "lead")
+    insertMember(deps.db, "t1", "writer", "writer-session", "shutdown", "idle")
+    deps.db.run("UPDATE team_member SET worktree_branch = 'writer-label' WHERE team_id = 't1' AND name = 'writer'")
+    let gitMutationCalls = 0
+
+    const result = await executeTeamMerge(
+      deps,
+      { member: "writer" },
+      "lead",
+      async () => {
+        gitMutationCalls++
+        return { ok: true }
+      },
+      async () => true,
+      async () => {
+        gitMutationCalls++
+        return []
+      },
+      verifyFailedWriterEvidence,
+      async (_root, label) => ({ sourceBranch: label, sourceOid: "integrated-oid" }),
+      async () => ({ kind: "integrated" }),
+    )
+
+    expect(result).toContain("already integrated")
+    expect(gitMutationCalls).toBe(0)
+    expect(deps.db.query("SELECT merge_state, merged_source_branch FROM team_member WHERE team_id = 't1' AND name = 'writer'").get())
+      .toEqual({ merge_state: "merged", merged_source_branch: "writer-label" })
+  })
+
+  test("passes the pinned OID to conditional branch deletion", async () => {
+    const deps = setupDeps()
+    insertTeam(deps.db, "t1", "conditional-delete", "lead")
+    insertMember(deps.db, "t1", "writer", "writer-session", "shutdown", "idle")
+    deps.db.run("UPDATE team_member SET worktree_branch = 'writer-label' WHERE team_id = 't1' AND name = 'writer'")
+    const deletions: Array<{ branch: string; expectedOid?: string }> = []
+
+    await executeTeamMerge(
+      deps,
+      { member: "writer" },
+      "lead",
+      async () => ({ ok: true }),
+      async (branch, _cwd, expectedOid) => {
+        deletions.push({ branch, expectedOid })
+        return false
+      },
+      async () => [],
+      verifyFailedWriterEvidence,
+      async (_root, label) => ({ sourceBranch: label, sourceOid: "immutable-source-oid" }),
+      async () => ({ kind: "not-integrated" }),
+    )
+
+    expect(deletions).toEqual([{ branch: "writer-label", expectedOid: "immutable-source-oid" }])
   })
 
   test("messages never make missing branch evidence sufficient", async () => {

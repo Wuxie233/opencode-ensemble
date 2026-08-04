@@ -409,6 +409,12 @@ export const MIGRATIONS: string[] = [
      time_updated            INTEGER NOT NULL,
      PRIMARY KEY (team_id, name)
    );`,
+  // Migration 21: Retain the immutable merged source OID so delayed cleanup
+  // can conditionally delete only the exact ref tip that was integrated.
+  `ALTER TABLE team_member ADD COLUMN merged_source_oid TEXT;`,
+  // Migration 22: Track which external spawn operation may still finish late.
+  `ALTER TABLE team_spawn_attempt ADD COLUMN stage TEXT NOT NULL DEFAULT 'worktree_creating'
+     CHECK(stage IN ('worktree_creating', 'workspace_creating', 'session_creating', 'registered'));`,
 ]
 
 /**

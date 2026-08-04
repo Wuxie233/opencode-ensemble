@@ -48,6 +48,7 @@ import { handleRetryStatus } from "./retry-breaker"
 import { recordUsageFromV2Event } from "./telemetry"
 import { TerminalLivenessGuard } from "./terminal-liveness"
 import { canonicalControllerDirectory } from "./repository-binding"
+import { recoverSpawnAttempts } from "./spawn-attempt-recovery"
 
 const DEFAULT_RATE_LIMIT_REFILL = 2
 const DEFAULT_RATE_LIMIT_INTERVAL_MS = 1000
@@ -125,6 +126,10 @@ const plugin: Plugin = async (input) => {
         log("init:recovery:start (main instance)")
         const recovery = await recoverStaleMembers(sharedDb, client, controllerDirectory)
         if (recovery.interrupted > 0) log(`init:recovery:interrupted=${recovery.interrupted}`)
+        const spawnRecovery = await recoverSpawnAttempts(sharedDb, client, controllerDirectory)
+        if (spawnRecovery.recovered > 0 || spawnRecovery.blocked > 0) {
+          log(`init:spawn-recovery:recovered=${spawnRecovery.recovered} blocked=${spawnRecovery.blocked}`)
+        }
         await Promise.all([
           recoverUndeliveredMessages(sharedDb, client, registry),
           recoverOrphanedWorktrees(sharedDb, client, controllerDirectory),

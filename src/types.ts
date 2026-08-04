@@ -2,6 +2,7 @@ import type { Database } from "./db"
 import type { MemberRegistry, DescendantTracker, PendingPurgeApprovals } from "./state"
 import type { EnsembleConfig } from "./config"
 import type { RepositoryBindingOps } from "./repository-binding"
+import type { PinMergeSourceFn, VerifySourceAlreadyIntegratedFn } from "./tools/merge-helper"
 
 /**
  * Shared dependencies injected into every tool's execute function.
@@ -20,6 +21,11 @@ export interface ToolDeps {
   config: Required<EnsembleConfig>
   /** Injectable Git binding operations; production uses the default implementation. */
   repositoryBindingOps?: RepositoryBindingOps
+  /** Injectable immutable merge evidence operations; production uses Git plumbing. */
+  mergeEvidenceOps?: {
+    pinSource: PinMergeSourceFn
+    verifyIntegrated: VerifySourceAlreadyIntegratedFn
+  }
 }
 
 /** A single permission rule for session-level enforcement. */

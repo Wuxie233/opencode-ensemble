@@ -10,6 +10,7 @@ import { recomputeCurrentPhase } from "./task-phase"
 import { resolveAbortBranch } from "./abort-preservation"
 import { appendTeamEventBestEffort } from "./team-event"
 import { appendMemberTransition, releaseMemberTasks } from "./telemetry"
+import { getMemberRepositoryBinding } from "./repository-binding"
 
 interface WatchdogOpts {
   db: Database
@@ -80,7 +81,7 @@ export class Watchdog {
   async cleanupStaleWorktrees(): Promise<void> {
     const cutoff = Date.now() - Watchdog.STALE_THRESHOLD_MS
     const stale = this.db.query(
-      `SELECT tm.team_id, tm.name, tm.worktree_dir, tm.workspace_id, p.path as repository_root
+      `SELECT tm.team_id, tm.name, tm.worktree_dir, tm.workspace_id
        FROM team_member tm
        JOIN team t ON tm.team_id = t.id
        JOIN project p ON p.id = t.project_id
@@ -90,14 +91,15 @@ export class Watchdog {
           AND tm.time_updated < ?
           AND (? IS NULL OR t.controller_directory = ?
             OR (t.controller_directory IS NULL AND t.project_id = ?))`
-    ).all(cutoff, this.cwd ?? null, this.cwd ?? null, this.cwd ?? null) as Array<{ team_id: string; name: string; worktree_dir: string; workspace_id: string | null; repository_root: string }>
+    ).all(cutoff, this.cwd ?? null, this.cwd ?? null, this.cwd ?? null) as Array<{ team_id: string; name: string; worktree_dir: string; workspace_id: string | null }>
 
     for (const m of stale) {
       try {
+        const repositoryRoot = getMemberRepositoryBinding(this.db, m.team_id, m.name).repositoryRoot
         if (m.workspace_id) {
-          await this.client.workspace.remove({ directory: m.repository_root, id: m.workspace_id })
+          await this.client.workspace.remove({ directory: repositoryRoot, id: m.workspace_id })
         }
-        await this.client.worktree.remove({ directory: m.repository_root, worktreeRemoveInput: { directory: m.worktree_dir } })
+        await this.client.worktree.remove({ directory: repositoryRoot, worktreeRemoveInput: { directory: m.worktree_dir } })
         this.db.run(
           "UPDATE team_member SET worktree_dir = NULL, workspace_id = NULL WHERE team_id = ? AND name = ?",
           [m.team_id, m.name]
@@ -210,7 +212,7 @@ export class Watchdog {
     const stale = this.db.query(
       `SELECT tm.team_id, tm.name, tm.session_id, tm.time_updated, tm.worktree_branch, tm.worktree_dir,
                t.name as team_name, COALESCE(p.slug, p.name) as project_name,
-               p.path as repository_root
+                tm.repository_root, tm.repository_git_identity
        FROM team_member tm
        JOIN team t ON tm.team_id = t.id
        JOIN project p ON t.project_id = p.id
@@ -229,7 +231,8 @@ export class Watchdog {
       worktree_dir: string | null
       team_name: string
       project_name: string
-      repository_root: string
+      repository_root: string | null
+      repository_git_identity: string | null
     }>
 
     for (const member of stale) {
@@ -263,23 +266,27 @@ export class Watchdog {
         continue
       }
       const sourceBranch = resolution.sourceBranch
-      if (sourceBranch && !member.repository_root) {
-        appendTeamEventBestEffort(this.db, {
-          teamId: member.team_id,
-          kind: "recovery.stage",
-          payload: { member_name: member.name, mechanism: "watchdog", stage: "failed" },
-        })
-        sendLeadAlert(this.db, this.client, {
-          teamId: member.team_id,
-          content: `Teammate "${member.name}" exceeded its timeout with writer branch "${sourceBranch}", but no project directory was available to preserve it. No abort was attempted.`,
-          wakeText: `[System: Watchdog could not preserve ${member.name} without its project directory; guidance is available in team messages]`,
-        })
-        this.abortingSessions.delete(member.session_id)
-        continue
-      }
-      if (member.repository_root && sourceBranch) {
+      if (sourceBranch) {
+        let repositoryRoot: string
+        try {
+          repositoryRoot = getMemberRepositoryBinding(this.db, member.team_id, member.name).repositoryRoot
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error)
+          appendTeamEventBestEffort(this.db, {
+            teamId: member.team_id,
+            kind: "recovery.stage",
+            payload: { member_name: member.name, mechanism: "watchdog", stage: "failed" },
+          })
+          sendLeadAlert(this.db, this.client, {
+            teamId: member.team_id,
+            content: `Teammate "${member.name}" exceeded its timeout, but its repository binding could not be resolved (${detail}). No abort was attempted.`,
+            wakeText: `[System: Watchdog could not resolve ${member.name}'s repository; guidance is available in team messages]`,
+          })
+          this.abortingSessions.delete(member.session_id)
+          continue
+        }
         const safeBranch = preservedBranchName(member.project_name, member.team_name, member.team_id, member.name)
-        const ok = await preserveBranch(sourceBranch, safeBranch, member.repository_root)
+        const ok = await preserveBranch(sourceBranch, safeBranch, repositoryRoot)
         if (!ok) {
           appendTeamEventBestEffort(this.db, {
             teamId: member.team_id,

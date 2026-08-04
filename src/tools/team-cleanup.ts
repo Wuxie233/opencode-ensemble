@@ -11,7 +11,8 @@ import { sendLeadAlert } from "../messaging"
 import { recomputeCurrentPhase } from "../task-phase"
 import { appendMemberTransition, releaseMemberTasks } from "../telemetry"
 import { resolveAbortBranch, type AbortBranchResolution } from "../abort-preservation"
-import { getTeamRepositoryBinding } from "../repository-binding"
+import { getMemberRepositoryBinding } from "../repository-binding"
+import { recoverSpawnAttempts } from "../spawn-attempt-recovery"
 
 type PurgeApprovalFn = (preview: string) => Promise<void>
 type ListBranchesFn = (namespace: string, cwd: string) => Promise<string[]>
@@ -45,6 +46,8 @@ interface PurgeMemberResource {
   worktree_dir: string | null
   workspace_id: string | null
   worktree_branch: string | null
+  repository_root: string | null
+  repository_git_identity: string | null
 }
 
 async function listPreservedBranches(teamName: string, cwd: string): Promise<string[]> {
@@ -134,7 +137,9 @@ function getPurgeMemberResources(deps: ToolDeps, targets: PurgeTarget[]): PurgeM
             tm.name as member_name,
             tm.worktree_dir,
             tm.workspace_id,
-            tm.worktree_branch
+             tm.worktree_branch,
+             tm.repository_root,
+             tm.repository_git_identity
      FROM team_member tm
      JOIN team t ON tm.team_id = t.id
      JOIN project p ON t.project_id = p.id
@@ -224,10 +229,17 @@ function countStaleBranchRefs(deps: ToolDeps, target: PurgeTarget): number {
   return collectStaleEnsembleBranches(deps, [target]).length
 }
 
+function purgeRepositoryRoots(deps: ToolDeps, target: PurgeTarget): string[] {
+  const memberRoots = getPurgeMemberResources(deps, [target]).map(resource =>
+    getMemberRepositoryBinding(deps.db, resource.team_id, resource.member_name).repositoryRoot
+  )
+  return [...new Set([target.repository_root, ...memberRoots])]
+}
+
 async function existingWorktreeDirs(deps: ToolDeps, resources: PurgeMemberResource[]): Promise<Set<string>> {
   if (!resources.some(resource => resource.worktree_dir)) return new Set()
   try {
-    const roots = [...new Set(resources.map(resource => getTeamRepositoryBinding(deps.db, resource.team_id).repositoryRoot))]
+    const roots = [...new Set(resources.map(resource => getMemberRepositoryBinding(deps.db, resource.team_id, resource.member_name).repositoryRoot))]
     const listed = await Promise.all(roots.map(directory => deps.client.worktree.list({ directory })))
     return new Set(listed.flatMap(result => result.data ?? []).map(worktree => worktree.directory))
   } catch (err) {
@@ -239,7 +251,7 @@ async function existingWorktreeDirs(deps: ToolDeps, resources: PurgeMemberResour
 async function existingWorkspaceIds(deps: ToolDeps, resources: PurgeMemberResource[]): Promise<Set<string>> {
   if (!resources.some(resource => resource.workspace_id)) return new Set()
   try {
-    const roots = [...new Set(resources.map(resource => getTeamRepositoryBinding(deps.db, resource.team_id).repositoryRoot))]
+    const roots = [...new Set(resources.map(resource => getMemberRepositoryBinding(deps.db, resource.team_id, resource.member_name).repositoryRoot))]
     const listed = await Promise.all(roots.map(directory => deps.client.workspace.list({ directory })))
     return new Set(listed.flatMap(result => result.data ?? []).map(workspace => workspace.id))
   } catch (err) {
@@ -256,7 +268,7 @@ async function cleanupStalePurgeResources(deps: ToolDeps, targets: PurgeTarget[]
   const workspaceIds = await existingWorkspaceIds(deps, resources)
 
   for (const resource of resources) {
-    const repositoryRoot = getTeamRepositoryBinding(deps.db, resource.team_id).repositoryRoot
+    const repositoryRoot = getMemberRepositoryBinding(deps.db, resource.team_id, resource.member_name).repositoryRoot
     if (resource.workspace_id) {
       if (workspaceIds.has(resource.workspace_id)) {
         try {
@@ -452,8 +464,12 @@ export async function executeTeamCleanup(
     validatePurgeResources(deps, targets)
     const branchesByTeam = new Map<string, string[]>()
     for (const target of targets) {
-      const branches = await collectPreservedBranches([target], target.repository_root, _listBranches ?? listPreservedBranches)
-      branchesByTeam.set(target.id, branches.get(target.id) ?? [])
+      const branches: string[] = []
+      for (const repositoryRoot of purgeRepositoryRoots(deps, target)) {
+        const found = await collectPreservedBranches([target], repositoryRoot, _listBranches ?? listPreservedBranches)
+        branches.push(...(found.get(target.id) ?? []))
+      }
+      branchesByTeam.set(target.id, [...new Set(branches)])
     }
     const preview = buildPurgePreview(deps, targets, branchesByTeam)
     if (!args.confirm_purge) {
@@ -472,9 +488,11 @@ export async function executeTeamCleanup(
 
     validatePurgeResources(deps, targets)
     for (const target of targets) {
-      await deleteStaleEnsembleBranches(collectStaleEnsembleBranches(deps, [target]), target.repository_root, delBranch, _branchExists ?? branchExists)
-      const finalBranches = await collectPreservedBranches([target], target.repository_root, _listBranches ?? listPreservedBranches)
-      await deletePreservedBranches(finalBranches, target.repository_root, delBranch)
+      for (const repositoryRoot of purgeRepositoryRoots(deps, target)) {
+        await deleteStaleEnsembleBranches(collectStaleEnsembleBranches(deps, [target]), repositoryRoot, delBranch, _branchExists ?? branchExists)
+        const finalBranches = await collectPreservedBranches([target], repositoryRoot, _listBranches ?? listPreservedBranches)
+        await deletePreservedBranches(finalBranches, repositoryRoot, delBranch)
+      }
     }
 
     deleteArchivedTeams(deps, targets)
@@ -493,12 +511,19 @@ export async function executeTeamCleanup(
     if (archived) return `Team "${archived.name}" was already cleaned up. No action was needed.`
     throw error
   }
-  const repositoryRoot = getTeamRepositoryBinding(deps.db, teamInfo.teamId).repositoryRoot
-
+  await recoverSpawnAttempts(deps.db, deps.client, undefined, teamInfo.teamId)
+  const pendingSpawnAttempts = (deps.db.query(
+    "SELECT COUNT(*) AS count FROM team_spawn_attempt WHERE team_id = ?",
+  ).get(teamInfo.teamId) as { count: number }).count
+  if (pendingSpawnAttempts > 0) {
+    throw new Error(
+      `Cannot clean up team "${teamInfo.teamName}": ${pendingSpawnAttempts} durable spawn attempt(s) remain unresolved. Retry after the SDK request settles or recover the recorded resources.`,
+    )
+  }
   const members = deps.db.query(
     `SELECT name, session_id, status, worktree_dir, worktree_branch,
             worktree_source_branch, worktree_baseline_oid, workspace_id,
-            merge_state, merged_source_branch
+             merge_state, merged_source_branch, merged_source_oid
      FROM team_member WHERE team_id = ?`,
   ).all(teamInfo.teamId) as Array<{
     name: string
@@ -511,6 +536,7 @@ export async function executeTeamCleanup(
     workspace_id: string | null
     merge_state: string
     merged_source_branch: string | null
+    merged_source_oid: string | null
   }>
 
   const active = members.filter(m => m.status !== "shutdown" && m.status !== "error")
@@ -564,6 +590,7 @@ export async function executeTeamCleanup(
       if (!sourceBranch) continue
       const resource = getTeamResourceParts(deps.db, teamInfo.teamId)
       const safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, member.name)
+      const repositoryRoot = getMemberRepositoryBinding(deps.db, teamInfo.teamId, member.name).repositoryRoot
       const ok = await preserve(sourceBranch, safeBranch, repositoryRoot)
       if (!ok) {
         sendLeadAlert(deps.db, deps.client, {
@@ -664,17 +691,23 @@ export async function executeTeamCleanup(
   for (const member of mergedWithBranch) {
     const branch = member.worktree_branch
     if (!branch) continue
-    if (await delBranch(branch, repositoryRoot)) {
+    // Migration 21 cannot reconstruct the exact historical ref tip for legacy
+    // merged rows. Keep that ref rather than deleting a potentially moved tip;
+    // archival remains safe because the durable member record survives purge.
+    if (!member.merged_source_oid) continue
+    const repositoryRoot = getMemberRepositoryBinding(deps.db, teamInfo.teamId, member.name).repositoryRoot
+    if (await delBranch(branch, repositoryRoot, member.merged_source_oid)) {
       deps.db.run("UPDATE team_member SET worktree_branch = NULL WHERE team_id = ? AND name = ?", [teamInfo.teamId, member.name])
       member.worktree_branch = null
     } else {
-      resourceRemovalFailures.push(`${member.name} branch ${branch}: deletion was not confirmed`)
+      resourceRemovalFailures.push(`${member.name} branch ${branch}: conditional deletion was not confirmed`)
     }
   }
 
   // Remove workspaces and worktrees. Successful removals are durable partial
   // progress, while any failure keeps the Team active for an idempotent retry.
   for (const member of members) {
+    const repositoryRoot = getMemberRepositoryBinding(deps.db, teamInfo.teamId, member.name).repositoryRoot
     if (member.workspace_id) {
       try {
         await deps.client.workspace.remove({ directory: repositoryRoot, id: member.workspace_id })

@@ -1,6 +1,7 @@
 import { realpath, stat } from "node:fs/promises"
 import path from "node:path"
 import type { Database } from "./db"
+import { immediateTransaction } from "./db"
 import { runCommand } from "./process"
 
 /** Persisted repository and controller paths owned by one Team. */
@@ -84,6 +85,69 @@ export function getMemberRepositoryBinding(db: Database, teamId: string, memberN
     repositoryRoot: path.normalize(row.repository_root),
     gitIdentity: path.normalize(row.repository_git_identity),
   }
+}
+
+/**
+ * Verify a Team's persisted exact repository root and recover a legacy null
+ * Git identity with a conditional write. Existing identities remain immutable.
+ */
+export async function recoverTeamRepositoryBinding(
+  db: Database,
+  teamId: string,
+  ops: RepositoryBindingOps = repositoryBindingOps,
+): Promise<TeamRepositoryBinding> {
+  const binding = getTeamRepositoryBinding(db, teamId)
+  const verified = await ops.verifyRepositoryRoot(binding.repositoryRoot, true)
+  if (path.normalize(verified.repositoryRoot) !== binding.repositoryRoot) {
+    throw new Error(`Team ${teamId} repository root no longer matches its persisted exact root`)
+  }
+  if (binding.gitIdentity) {
+    if (path.normalize(verified.gitIdentity) !== binding.gitIdentity) {
+      throw new Error(`Team ${teamId} repository Git identity no longer matches its persisted identity`)
+    }
+    return binding
+  }
+
+  immediateTransaction(db, () => {
+    db.run(
+      `UPDATE project SET git_identity = ?, time_updated = ?
+       WHERE id = (SELECT project_id FROM team WHERE id = ?)
+         AND path = ? AND git_identity IS NULL`,
+      [verified.gitIdentity, Date.now(), teamId, binding.repositoryRoot],
+    )
+  })
+  const recovered = getTeamRepositoryBinding(db, teamId)
+  if (recovered.repositoryRoot !== binding.repositoryRoot || recovered.gitIdentity !== path.normalize(verified.gitIdentity)) {
+    throw new Error(`Team ${teamId} legacy Git identity recovery lost its conditional repository binding`)
+  }
+  return recovered
+}
+
+/** Verify and load one writer's persisted repository binding. */
+export async function recoverMemberRepositoryBinding(
+  db: Database,
+  teamId: string,
+  memberName: string,
+  ops: RepositoryBindingOps = repositoryBindingOps,
+): Promise<MemberRepositoryBinding> {
+  const member = getMemberRepositoryBinding(db, teamId, memberName)
+  const row = db.query(
+    "SELECT repository_root, repository_git_identity FROM team_member WHERE team_id = ? AND name = ?",
+  ).get(teamId, memberName) as { repository_root: string | null; repository_git_identity: string | null } | null
+  if (!row) throw new Error(`Teammate "${memberName}" not found in team ${teamId}`)
+  if (row.repository_root === null && row.repository_git_identity === null) {
+    const team = await recoverTeamRepositoryBinding(db, teamId, ops)
+    return { repositoryRoot: team.repositoryRoot, gitIdentity: team.gitIdentity }
+  }
+
+  const verified = await ops.verifyRepositoryRoot(member.repositoryRoot, true)
+  if (path.normalize(verified.repositoryRoot) !== member.repositoryRoot) {
+    throw new Error(`Teammate "${memberName}" repository root no longer matches its persisted exact root`)
+  }
+  if (!member.gitIdentity || path.normalize(verified.gitIdentity) !== member.gitIdentity) {
+    throw new Error(`Teammate "${memberName}" repository Git identity no longer matches its persisted identity`)
+  }
+  return member
 }
 
 /** Canonicalize a controller directory without changing its repository scope. */

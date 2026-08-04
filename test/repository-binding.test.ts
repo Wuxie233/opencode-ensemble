@@ -2,8 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { getMemberRepositoryBinding, verifyRepositoryRoot } from "../src/repository-binding"
-import { insertMember, insertTeam, setupDb } from "./helpers"
+import { getMemberRepositoryBinding, recoverTeamRepositoryBinding, verifyRepositoryRoot } from "../src/repository-binding"
+import { insertMember, insertTeam, setupDb, setupDeps } from "./helpers"
 
 const temporary: string[] = []
 
@@ -81,5 +81,56 @@ describe("repository binding", () => {
     const child = path.join(base, "child")
     await mkdir(child)
     await expect(verifyRepositoryRoot(child, true)).rejects.toThrow("exact Git repository root")
+  })
+
+  test("conditionally recovers a legacy null identity after exact persisted-root verification", async () => {
+    const repository = await tempDir()
+    await git(repository, ["init"])
+    const deps = setupDeps()
+    insertTeam(deps.db, "t1", "legacy", "lead")
+    deps.db.run(
+      `INSERT INTO project (id, name, path, git_identity, status, time_created, time_updated)
+       VALUES (?, 'legacy-project', ?, NULL, 'active', ?, ?)`,
+      [repository, repository, Date.now(), Date.now()],
+    )
+    deps.db.run("UPDATE team SET project_id = ? WHERE id = 't1'", [repository])
+
+    const recovered = await recoverTeamRepositoryBinding(deps.db, "t1")
+
+    expect(recovered.repositoryRoot).toBe(repository)
+    expect(recovered.gitIdentity).toBe(path.join(repository, ".git"))
+    expect(deps.db.query("SELECT git_identity FROM project WHERE id = ?").get(repository))
+      .toEqual({ git_identity: path.join(repository, ".git") })
+  })
+
+  test("fails closed when conditional legacy recovery loses a concurrent identity race", async () => {
+    const deps = setupDeps()
+    insertTeam(deps.db, "t1", "legacy-race", "lead")
+    deps.db.run("UPDATE project SET git_identity = NULL WHERE id = '/tmp/test-project'")
+
+    await expect(recoverTeamRepositoryBinding(deps.db, "t1", {
+      ...deps.repositoryBindingOps!,
+      async verifyRepositoryRoot(directory) {
+        deps.db.run("UPDATE project SET git_identity = '/different/.git' WHERE id = '/tmp/test-project'")
+        return { repositoryRoot: directory, gitIdentity: `${directory}/.git` }
+      },
+    })).rejects.toThrow("conditional repository binding")
+    expect(deps.db.query("SELECT git_identity FROM project WHERE id = '/tmp/test-project'").get())
+      .toEqual({ git_identity: "/different/.git" })
+  })
+
+  test("rejects legacy recovery when verification resolves a different root", async () => {
+    const deps = setupDeps()
+    insertTeam(deps.db, "t1", "legacy-root", "lead")
+    deps.db.run("UPDATE project SET git_identity = NULL WHERE id = '/tmp/test-project'")
+
+    await expect(recoverTeamRepositoryBinding(deps.db, "t1", {
+      ...deps.repositoryBindingOps!,
+      async verifyRepositoryRoot() {
+        return { repositoryRoot: "/tmp/other-project", gitIdentity: "/tmp/other-project/.git" }
+      },
+    })).rejects.toThrow("persisted exact root")
+    expect(deps.db.query("SELECT git_identity FROM project WHERE id = '/tmp/test-project'").get())
+      .toEqual({ git_identity: null })
   })
 })
