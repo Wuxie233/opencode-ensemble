@@ -1,3 +1,4 @@
+import path from "node:path"
 import type { ToolDeps, PermissionRule } from "../types"
 import { validateMemberName } from "../util"
 import { requireLead } from "./shared"
@@ -28,6 +29,7 @@ interface SpawnArgs {
   prompt: string
   model?: string
   claim_task?: string
+  repository_root?: string
   worktree?: boolean
   plan_approval?: boolean
   resume_from?: string
@@ -43,6 +45,18 @@ interface ClaimedTask {
   claimEventId: string
   contractArtifactId: string | null
   contractArtifactSha256: string | null
+}
+
+interface SpawnRepository {
+  repositoryRoot: string
+  gitIdentity: string
+}
+
+interface SpawnWorktree {
+  directory: string
+  branch: string
+  sourceBranch: string
+  baselineOid: string
 }
 
 /** Parse "provider/model" string into { providerID, modelID } for the SDK. */
@@ -141,29 +155,182 @@ function rollbackSpawnTask(
 ): void {
   if (!taskId) return
   if (!claimEventId) throw new Error(`Task "${taskId}" rollback is missing its claim event`)
-  deps.db.transaction(() => {
-    const now = Date.now()
-    const result = deps.db.run(
-      "UPDATE team_task SET status = 'pending', assignee = NULL, time_updated = ? WHERE id = ? AND team_id = ? AND status = 'in_progress' AND assignee = ?",
-      [now, taskId, teamId, assignee],
-    )
-    if (result.changes === 1) {
-      appendTeamEvent(deps.db, {
-        teamId,
-        kind: "task.released",
-        payload: { task_id: taskId, reason: "spawn_rollback" },
-        causeEventId: claimEventId,
-      })
-      recomputeCurrentPhase(deps.db, teamId, now)
-      return
+  deps.db.transaction(() => rollbackSpawnTaskMutation(deps, teamId, taskId, assignee, claimEventId))()
+}
+
+function rollbackSpawnTaskMutation(
+  deps: ToolDeps,
+  teamId: string,
+  taskId: string,
+  assignee: string,
+  claimEventId: string,
+): void {
+  const now = Date.now()
+  const result = deps.db.run(
+    "UPDATE team_task SET status = 'pending', assignee = NULL, time_updated = ? WHERE id = ? AND team_id = ? AND status = 'in_progress' AND assignee = ?",
+    [now, taskId, teamId, assignee],
+  )
+  if (result.changes === 1) {
+    appendTeamEvent(deps.db, {
+      teamId,
+      kind: "task.released",
+      payload: { task_id: taskId, reason: "spawn_rollback" },
+      causeEventId: claimEventId,
+    })
+    recomputeCurrentPhase(deps.db, teamId, now)
+    return
+  }
+  const task = deps.db.query(
+    "SELECT status, assignee FROM team_task WHERE id = ? AND team_id = ?",
+  ).get(taskId, teamId) as { status: string; assignee: string | null } | null
+  if (task?.status === "in_progress" && task.assignee === assignee) {
+    throw new Error(`Task "${taskId}" is still owned by ${assignee} after rollback`)
+  }
+}
+
+function isPathWithin(parent: string, candidate: string): boolean {
+  const relative = path.relative(parent, candidate)
+  return relative !== "" && !relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative)
+}
+
+function isSpawnTimeout(detail: string): boolean {
+  return detail.includes(" timed out after ")
+}
+
+async function resolveSpawnRepository(
+  deps: ToolDeps,
+  teamInfo: ReturnType<typeof requireLead>,
+  explicitRoot: string | undefined,
+  isReadOnly: boolean,
+): Promise<SpawnRepository> {
+  const team = getTeamRepositoryBinding(deps.db, teamInfo.teamId)
+  if (explicitRoot && isReadOnly) {
+    throw new Error("repository_root is only supported for isolated writer profiles")
+  }
+  if (!explicitRoot) {
+    if (!team.gitIdentity && !isReadOnly) {
+      throw new Error(`Team "${teamInfo.teamName}" has no verified Git identity; recreate it with team_create before spawning a writer`)
     }
-    const task = deps.db.query(
-      "SELECT status, assignee FROM team_task WHERE id = ? AND team_id = ?",
-    ).get(taskId, teamId) as { status: string; assignee: string | null } | null
-    if (task?.status === "in_progress" && task.assignee === assignee) {
-      throw new Error(`Task "${taskId}" is still owned by ${assignee} after rollback`)
+    return { repositoryRoot: team.repositoryRoot, gitIdentity: team.gitIdentity ?? "" }
+  }
+  const repositoryOps = deps.repositoryBindingOps ?? repositoryBindingOps
+  const selected = await repositoryOps.verifyRepositoryRoot(explicitRoot, true)
+  if (selected.repositoryRoot !== team.repositoryRoot && !isPathWithin(team.controllerDirectory, selected.repositoryRoot)) {
+    throw new Error(`repository_root must be the Team repository or an exact Git repository root under the Team controller directory: ${team.controllerDirectory}`)
+  }
+  return selected
+}
+
+function createSpawnAttempt(
+  deps: ToolDeps,
+  teamId: string,
+  name: string,
+  repository: SpawnRepository,
+  worktreeName: string,
+  taskId: string | undefined,
+  claimEventId: string | undefined,
+): void {
+  const now = Date.now()
+  deps.db.run(
+    `INSERT INTO team_spawn_attempt
+       (team_id, name, repository_root, repository_git_identity, worktree_name,
+        claim_task_id, claim_event_id, time_created, time_updated)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [teamId, name, repository.repositoryRoot, repository.gitIdentity, worktreeName, taskId ?? null, claimEventId ?? null, now, now],
+  )
+}
+
+function updateSpawnAttempt(
+  deps: ToolDeps,
+  teamId: string,
+  name: string,
+  fields: Partial<{
+    worktree_dir: string
+    worktree_branch: string
+    worktree_source_branch: string
+    worktree_baseline_oid: string
+    workspace_id: string
+    session_id: string
+    safe_branch: string
+  }>,
+): void {
+  const entries = Object.entries(fields)
+  if (entries.length === 0) return
+  const assignments = entries.map(([column]) => `${column} = ?`).join(", ")
+  const result = deps.db.run(
+    `UPDATE team_spawn_attempt SET ${assignments}, time_updated = ? WHERE team_id = ? AND name = ?`,
+    [...entries.map(([, value]) => value), Date.now(), teamId, name],
+  )
+  if (result.changes !== 1) throw new Error(`Spawn attempt owner for teammate "${name}" is missing`)
+}
+
+function settleSpawnAttempt(
+  deps: ToolDeps,
+  teamId: string,
+  name: string,
+  taskId: string | undefined,
+  claimEventId: string | undefined,
+): void {
+  immediateTransaction(deps.db, () => {
+    if (taskId) {
+      if (!claimEventId) throw new Error(`Task "${taskId}" settlement is missing its claim event`)
+      rollbackSpawnTaskMutation(deps, teamId, taskId, name, claimEventId)
     }
-  })()
+    const deleted = deps.db.run("DELETE FROM team_spawn_attempt WHERE team_id = ? AND name = ?", [teamId, name])
+    if (deleted.changes !== 1) throw new Error(`Spawn attempt owner for teammate "${name}" could not be settled`)
+  })
+}
+
+function alertSpawnAttemptFailure(
+  deps: ToolDeps,
+  teamId: string,
+  name: string,
+  detail: string,
+  taskId?: string,
+): void {
+  sendLeadAlert(deps.db, deps.client, {
+    teamId,
+    content: `Spawn cleanup for teammate "${name}" could not be proven complete. Its durable spawn attempt and claimed task ${taskId ?? "none"} remain owned for recovery. ${detail}`,
+    wakeText: `[System: Teammate ${name} spawn cleanup requires recovery; guidance is available in team messages]`,
+  })
+}
+
+async function identifyWorktree(
+  deps: ToolDeps,
+  repository: SpawnRepository,
+  worktreeName: string,
+  result: { name: string; branch: string; directory: string },
+): Promise<SpawnWorktree> {
+  if (result.name !== worktreeName || !result.directory || !result.branch.trim()) {
+    throw new Error("worktree.create returned incomplete or mismatched resource identity")
+  }
+  const repositoryOps = deps.repositoryBindingOps ?? repositoryBindingOps
+  const identity = await repositoryOps.resolveWorktreeIdentity(result.directory)
+  if (identity.gitIdentity !== repository.gitIdentity) {
+    throw new Error("created worktree belongs to a different Git repository")
+  }
+  const sourceOid = await repositoryOps.resolveGitRefOid(repository.repositoryRoot, `refs/heads/${result.branch}`)
+  if (!sourceOid) throw new Error(`created worktree source branch ${result.branch} could not be verified`)
+  if (sourceOid !== identity.headOid) throw new Error(`created worktree branch ${result.branch} does not match its HEAD`)
+  return { directory: result.directory, branch: result.branch, sourceBranch: result.branch, baselineOid: sourceOid }
+}
+
+async function reconcileWorktree(
+  deps: ToolDeps,
+  repository: SpawnRepository,
+  worktreeName: string,
+): Promise<SpawnWorktree | null> {
+  const listed = await deps.client.worktree.list({ directory: repository.repositoryRoot })
+  const matches = (listed.data ?? []).filter(worktree => worktree.name === worktreeName)
+  if (matches.length > 1) throw new Error(`worktree.list returned multiple resources named ${worktreeName}`)
+  return matches[0] ? identifyWorktree(deps, repository, worktreeName, matches[0]) : null
+}
+
+async function reconcileWorkspace(deps: ToolDeps, repositoryRoot: string, branch: string): Promise<string | null> {
+  const listed = await deps.client.workspace.list({ directory: repositoryRoot })
+  const matches = (listed.data ?? []).filter(workspace => workspace.branch === branch)
+  if (matches.length > 1) throw new Error(`workspace.list returned multiple resources for branch ${branch}`)
+  return matches[0]?.id ?? null
 }
 
 /**
@@ -219,13 +386,9 @@ async function executeTeamSpawnLocked(
   if (!isReadOnly && args.worktree === false) {
     throw new Error(`Ensemble profile "${profile.name}" is a writer and requires an isolated worktree`)
   }
-  const binding = getTeamRepositoryBinding(deps.db, teamInfo.teamId)
-  const repositoryOps = deps.repositoryBindingOps ?? repositoryBindingOps
-  if (!isReadOnly && !binding.gitIdentity) {
-    throw new Error(`Team "${teamInfo.teamName}" has no verified Git identity; recreate it with team_create before spawning a writer`)
-  }
-  if (!isReadOnly && isWorktreeDirectory(binding.repositoryRoot)) {
-    throw new Error(`Ensemble profile "${profile.name}" cannot create an isolated writer worktree from ${binding.repositoryRoot}`)
+  const repository = await resolveSpawnRepository(deps, teamInfo, args.repository_root, isReadOnly)
+  if (!isReadOnly && isWorktreeDirectory(repository.repositoryRoot)) {
+    throw new Error(`Ensemble profile "${profile.name}" cannot create an isolated writer worktree from ${repository.repositoryRoot}`)
   }
   const memberCount = (deps.db.query("SELECT COUNT(*) as c FROM team_member WHERE team_id = ?").get(teamInfo.teamId) as { c: number }).c
   const resolvedModel = resolveModel(args.model, runtimeAgent, memberCount, deps.config)
@@ -243,8 +406,19 @@ async function executeTeamSpawnLocked(
     : undefined
   const claimEventId = claimedTask?.claimEventId
 
-  const useWorktree = args.worktree !== false && !isReadOnly && !isWorktreeDirectory(binding.repositoryRoot)
+  const useWorktree = args.worktree !== false && !isReadOnly && !isWorktreeDirectory(repository.repositoryRoot)
   const usePlanApproval = args.plan_approval === true
+  const resource = getTeamResourceParts(deps.db, teamInfo.teamId)
+  const worktreeName = teamWorktreeName(resource.projectName, resource.teamName, resource.teamId, args.name)
+
+  if (useWorktree) {
+    try {
+      createSpawnAttempt(deps, teamInfo.teamId, args.name, repository, worktreeName, args.claim_task, claimEventId)
+    } catch (error) {
+      rollbackSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name, claimEventId)
+      throw error
+    }
+  }
 
   log(`spawn:start name=${args.name} profile=${profile.name} agent=${runtimeAgent} worktree=${useWorktree}`)
 
@@ -255,39 +429,66 @@ async function executeTeamSpawnLocked(
   let worktreeBaselineOid: string | null = null
 
   if (useWorktree) {
-    const resource = getTeamResourceParts(deps.db, teamInfo.teamId)
-    const worktreeName = teamWorktreeName(resource.projectName, resource.teamName, resource.teamId, args.name)
     try {
       log(`spawn:worktree:start name=${args.name}`)
       const result = await withTimeout(
-        deps.client.worktree.create({ directory: binding.repositoryRoot, worktreeCreateInput: { name: worktreeName } }),
+        deps.client.worktree.create({ directory: repository.repositoryRoot, worktreeCreateInput: { name: worktreeName } }),
         getSpawnTimeout(), `worktree.create for "${args.name}"`
       )
       if (!result.data) throw new Error("worktree.create returned no worktree")
-      worktreeDir = result.data.directory
-      worktreeBranch = result.data.branch
-      if (!worktreeBranch.trim()) throw new Error("worktree.create returned an empty branch")
-      const worktreeIdentity = await repositoryOps.resolveWorktreeIdentity(worktreeDir)
-      if (worktreeIdentity.gitIdentity !== binding.gitIdentity) {
-        throw new Error("created worktree belongs to a different Git repository")
+      if (result.data.name === worktreeName && result.data.directory && result.data.branch.trim()) {
+        worktreeDir = result.data.directory
+        worktreeBranch = result.data.branch
+        updateSpawnAttempt(deps, teamInfo.teamId, args.name, {
+          worktree_dir: worktreeDir,
+          worktree_branch: worktreeBranch,
+        })
       }
-      const sourceOid = await repositoryOps.resolveGitRefOid(binding.repositoryRoot, `refs/heads/${worktreeBranch}`)
-      if (!sourceOid) throw new Error(`created worktree source branch ${worktreeBranch} could not be verified`)
-      if (sourceOid !== worktreeIdentity.headOid) {
-        throw new Error(`created worktree branch ${worktreeBranch} does not match its HEAD`)
-      }
-      worktreeSourceBranch = worktreeBranch
-      worktreeBaselineOid = sourceOid
+      const identified = await identifyWorktree(deps, repository, worktreeName, result.data)
+      worktreeDir = identified.directory
+      worktreeBranch = identified.branch
+      worktreeSourceBranch = identified.sourceBranch
+      worktreeBaselineOid = identified.baselineOid
+      updateSpawnAttempt(deps, teamInfo.teamId, args.name, {
+        worktree_dir: worktreeDir,
+        worktree_branch: worktreeBranch,
+        worktree_source_branch: worktreeSourceBranch,
+        worktree_baseline_oid: worktreeBaselineOid,
+      })
       log(`spawn:worktree:done name=${args.name} dir=${worktreeDir}`)
     } catch (err) {
       const detail = renderError(err)
       log(`spawn:worktree:failed name=${args.name} err=${detail}`)
-      if (worktreeDir) {
-        try {
-          await deps.client.worktree.remove({ directory: binding.repositoryRoot, worktreeRemoveInput: { directory: worktreeDir } })
-        } catch { /* best effort */ }
+      if (isSpawnTimeout(detail)) {
+        alertSpawnAttemptFailure(deps, teamInfo.teamId, args.name, `Worktree creation timed out, so absence cannot be proven while the SDK request may still complete. Repository: ${repository.repositoryRoot}. Worktree name: ${worktreeName}.`, args.claim_task)
+        throw new Error(`Failed to create isolated worktree for teammate "${args.name}": ${detail}. The durable attempt and claimed task were retained because the request may still complete.`)
       }
-      rollbackSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name, claimEventId)
+      try {
+        const reconciled = worktreeDir && worktreeBranch
+          ? { directory: worktreeDir, branch: worktreeBranch, sourceBranch: worktreeSourceBranch ?? worktreeBranch, baselineOid: worktreeBaselineOid ?? "" }
+          : await reconcileWorktree(deps, repository, worktreeName)
+        if (reconciled) {
+          worktreeDir = reconciled.directory
+          worktreeBranch = reconciled.branch
+          worktreeSourceBranch = reconciled.sourceBranch
+          worktreeBaselineOid = reconciled.baselineOid
+          updateSpawnAttempt(deps, teamInfo.teamId, args.name, {
+            worktree_dir: reconciled.directory,
+            worktree_branch: reconciled.branch,
+            worktree_source_branch: reconciled.sourceBranch,
+            worktree_baseline_oid: reconciled.baselineOid,
+          })
+          await deps.client.worktree.remove({
+            directory: repository.repositoryRoot,
+            worktreeRemoveInput: { directory: reconciled.directory },
+          })
+        }
+        settleSpawnAttempt(deps, teamInfo.teamId, args.name, args.claim_task, claimEventId)
+      } catch (cleanupError) {
+        const cleanupDetail = renderError(cleanupError)
+        alertSpawnAttemptFailure(deps, teamInfo.teamId, args.name, `Worktree setup error: ${detail}. Cleanup error: ${cleanupDetail}. Repository: ${repository.repositoryRoot}. Worktree name: ${worktreeName}.`, args.claim_task)
+        throw new Error(`Failed to create isolated worktree for teammate "${args.name}": ${detail}. Cleanup could not be proven complete: ${cleanupDetail}. The durable attempt and claimed task were retained.`)
+      }
       try {
         await deps.client.tui.showToast({
           title: "Team",
@@ -307,16 +508,32 @@ async function executeTeamSpawnLocked(
     try {
       log(`spawn:workspace:start name=${args.name}`)
       const wsResult = await withTimeout(
-        deps.client.workspace.create({ directory: binding.repositoryRoot, branch: worktreeBranch }),
+        deps.client.workspace.create({ directory: repository.repositoryRoot, branch: worktreeBranch }),
         getSpawnTimeout(), `workspace.create for "${args.name}"`
       )
       if (wsResult.data) {
         workspaceId = wsResult.data.id
+        updateSpawnAttempt(deps, teamInfo.teamId, args.name, { workspace_id: workspaceId })
+      } else {
+        workspaceId = await reconcileWorkspace(deps, repository.repositoryRoot, worktreeBranch)
+        if (workspaceId) updateSpawnAttempt(deps, teamInfo.teamId, args.name, { workspace_id: workspaceId })
       }
       log(`spawn:workspace:done name=${args.name} id=${workspaceId}`)
     } catch (err) {
-      log(`spawn:workspace:failed name=${args.name} err=${renderError(err)}`)
-      // Non-fatal — prompt-based CWD instruction is the fallback
+      const workspaceDetail = renderError(err)
+      log(`spawn:workspace:failed name=${args.name} err=${workspaceDetail}`)
+      if (isSpawnTimeout(workspaceDetail)) {
+        alertSpawnAttemptFailure(deps, teamInfo.teamId, args.name, `Workspace creation timed out, so absence cannot be proven while the SDK request may still complete. Repository: ${repository.repositoryRoot}. Branch: ${worktreeBranch}.`, args.claim_task)
+        throw new Error(`Failed to create workspace for teammate "${args.name}": ${workspaceDetail}. The durable attempt and claimed task were retained because the request may still complete.`)
+      }
+      try {
+        workspaceId = await reconcileWorkspace(deps, repository.repositoryRoot, worktreeBranch)
+        if (workspaceId) updateSpawnAttempt(deps, teamInfo.teamId, args.name, { workspace_id: workspaceId })
+      } catch (reconcileError) {
+        const detail = renderError(reconcileError)
+        alertSpawnAttemptFailure(deps, teamInfo.teamId, args.name, `Workspace setup could not be reconciled: ${detail}. Repository: ${repository.repositoryRoot}. Branch: ${worktreeBranch}.`, args.claim_task)
+        throw new Error(`Failed to reconcile workspace setup for teammate "${args.name}": ${detail}. The durable attempt and claimed task were retained.`)
+      }
     }
   }
 
@@ -373,12 +590,15 @@ async function executeTeamSpawnLocked(
         parentID: sessionId,
         title: `${args.name} (@${profile.name} teammate)`,
         permission,
-        directory: workspaceId ? binding.repositoryRoot : (worktreeDir ?? binding.repositoryRoot),
+        directory: workspaceId ? repository.repositoryRoot : (worktreeDir ?? repository.repositoryRoot),
         ...(workspaceId ? { workspaceID: workspaceId } : {}),
       }),
       getSpawnTimeout(), `session.create for "${args.name}"`
     )
     childSessionId = createResult.data?.id
+    if (childSessionId && useWorktree) {
+      updateSpawnAttempt(deps, teamInfo.teamId, args.name, { session_id: childSessionId })
+    }
     log(`spawn:session:done name=${args.name} sessionId=${childSessionId}`)
   } catch (err) {
     log(`spawn:session:failed name=${args.name} err=${renderError(err)}`)
@@ -386,25 +606,42 @@ async function executeTeamSpawnLocked(
     const errMsg = renderError(err)
     const prev = spawnFailures.get(teamInfo.teamId)
     spawnFailures.set(teamInfo.teamId, { count: (prev?.count ?? 0) + 1, lastError: errMsg })
-    // Rollback workspace and worktree if session creation failed
-    if (workspaceId) {
-      try { await deps.client.workspace.remove({ directory: binding.repositoryRoot, id: workspaceId }) } catch { /* best effort */ }
+    if (isSpawnTimeout(errMsg)) {
+      alertSpawnAttemptFailure(deps, teamInfo.teamId, args.name, `Session creation timed out, so no abort or resource removal was attempted while the SDK request may still complete. Repository: ${repository.repositoryRoot}. Worktree: ${worktreeDir ?? "none"}. Workspace: ${workspaceId ?? "none"}.`, args.claim_task)
+      throw new Error(`Failed to create session for teammate "${args.name}": ${errMsg}. The durable attempt and claimed task were retained because the request may still complete.`)
     }
-    if (worktreeDir) {
-      try { await deps.client.worktree.remove({ directory: binding.repositoryRoot, worktreeRemoveInput: { directory: worktreeDir } }) } catch { /* best effort */ }
+    try {
+      if (childSessionId && worktreeBranch) {
+        const safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, args.name)
+        if (!await preserve(worktreeBranch, safeBranch, repository.repositoryRoot)) {
+          throw new Error(`branch ${worktreeBranch} could not be preserved before aborting session ${childSessionId}`)
+        }
+        updateSpawnAttempt(deps, teamInfo.teamId, args.name, { safe_branch: safeBranch })
+        await deps.client.session.abort({ sessionID: childSessionId })
+      }
+      if (workspaceId) await deps.client.workspace.remove({ directory: repository.repositoryRoot, id: workspaceId })
+      if (worktreeDir) await deps.client.worktree.remove({ directory: repository.repositoryRoot, worktreeRemoveInput: { directory: worktreeDir } })
+      if (useWorktree) settleSpawnAttempt(deps, teamInfo.teamId, args.name, args.claim_task, claimEventId)
+      else rollbackSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name, claimEventId)
+    } catch (cleanupError) {
+      const cleanupDetail = renderError(cleanupError)
+      alertSpawnAttemptFailure(deps, teamInfo.teamId, args.name, `Session setup error: ${errMsg}. Cleanup error: ${cleanupDetail}. Repository: ${repository.repositoryRoot}.`, args.claim_task)
+      throw new Error(`Failed to create session for teammate "${args.name}": ${errMsg}. Cleanup could not be proven complete: ${cleanupDetail}. The durable attempt and claimed task were retained.`)
     }
-    rollbackSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name, claimEventId)
     throw new Error(`Failed to create session for teammate "${args.name}": ${errMsg}`)
   }
 
   if (!childSessionId) {
-    if (workspaceId) {
-      try { await deps.client.workspace.remove({ directory: binding.repositoryRoot, id: workspaceId }) } catch { /* best effort */ }
+    try {
+      if (workspaceId) await deps.client.workspace.remove({ directory: repository.repositoryRoot, id: workspaceId })
+      if (worktreeDir) await deps.client.worktree.remove({ directory: repository.repositoryRoot, worktreeRemoveInput: { directory: worktreeDir } })
+      if (useWorktree) settleSpawnAttempt(deps, teamInfo.teamId, args.name, args.claim_task, claimEventId)
+      else rollbackSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name, claimEventId)
+    } catch (cleanupError) {
+      const detail = renderError(cleanupError)
+      alertSpawnAttemptFailure(deps, teamInfo.teamId, args.name, `Session creation returned no ID and cleanup failed: ${detail}. Repository: ${repository.repositoryRoot}.`, args.claim_task)
+      throw new Error(`Failed to create teammate session. Cleanup could not be proven complete: ${detail}. The durable attempt and claimed task were retained.`)
     }
-    if (worktreeDir) {
-      try { await deps.client.worktree.remove({ directory: binding.repositoryRoot, worktreeRemoveInput: { directory: worktreeDir } }) } catch { /* best effort */ }
-    }
-    rollbackSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name, claimEventId)
     throw new Error("Failed to create teammate session")
   }
 
@@ -417,10 +654,14 @@ async function executeTeamSpawnLocked(
   try {
     immediateTransaction(deps.db, () => {
       deps.db.run(
-        `INSERT INTO team_member (team_id, name, session_id, agent, profile, status, execution_status, model, prompt, worktree_dir, worktree_branch, worktree_source_branch, worktree_baseline_oid, workspace_id, plan_approval, time_created, time_updated)
-         VALUES (?, ?, ?, ?, ?, 'busy', 'starting', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [teamInfo.teamId, args.name, childSessionId, runtimeAgent, profile.name, resolvedModel ?? null, args.prompt, worktreeDir, worktreeBranch, worktreeSourceBranch, worktreeBaselineOid, workspaceId, planApproval, now, now]
+        `INSERT INTO team_member (team_id, name, session_id, agent, profile, status, execution_status, model, prompt, worktree_dir, worktree_branch, worktree_source_branch, worktree_baseline_oid, workspace_id, repository_root, repository_git_identity, plan_approval, time_created, time_updated)
+         VALUES (?, ?, ?, ?, ?, 'busy', 'starting', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [teamInfo.teamId, args.name, childSessionId, runtimeAgent, profile.name, resolvedModel ?? null, args.prompt, worktreeDir, worktreeBranch, worktreeSourceBranch, worktreeBaselineOid, workspaceId, isReadOnly ? null : repository.repositoryRoot, isReadOnly ? null : repository.gitIdentity, planApproval, now, now]
       )
+      if (useWorktree) {
+        const deleted = deps.db.run("DELETE FROM team_spawn_attempt WHERE team_id = ? AND name = ?", [teamInfo.teamId, args.name])
+        if (deleted.changes !== 1) throw new Error("durable spawn attempt could not be transferred to member ownership")
+      }
       appendTeamEvent(deps.db, {
         teamId: teamInfo.teamId,
         kind: "member.registered",
@@ -440,11 +681,23 @@ async function executeTeamSpawnLocked(
     })
   } catch (err) {
     const registrationError = renderError(err)
+    if (!useWorktree) {
+      try {
+        sendLeadAlert(deps.db, deps.client, {
+          teamId: teamInfo.teamId,
+          content: `Teammate "${args.name}" could not be registered, so its unowned read-only session was not aborted. Manual recovery is required for session ${childSessionId}. Claimed task: ${args.claim_task ?? "none"}. Registration error: ${registrationError}.`,
+          wakeText: `[System: Teammate ${args.name} registration failed; unowned read-only session requires manual recovery]`,
+        })
+        rollbackSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name, claimEventId)
+      } catch (recoveryError) {
+        throw new Error(`${registrationError}; read-only recovery failed: ${renderError(recoveryError)}`)
+      }
+      throw err
+    }
     let safeBranch: string | null = null
     if (worktreeBranch) {
-      const resource = getTeamResourceParts(deps.db, teamInfo.teamId)
       safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, args.name)
-      const ok = await preserve(worktreeBranch, safeBranch, binding.repositoryRoot)
+      const ok = await preserve(worktreeBranch, safeBranch, repository.repositoryRoot)
       if (!ok) {
         try {
           sendLeadAlert(deps.db, deps.client, {
@@ -460,20 +713,15 @@ async function executeTeamSpawnLocked(
       }
     }
     try {
-      sendLeadAlert(deps.db, deps.client, {
-        teamId: teamInfo.teamId,
-        content: `Teammate "${args.name}" could not be registered, so its unowned session was not aborted; manual recovery is required for session ${childSessionId} and its resources. Preserved branch: ${safeBranch ?? "none"}. Live branch: ${worktreeBranch ?? "none"}. Worktree: ${worktreeDir ?? "none"}. Workspace: ${workspaceId ?? "none"}. Claimed task: ${args.claim_task ?? "none"}. Registration error: ${registrationError}.`,
-        wakeText: `[System: Teammate ${args.name} registration failed; unowned resources require manual recovery]`,
-      })
-    } catch (alertError) {
-      const message = renderError(alertError)
-      throw new Error(`${registrationError}; recovery alert also failed: ${message}. Preserved branch: ${safeBranch ?? "none"}. Session ${childSessionId} and its resources were left intact; claimed task ${args.claim_task ?? "none"} was not rolled back.`)
-    }
-    try {
-      rollbackSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name, claimEventId)
-    } catch (rollbackError) {
-      const message = renderError(rollbackError)
-      throw new Error(`${registrationError}; task rollback also failed: ${message}`)
+      if (safeBranch) updateSpawnAttempt(deps, teamInfo.teamId, args.name, { safe_branch: safeBranch })
+      await deps.client.session.abort({ sessionID: childSessionId })
+      if (workspaceId) await deps.client.workspace.remove({ directory: repository.repositoryRoot, id: workspaceId })
+      if (worktreeDir) await deps.client.worktree.remove({ directory: repository.repositoryRoot, worktreeRemoveInput: { directory: worktreeDir } })
+      settleSpawnAttempt(deps, teamInfo.teamId, args.name, args.claim_task, claimEventId)
+    } catch (cleanupError) {
+      const detail = renderError(cleanupError)
+      alertSpawnAttemptFailure(deps, teamInfo.teamId, args.name, `Registration error: ${registrationError}. Branch: ${worktreeBranch ?? "none"}. Preserved branch: ${safeBranch ?? "none"}. Session: ${childSessionId}. Cleanup error: ${detail}.`, args.claim_task)
+      throw new Error(`${registrationError}. Pre-prompt cleanup could not be proven complete: ${detail}. The durable attempt and claimed task were retained.`)
     }
     throw err
   }
@@ -655,7 +903,7 @@ async function executeTeamSpawnLocked(
         if (worktreeBranch) {
           const resource = getTeamResourceParts(deps.db, teamInfo.teamId)
           safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, args.name)
-          const ok = await preserve(worktreeBranch, safeBranch, binding.repositoryRoot)
+          const ok = await preserve(worktreeBranch, safeBranch, repository.repositoryRoot)
           if (!ok) {
             sendLeadAlert(deps.db, deps.client, {
               teamId: teamInfo.teamId,
@@ -720,7 +968,7 @@ async function executeTeamSpawnLocked(
         }
         if (workspaceId) {
           try {
-            await deps.client.workspace.remove({ directory: binding.repositoryRoot, id: workspaceId })
+            await deps.client.workspace.remove({ directory: repository.repositoryRoot, id: workspaceId })
           } catch (cleanupError) {
             alertCleanupFailure("workspace removal", cleanupError)
             return
@@ -728,7 +976,7 @@ async function executeTeamSpawnLocked(
         }
         if (worktreeDir) {
           try {
-            await deps.client.worktree.remove({ directory: binding.repositoryRoot, worktreeRemoveInput: { directory: worktreeDir } })
+            await deps.client.worktree.remove({ directory: repository.repositoryRoot, worktreeRemoveInput: { directory: worktreeDir } })
           } catch (cleanupError) {
             alertCleanupFailure("worktree removal", cleanupError)
             return

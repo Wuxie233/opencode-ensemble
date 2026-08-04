@@ -383,9 +383,32 @@ export const MIGRATIONS: string[] = [
    ) WHERE controller_directory IS NULL;
    ALTER TABLE team_member ADD COLUMN worktree_source_branch TEXT;
    ALTER TABLE team_member ADD COLUMN worktree_baseline_oid TEXT;
-   UPDATE team_member SET worktree_source_branch = worktree_branch
-    WHERE worktree_branch IS NOT NULL
-      AND worktree_branch NOT LIKE 'ensemble/preserved/%';`,
+    UPDATE team_member SET worktree_source_branch = worktree_branch
+     WHERE worktree_branch IS NOT NULL
+       AND worktree_branch NOT LIKE 'ensemble/preserved/%';`,
+  // Migration 20: Bind each writer to its selected repository and durably own
+  // external resources while team_spawn is still being assembled.
+  `ALTER TABLE team_member ADD COLUMN repository_root TEXT;
+   ALTER TABLE team_member ADD COLUMN repository_git_identity TEXT;
+   CREATE TABLE team_spawn_attempt (
+     team_id                 TEXT NOT NULL REFERENCES team(id) ON DELETE CASCADE,
+     name                    TEXT NOT NULL,
+     repository_root         TEXT NOT NULL,
+     repository_git_identity TEXT NOT NULL,
+     worktree_name           TEXT NOT NULL,
+     worktree_dir            TEXT,
+     worktree_branch         TEXT,
+     worktree_source_branch  TEXT,
+     worktree_baseline_oid   TEXT,
+     workspace_id            TEXT,
+     session_id              TEXT,
+     safe_branch             TEXT,
+     claim_task_id           TEXT,
+     claim_event_id          TEXT,
+     time_created            INTEGER NOT NULL,
+     time_updated            INTEGER NOT NULL,
+     PRIMARY KEY (team_id, name)
+   );`,
 ]
 
 /**

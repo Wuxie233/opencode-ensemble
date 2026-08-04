@@ -44,6 +44,9 @@ describe("team_spawn", () => {
     expect(row.agent).toBe("build")
     expect(row.status).toBe("busy")
     expect(row.execution_status).toBe("starting")
+    expect(row.repository_root).toBe("/tmp/test-project")
+    expect(row.repository_git_identity).toBe("/tmp/test-project/.git")
+    expect(deps.db.query("SELECT name FROM team_spawn_attempt").all()).toHaveLength(0)
 
     // Check registry
     expect(deps.registry.isTeamSession(row.session_id as string)).toBe(true)
@@ -487,15 +490,10 @@ describe("team_spawn", () => {
     expect(preserved).toHaveLength(1)
     expect(preserved[0]?.source).toStartWith("ensemble-")
     expect(preserved[0]?.target).toBe("ensemble/preserved/test-project/my-team#t1/alice")
-    expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
-    expect(deps.client.calls.filter(call => call.method === "worktree.remove")).toHaveLength(0)
-    expect(deps.client.calls.filter(call => call.method === "workspace.remove")).toHaveLength(0)
-    const alert = deps.db.query(
-      "SELECT content FROM team_message WHERE team_id = 't1' AND from_name = 'system' AND to_name = 'lead'",
-    ).get() as { content: string }
-    expect(alert.content).toContain("manual recovery")
-    expect(alert.content).toContain("mock-sess-")
-    expect(alert.content).toContain("ensemble/preserved/test-project/my-team#t1/alice")
+    expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(1)
+    expect(deps.client.calls.filter(call => call.method === "worktree.remove")).toHaveLength(1)
+    expect(deps.client.calls.filter(call => call.method === "workspace.remove")).toHaveLength(1)
+    expect(deps.db.query("SELECT name FROM team_spawn_attempt").all()).toHaveLength(0)
   })
 
   test("records registration recovery evidence before a task rollback failure", async () => {
@@ -516,19 +514,19 @@ describe("team_spawn", () => {
     }, "lead-sess", async (source, target) => {
       preserved.push({ source, target })
       return true
-    })).rejects.toThrow("registration failed; task rollback also failed: task rollback failed")
+    })).rejects.toThrow("registration failed. Pre-prompt cleanup could not be proven complete: task rollback failed")
 
     expect(preserved).toHaveLength(1)
     expect(preserved[0]?.target).toBe("ensemble/preserved/test-project/my-team#t1/alice")
     expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-123'").get())
       .toEqual({ status: "in_progress", assignee: "alice" })
-    expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
-    expect(deps.client.calls.filter(call => call.method === "worktree.remove")).toHaveLength(0)
-    expect(deps.client.calls.filter(call => call.method === "workspace.remove")).toHaveLength(0)
+    expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(1)
+    expect(deps.client.calls.filter(call => call.method === "worktree.remove")).toHaveLength(1)
+    expect(deps.client.calls.filter(call => call.method === "workspace.remove")).toHaveLength(1)
     const alert = deps.db.query(
       "SELECT content FROM team_message WHERE team_id = 't1' AND from_name = 'system' AND to_name = 'lead'",
     ).get() as { content: string }
-    expect(alert.content).toContain("manual recovery")
+    expect(alert.content).toContain("could not be proven complete")
     expect(alert.content).toContain("mock-sess-")
     expect(alert.content).toContain("ensemble/preserved/test-project/my-team#t1/alice")
     expect(alert.content).toContain("task-123")
@@ -548,15 +546,13 @@ describe("team_spawn", () => {
       agent: "build",
       prompt: "Fix the tests",
       claim_task: "task-123",
-    }, "lead-sess", async () => true)).rejects.toThrow(
-      /registration failed; recovery alert also failed: alert persistence failed.*ensemble\/preserved\/test-project\/my-team#t1\/alice.*Session mock-sess-.*claimed task task-123 was not rolled back/,
-    )
+    }, "lead-sess", async () => true)).rejects.toThrow("registration failed")
 
     expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-123'").get())
-      .toEqual({ status: "in_progress", assignee: "alice" })
-    expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
-    expect(deps.client.calls.filter(call => call.method === "worktree.remove")).toHaveLength(0)
-    expect(deps.client.calls.filter(call => call.method === "workspace.remove")).toHaveLength(0)
+      .toEqual({ status: "pending", assignee: null })
+    expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(1)
+    expect(deps.client.calls.filter(call => call.method === "worktree.remove")).toHaveLength(1)
+    expect(deps.client.calls.filter(call => call.method === "workspace.remove")).toHaveLength(1)
   })
 
   test("keeps the original worktree retryable when registration rollback cannot preserve it", async () => {
@@ -597,7 +593,138 @@ describe("team_spawn", () => {
       "SELECT content FROM team_message WHERE team_id = 't1' AND from_name = 'system' AND to_name = 'lead'",
     ).get() as { content: string }
     expect(alert.content).toContain("could not be registered")
-    expect(alert.content).toContain("manual recovery")
+    expect(alert.content).toContain("Manual recovery")
+  })
+
+  test("spawns a writer in an explicit child repository and persists its binding", async () => {
+    deps.db.run("UPDATE team SET controller_directory = '/controller' WHERE id = 't1'")
+    deps.repositoryBindingOps!.verifyRepositoryRoot = async () => ({
+      repositoryRoot: "/controller/services/api",
+      gitIdentity: "/controller/services/api/.git",
+    })
+    deps.repositoryBindingOps!.resolveWorktreeIdentity = async worktreeDir => ({
+      gitIdentity: "/controller/services/api/.git",
+      headOid: "baseline-oid",
+    })
+    deps.client.worktree.create = async options => {
+      deps.client.calls.push({ method: "worktree.create", args: [options] })
+      const name = options.worktreeCreateInput?.name ?? "default"
+      return { data: { name, branch: `ensemble-${name}`, directory: `/tmp/child-${name}` } }
+    }
+
+    await executeTeamSpawn(deps, {
+      name: "child-writer",
+      profile: "backend",
+      prompt: "Update child service",
+      repository_root: "/controller/services/api",
+    }, "lead-sess")
+
+    expect(deps.client.calls.find(call => call.method === "worktree.create")?.args[0]).toMatchObject({ directory: "/controller/services/api" })
+    expect(deps.client.calls.find(call => call.method === "workspace.create")?.args[0]).toMatchObject({ directory: "/controller/services/api" })
+    expect(deps.client.calls.find(call => call.method === "session.create")?.args[0]).toMatchObject({ directory: "/controller/services/api" })
+    expect(deps.db.query("SELECT repository_root, repository_git_identity FROM team_member WHERE name = 'child-writer'").get())
+      .toEqual({ repository_root: "/controller/services/api", repository_git_identity: "/controller/services/api/.git" })
+  })
+
+  test("rejects explicit writer repositories outside the controller scope", async () => {
+    deps.db.run("UPDATE team SET controller_directory = '/controller' WHERE id = 't1'")
+    deps.repositoryBindingOps!.verifyRepositoryRoot = async () => ({ repositoryRoot: "/sibling/api", gitIdentity: "/sibling/api/.git" })
+
+    await expect(executeTeamSpawn(deps, {
+      name: "writer",
+      profile: "backend",
+      prompt: "Update sibling",
+      repository_root: "/sibling/api",
+    }, "lead-sess")).rejects.toThrow("under the Team controller directory")
+    expect(deps.client.calls).toHaveLength(0)
+  })
+
+  test("rejects repository_root for read-only profiles", async () => {
+    await expect(executeTeamSpawn(deps, {
+      name: "scout",
+      profile: "scout",
+      prompt: "Inspect child",
+      repository_root: "/tmp/test-project",
+      worktree: false,
+    }, "lead-sess")).rejects.toThrow("only supported for isolated writer profiles")
+    expect(deps.client.calls).toHaveLength(0)
+  })
+
+  test("reconciles and removes a partial worktree when create rejects", async () => {
+    let worktreeName = ""
+    deps.client.worktree.create = async options => {
+      worktreeName = options.worktreeCreateInput?.name ?? ""
+      throw new Error("transport failed after create")
+    }
+    deps.client.worktree.list = async options => {
+      deps.client.calls.push({ method: "worktree.list", args: [options] })
+      return { data: [{ name: worktreeName, branch: `ensemble-${worktreeName}`, directory: "/tmp/partial-worktree" }] }
+    }
+
+    await expect(executeTeamSpawn(deps, {
+      name: "writer",
+      profile: "backend",
+      prompt: "Update code",
+    }, "lead-sess")).rejects.toThrow("transport failed after create")
+
+    expect(deps.client.calls.find(call => call.method === "worktree.remove")?.args[0]).toMatchObject({
+      directory: "/tmp/test-project",
+      worktreeRemoveInput: { directory: "/tmp/partial-worktree" },
+    })
+    expect(deps.db.query("SELECT name FROM team_spawn_attempt").all()).toHaveLength(0)
+  })
+
+  test("retains durable attempt and task when partial worktree cleanup fails", async () => {
+    insertTask(deps, "t1", "task-123")
+    let worktreeName = ""
+    deps.client.worktree.create = async options => {
+      worktreeName = options.worktreeCreateInput?.name ?? ""
+      throw new Error("transport failed after create")
+    }
+    deps.client.worktree.list = async () => ({ data: [{ name: worktreeName, branch: `ensemble-${worktreeName}`, directory: "/tmp/partial-worktree" }] })
+    deps.client.worktree.remove = async () => { throw new Error("remove failed") }
+
+    await expect(executeTeamSpawn(deps, {
+      name: "writer",
+      profile: "backend",
+      prompt: "Update code",
+      claim_task: "task-123",
+    }, "lead-sess")).rejects.toThrow("durable attempt and claimed task were retained")
+
+    expect(deps.db.query("SELECT worktree_dir, claim_task_id FROM team_spawn_attempt WHERE name = 'writer'").get())
+      .toEqual({ worktree_dir: "/tmp/partial-worktree", claim_task_id: "task-123" })
+    expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-123'").get())
+      .toEqual({ status: "in_progress", assignee: "writer" })
+  })
+
+  test("preserves before abort when session ownership persistence fails", async () => {
+    const originalRun = deps.db.run.bind(deps.db)
+    let preserveFinished = false
+    deps.db.run = (sql, ...params) => {
+      if (sql.startsWith("UPDATE team_spawn_attempt SET session_id")) {
+        throw new Error("session ownership write failed")
+      }
+      return originalRun(sql, ...params)
+    }
+    deps.client.session.abort = async options => {
+      expect(preserveFinished).toBe(true)
+      deps.client.calls.push({ method: "session.abort", args: [options] })
+      return {}
+    }
+
+    await expect(executeTeamSpawn(deps, {
+      name: "writer",
+      profile: "backend",
+      prompt: "Update code",
+    }, "lead-sess", async () => {
+      preserveFinished = true
+      return true
+    })).rejects.toThrow("session ownership write failed")
+
+    expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(1)
+    expect(deps.client.calls.filter(call => call.method === "workspace.remove")).toHaveLength(1)
+    expect(deps.client.calls.filter(call => call.method === "worktree.remove")).toHaveLength(1)
+    expect(deps.db.query("SELECT name FROM team_spawn_attempt").all()).toHaveLength(0)
   })
 
   test("rolls back claim_task when prompt dispatch fails asynchronously", async () => {
@@ -1812,6 +1939,9 @@ describe("team_spawn — timeout on session.create / worktree.create", () => {
       agent: "build",
       prompt: "Fix tests",
     }, "lead-sess")).rejects.toThrow(/timed out/i)
+    expect(deps.db.query("SELECT name, session_id FROM team_spawn_attempt WHERE name = 'alice'").get())
+      .toEqual({ name: "alice", session_id: null })
+    expect(deps.client.calls.filter(call => call.method === "worktree.remove")).toHaveLength(0)
   }, 10000)
 
   test("cancels the writer spawn if worktree.create times out", async () => {
@@ -1825,5 +1955,7 @@ describe("team_spawn — timeout on session.create / worktree.create", () => {
       worktree: true,
     }, "lead-sess")).rejects.toThrow(/worktree\.create.*timed out/i)
     expect(deps.db.query("SELECT name FROM team_member WHERE name = ?").get("bob")).toBeNull()
+    expect(deps.db.query("SELECT name, worktree_name FROM team_spawn_attempt WHERE name = 'bob'").get()).toMatchObject({ name: "bob" })
+    expect(deps.client.calls.filter(call => call.method === "worktree.list")).toHaveLength(0)
   }, 10000)
 })

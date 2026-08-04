@@ -2,7 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { verifyRepositoryRoot } from "../src/repository-binding"
+import { getMemberRepositoryBinding, verifyRepositoryRoot } from "../src/repository-binding"
+import { insertMember, insertTeam, setupDb } from "./helpers"
 
 const temporary: string[] = []
 
@@ -23,6 +24,33 @@ afterEach(async () => {
 })
 
 describe("repository binding", () => {
+  test("loads persisted member binding and falls back only for legacy rows", () => {
+    const db = setupDb()
+    insertTeam(db, "t1", "team", "lead")
+    insertMember(db, "t1", "legacy", "legacy-session")
+    insertMember(db, "t1", "child", "child-session")
+    db.run(
+      "UPDATE team_member SET repository_root = ?, repository_git_identity = ? WHERE team_id = ? AND name = ?",
+      ["/controller/child", "/controller/child/.git", "t1", "child"],
+    )
+
+    expect(getMemberRepositoryBinding(db, "t1", "legacy")).toEqual({
+      repositoryRoot: "/tmp/test-project",
+      gitIdentity: "/tmp/test-project/.git",
+    })
+    expect(getMemberRepositoryBinding(db, "t1", "child")).toEqual({
+      repositoryRoot: "/controller/child",
+      gitIdentity: "/controller/child/.git",
+    })
+  })
+
+  test("fails closed on an incomplete persisted member binding", () => {
+    const db = setupDb()
+    insertTeam(db, "t1", "team", "lead")
+    insertMember(db, "t1", "broken", "broken-session")
+    db.run("UPDATE team_member SET repository_root = '/controller/child' WHERE team_id = 't1' AND name = 'broken'")
+    expect(() => getMemberRepositoryBinding(db, "t1", "broken")).toThrow("incomplete repository binding")
+  })
   test("accepts an explicit nested repository root", async () => {
     const controller = await tempDir()
     const repository = path.join(controller, "nested")

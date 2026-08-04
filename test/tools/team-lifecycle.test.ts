@@ -136,31 +136,98 @@ describe("team_shutdown", () => {
     expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(1)
   })
 
-  test.each(["cancelled", "failed", "timed_out"])(
-    "retains terminal execution status %s while directly aborting",
-    async executionStatus => {
-      deps.db.run(
-        "UPDATE team_member SET status = ?, execution_status = ?, worktree_branch = 'live-alice' WHERE name = 'alice'",
-        [executionStatus === "cancelled" ? "busy" : "error", executionStatus],
-      )
-      deps.client.calls.length = 0
+  test("retains a cancelled execution status while directly aborting", async () => {
+    const executionStatus = "cancelled"
+    deps.db.run(
+      "UPDATE team_member SET status = 'busy', execution_status = ?, worktree_branch = 'live-alice' WHERE name = 'alice'",
+      [executionStatus],
+    )
+    deps.client.calls.length = 0
 
-      await executeTeamShutdown(
-        deps,
-        { member: "alice" },
-        "lead-sess",
-        undefined,
-        noopPreserve,
-        async () => 0,
-      )
+    await executeTeamShutdown(
+      deps,
+      { member: "alice" },
+      "lead-sess",
+      undefined,
+      noopPreserve,
+      async () => 0,
+    )
 
-      expect(deps.client.calls.filter(call => call.method === "session.status")).toHaveLength(0)
-      expect(deps.client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(0)
-      expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(1)
-      expect(deps.db.query("SELECT status, execution_status FROM team_member WHERE name = 'alice'").get())
-        .toEqual({ status: "shutdown", execution_status: executionStatus })
-    },
-  )
+    expect(deps.client.calls.filter(call => call.method === "session.status")).toHaveLength(0)
+    expect(deps.client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(0)
+    expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(1)
+    expect(deps.db.query("SELECT status, execution_status FROM team_member WHERE name = 'alice'").get())
+      .toEqual({ status: "shutdown", execution_status: executionStatus })
+  })
+
+  test("does not re-abort or demote an error writer with immutable Git evidence", async () => {
+    deps.db.run(
+      `UPDATE team_member
+       SET status = 'error', execution_status = 'failed', worktree_dir = '/tmp/worktree-alice',
+           worktree_branch = NULL, worktree_source_branch = 'ensemble-my-team-alice',
+           worktree_baseline_oid = 'baseline-oid'
+       WHERE name = 'alice'`,
+    )
+    let preserveCalls = 0
+
+    const result = await executeTeamShutdown(
+      deps,
+      { member: "alice", force: true },
+      "lead-sess",
+      undefined,
+      async () => { preserveCalls++; return true },
+    )
+
+    expect(result).toContain("already terminal")
+    expect(result).toContain("team_merge")
+    expect(result).toContain("evidence-based")
+    expect(preserveCalls).toBe(0)
+    expect(deps.client.calls.filter(call => call.method === "session.status")).toHaveLength(0)
+    expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
+    expect(deps.db.query(
+      `SELECT status, execution_status, worktree_dir, worktree_branch,
+              worktree_source_branch, worktree_baseline_oid
+       FROM team_member WHERE name = 'alice'`,
+    ).get()).toEqual({
+      status: "error",
+      execution_status: "failed",
+      worktree_dir: "/tmp/worktree-alice",
+      worktree_branch: null,
+      worktree_source_branch: "ensemble-my-team-alice",
+      worktree_baseline_oid: "baseline-oid",
+    })
+  })
+
+  test("reports terminal read-only settlement without suggesting team_merge", async () => {
+    deps.db.run("UPDATE team_member SET status = 'error', execution_status = 'failed' WHERE name = 'alice'")
+
+    const result = await executeTeamShutdown(deps, { member: "alice", force: true }, "lead-sess", undefined, noopPreserve)
+
+    expect(result).toContain("already terminal")
+    expect(result).toContain("no immutable writer evidence")
+    expect(result).toContain("No abort or writer merge is needed")
+    expect(result).not.toContain("team_merge")
+    expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
+    expect(deps.db.query("SELECT status, execution_status FROM team_member WHERE name = 'alice'").get())
+      .toEqual({ status: "error", execution_status: "failed" })
+  })
+
+  test("fails closed for an error member with incomplete writer evidence", async () => {
+    deps.db.run(
+      `UPDATE team_member
+       SET status = 'error', execution_status = 'failed', worktree_branch = 'legacy-alice'
+       WHERE name = 'alice'`,
+    )
+
+    const result = await executeTeamShutdown(deps, { member: "alice", force: true }, "lead-sess", undefined, noopPreserve)
+
+    expect(result).toContain("writer evidence is incomplete")
+    expect(result).toContain("cannot be classified as read-only or no-op")
+    expect(result).not.toContain("Use team_merge")
+    expect(deps.client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
+    expect(deps.db.query("SELECT status, execution_status, worktree_branch FROM team_member WHERE name = 'alice'").get())
+      .toEqual({ status: "error", execution_status: "failed", worktree_branch: "legacy-alice" })
+  })
 
   test("records graceful shutdown intent before prompting the member", async () => {
     deps.client.session.status = async () => ({ data: { "sess-alice": { type: "busy" } } })
@@ -999,7 +1066,7 @@ describe("team_cleanup", () => {
     expect(removeCalls).toHaveLength(1)
   })
 
-  test("cleanup continues if worktree removal fails", async () => {
+  test("cleanup keeps the Team active and worktree retryable when removal fails", async () => {
     insertMember(deps.db, "t1", "alice", "sess-alice", "shutdown", "idle")
     deps.db.run("UPDATE team_member SET worktree_dir = ?, worktree_branch = ? WHERE name = 'alice'",
       ["/tmp/worktree-alice", "ensemble-my-team-alice"])
@@ -1008,8 +1075,24 @@ describe("team_cleanup", () => {
 
     deps.client.worktree.remove = async () => { throw new Error("worktree gone") }
 
-    const result = await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete, false)
-    expect(result).toContain("cleaned up")
+    await expect(executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete, false))
+      .rejects.toThrow("resource removal failed")
+    expect(deps.db.query("SELECT status FROM team WHERE id = 't1'").get()).toEqual({ status: "active" })
+    expect(deps.db.query("SELECT worktree_dir FROM team_member WHERE name = 'alice'").get())
+      .toEqual({ worktree_dir: "/tmp/worktree-alice" })
+  })
+
+  test("cleanup keeps the Team active and merged branch retryable when deletion fails", async () => {
+    insertMember(deps.db, "t1", "alice", "sess-alice", "shutdown", "idle")
+    deps.db.run(
+      "UPDATE team_member SET worktree_branch = 'ensemble-my-team-alice', merge_state = 'merged' WHERE name = 'alice'",
+    )
+
+    await expect(executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, async () => false, false))
+      .rejects.toThrow("branch ensemble-my-team-alice: deletion was not confirmed")
+    expect(deps.db.query("SELECT status FROM team WHERE id = 't1'").get()).toEqual({ status: "active" })
+    expect(deps.db.query("SELECT worktree_branch, merge_state FROM team_member WHERE name = 'alice'").get())
+      .toEqual({ worktree_branch: "ensemble-my-team-alice", merge_state: "merged" })
   })
 
   test("cleanup with no worktrees does not mention branches", async () => {
@@ -1060,17 +1143,37 @@ describe("team_cleanup", () => {
     expect(row.workspace_id).toBeNull()
   })
 
-  test("cleanup continues if workspace.remove fails", async () => {
+  test("cleanup preserves failed resource identifiers and clears confirmed removals", async () => {
     insertMember(deps.db, "t1", "alice", "sess-alice", "shutdown", "idle")
     deps.db.run("UPDATE team_member SET worktree_dir = ?, worktree_branch = ?, workspace_id = ? WHERE name = 'alice'",
       ["/tmp/worktree-alice", "ensemble-my-team-alice", "ws-alice-123"])
     deps.db.run("UPDATE team_member SET merge_state = 'merged' WHERE name = 'alice'")
     deps.registry.register("t1", "alice", "sess-alice")
 
-    deps.client.workspace.remove = async () => { throw new Error("workspace gone") }
+    let workspaceAttempts = 0
+    deps.client.workspace.remove = async () => {
+      workspaceAttempts++
+      if (workspaceAttempts === 1) throw new Error("workspace transport failed")
+      return {}
+    }
+
+    await expect(executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete, false))
+      .rejects.toThrow("alice workspace ws-alice-123: workspace transport failed")
+    expect(deps.db.query("SELECT status FROM team WHERE id = 't1'").get()).toEqual({ status: "active" })
+    expect(deps.db.query("SELECT workspace_id, worktree_dir FROM team_member WHERE name = 'alice'").get()).toEqual({
+      workspace_id: "ws-alice-123",
+      worktree_dir: null,
+    })
 
     const result = await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete, false)
     expect(result).toContain("cleaned up")
+    expect(workspaceAttempts).toBe(2)
+    expect(deps.client.calls.filter(call => call.method === "worktree.remove")).toHaveLength(1)
+    expect(deps.db.query("SELECT status FROM team WHERE id = 't1'").get()).toEqual({ status: "archived" })
+    expect(deps.db.query("SELECT workspace_id, worktree_dir FROM team_member WHERE name = 'alice'").get()).toEqual({
+      workspace_id: null,
+      worktree_dir: null,
+    })
   })
 
   test("cleanup lists multiple branches when multiple members have worktrees", async () => {

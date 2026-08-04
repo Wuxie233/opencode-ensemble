@@ -16,6 +16,12 @@ export interface VerifiedRepositoryBinding {
   gitIdentity: string
 }
 
+/** Repository identity persisted for one writer member. */
+export interface MemberRepositoryBinding {
+  repositoryRoot: string
+  gitIdentity: string | null
+}
+
 /** Injectable repository operations used by tools and focused tests. */
 export interface RepositoryBindingOps {
   canonicalControllerDirectory(directory: string): Promise<string>
@@ -51,6 +57,32 @@ export function getTeamRepositoryBinding(db: Database, teamId: string): TeamRepo
     repositoryRoot: path.normalize(row.repository_root),
     controllerDirectory: path.normalize(row.controller_directory),
     gitIdentity: row.git_identity ? path.normalize(row.git_identity) : null,
+  }
+}
+
+/** Load a writer's repository binding, falling back only for legacy member rows. */
+export function getMemberRepositoryBinding(db: Database, teamId: string, memberName: string): MemberRepositoryBinding {
+  const row = db.query(
+    `SELECT repository_root, repository_git_identity
+     FROM team_member WHERE team_id = ? AND name = ?`,
+  ).get(teamId, memberName) as {
+    repository_root: string | null
+    repository_git_identity: string | null
+  } | null
+  if (!row) throw new Error(`Teammate "${memberName}" not found in team ${teamId}`)
+  if (row.repository_root === null && row.repository_git_identity === null) {
+    const team = getTeamRepositoryBinding(db, teamId)
+    return { repositoryRoot: team.repositoryRoot, gitIdentity: team.gitIdentity }
+  }
+  if (!row.repository_root || !row.repository_git_identity) {
+    throw new Error(`Teammate "${memberName}" has an incomplete repository binding`)
+  }
+  if (!path.isAbsolute(row.repository_root) || !path.isAbsolute(row.repository_git_identity)) {
+    throw new Error(`Teammate "${memberName}" has an invalid repository binding; both paths must be absolute`)
+  }
+  return {
+    repositoryRoot: path.normalize(row.repository_root),
+    gitIdentity: path.normalize(row.repository_git_identity),
   }
 }
 

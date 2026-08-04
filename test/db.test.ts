@@ -199,6 +199,29 @@ describe("schema migrations", () => {
     ])
   })
 
+  test("migration 20 adds per-writer repository binding and durable spawn attempts", () => {
+    for (let i = 0; i < 19; i++) {
+      db.exec(MIGRATIONS[i]!)
+      db.exec(`PRAGMA user_version = ${i + 1}`)
+    }
+    db.run("INSERT INTO project (id, name, path, git_identity, status, time_created, time_updated) VALUES ('p1', 'p1', '/repo', '/repo/.git', 'active', 1, 1)")
+    db.run("INSERT INTO team (id, name, project_id, controller_directory, lead_session_id, status, delegate, time_created, time_updated) VALUES ('t1', 't1', 'p1', '/controller', 'lead', 'active', 0, 1, 1)")
+    db.run("INSERT INTO team_member (team_id, name, session_id, agent, status, execution_status, time_created, time_updated) VALUES ('t1', 'legacy', 's1', 'build', 'ready', 'idle', 1, 1)")
+
+    applyMigrations(db)
+
+    expect(db.query("SELECT repository_root, repository_git_identity FROM team_member WHERE name = 'legacy'").get())
+      .toEqual({ repository_root: null, repository_git_identity: null })
+    db.run(
+      `INSERT INTO team_spawn_attempt
+         (team_id, name, repository_root, repository_git_identity, worktree_name,
+          claim_task_id, claim_event_id, time_created, time_updated)
+       VALUES ('t1', 'writer', '/controller/child', '/controller/child/.git', 'writer-wt', 'task-1', 'event-1', 1, 1)`,
+    )
+    expect(db.query("SELECT repository_root, repository_git_identity, worktree_name FROM team_spawn_attempt").get())
+      .toEqual({ repository_root: "/controller/child", repository_git_identity: "/controller/child/.git", worktree_name: "writer-wt" })
+  })
+
   test("artifact rows and task contract bindings are immutable", () => {
     applyMigrations(db)
     db.exec("PRAGMA foreign_keys=ON")

@@ -660,7 +660,7 @@ export async function executeTeamCleanup(
   }
 
   const mergedWithBranch = members.filter(member => member.worktree_branch !== null && member.merge_state === "merged")
-  const residualBranches: string[] = []
+  const resourceRemovalFailures: string[] = []
   for (const member of mergedWithBranch) {
     const branch = member.worktree_branch
     if (!branch) continue
@@ -668,24 +668,38 @@ export async function executeTeamCleanup(
       deps.db.run("UPDATE team_member SET worktree_branch = NULL WHERE team_id = ? AND name = ?", [teamInfo.teamId, member.name])
       member.worktree_branch = null
     } else {
-      residualBranches.push(`${member.name} (${branch})`)
+      resourceRemovalFailures.push(`${member.name} branch ${branch}: deletion was not confirmed`)
     }
   }
 
-  // Remove workspaces and worktrees
+  // Remove workspaces and worktrees. Successful removals are durable partial
+  // progress, while any failure keeps the Team active for an idempotent retry.
   for (const member of members) {
     if (member.workspace_id) {
       try {
         await deps.client.workspace.remove({ directory: repositoryRoot, id: member.workspace_id })
         deps.db.run("UPDATE team_member SET workspace_id = NULL WHERE team_id = ? AND name = ?", [teamInfo.teamId, member.name])
-      } catch { /* best effort */ }
+        member.workspace_id = null
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error)
+        resourceRemovalFailures.push(`${member.name} workspace ${member.workspace_id}: ${detail}`)
+      }
     }
     if (member.worktree_dir) {
       try {
         await deps.client.worktree.remove({ directory: repositoryRoot, worktreeRemoveInput: { directory: member.worktree_dir } })
         deps.db.run("UPDATE team_member SET worktree_dir = NULL WHERE team_id = ? AND name = ?", [teamInfo.teamId, member.name])
-      } catch { /* best effort */ }
+        member.worktree_dir = null
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error)
+        resourceRemovalFailures.push(`${member.name} worktree ${member.worktree_dir}: ${detail}`)
+      }
     }
+  }
+  if (resourceRemovalFailures.length > 0) {
+    throw new Error(
+      `Cannot clean up team "${teamInfo.teamName}": resource removal failed. The Team remains active; successfully removed resources were cleared and failed identifiers remain recorded for retry. ${resourceRemovalFailures.join("; ")}`,
+    )
   }
 
   // Archive the team and consume residual messages atomically. A failed
@@ -705,10 +719,5 @@ export async function executeTeamCleanup(
   deps.registry.unregisterTeam(teamInfo.teamId)
   spawnFailures.delete(teamInfo.teamId)
 
-  // Build response
-  const parts: string[] = [`Team "${teamInfo.teamName}" cleaned up.`]
-  if (residualBranches.length > 0) {
-    parts.push(`Branch cleanup failed after integration; these branches remain recorded and will not be merged twice: ${residualBranches.join(", ")}.`)
-  }
-  return parts.join("\n")
+  return `Team "${teamInfo.teamName}" cleaned up.`
 }

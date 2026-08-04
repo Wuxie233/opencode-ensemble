@@ -445,6 +445,7 @@ const plugin: Plugin = async (input) => {
           prompt: tool.schema.string().describe("Task instructions for the teammate"),
           model: tool.schema.string().optional().describe("Model in provider/model format (optional, uses default)"),
           claim_task: tool.schema.string().optional().describe("Task ID to auto-claim for this teammate (optional)"),
+          repository_root: tool.schema.string().optional().describe("Exact absolute Git repository root for an isolated writer. Must be the Team repository or a Git root under the Team controller directory."),
           worktree: tool.schema.boolean().default(true).describe("Create a git worktree for file isolation (default: true, set false for read-only agents)"),
           plan_approval: tool.schema.boolean().default(false).describe("Require teammate to send a plan for approval before writing files (default: false)"),
           resume_from: tool.schema.string().optional().describe("Existing teammate name whose session context should be passed to this new isolated teammate"),

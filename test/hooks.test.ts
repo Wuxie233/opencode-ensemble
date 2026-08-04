@@ -873,6 +873,33 @@ describe("handleSessionErrorEvent", () => {
     expect(alert.content).toContain("1 assigned task was returned to pending")
   })
 
+  test("preserves immutable writer Git evidence across session-error classification", () => {
+    db.run(
+      `UPDATE team_member
+       SET worktree_dir = '/tmp/worktree-scout', worktree_branch = NULL,
+           worktree_source_branch = 'ensemble-smoke-scout', worktree_baseline_oid = 'baseline-oid'
+       WHERE session_id = 'scout-sess'`,
+    )
+
+    handleSessionErrorEvent(db, registry, "scout-sess", {
+      name: "ProviderError",
+      data: { message: "stream ended before first prompt" },
+    })
+
+    expect(db.query(
+      `SELECT status, execution_status, worktree_dir, worktree_branch,
+              worktree_source_branch, worktree_baseline_oid
+       FROM team_member WHERE session_id = 'scout-sess'`,
+    ).get()).toEqual({
+      status: "error",
+      execution_status: "failed",
+      worktree_dir: "/tmp/worktree-scout",
+      worktree_branch: null,
+      worktree_source_branch: "ensemble-smoke-scout",
+      worktree_baseline_oid: "baseline-oid",
+    })
+  })
+
   test("uses error.name as fallback when data.message is missing", () => {
     handleSessionErrorEvent(db, registry, "scout-sess", { name: "ProviderAuthError" })
 

@@ -265,7 +265,7 @@ Build with `bun run build`, then restart OpenCode to pick up changes.
 | Tool | What it does |
 |------|-------------|
 | `team_create` | Create a team. Caller becomes the lead. Accepts an optional Unicode project display name while resource names use a safe internal slug. |
-| `team_spawn` | Start a new teammate with a task. Supports `plan_approval` and `resume_from` handoff. |
+| `team_spawn` | Start a new teammate with a task. Supports `plan_approval`, `resume_from`, and an explicit writer `repository_root` under the Team controller directory. |
 | `team_shutdown` | Ask a teammate to stop. Preserves their branch before aborting. Supports `force` flag. |
 | `team_merge` | Merge a shutdown teammate's branch into working directory (unstaged). Blocks overlapping local changes and converges safely on repeated calls. |
 | `team_cleanup` | Archive a fully integrated team. Refuses cleanup while a writer branch is unmerged or has an interrupted merge. With `purge`, previews archived-team deletion and returns exact approval labels plus a confirmation token. |
