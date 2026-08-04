@@ -639,6 +639,35 @@ describe("team_spawn", () => {
     expect(deps.client.calls).toHaveLength(0)
   })
 
+  test("recovers a legacy Team Git identity before spawning its next writer", async () => {
+    deps.db.run("UPDATE project SET git_identity = NULL WHERE id = '/tmp/test-project'")
+
+    await executeTeamSpawn(deps, {
+      name: "legacy-writer",
+      profile: "backend",
+      prompt: "Continue the existing Team",
+    }, "lead-sess")
+
+    expect(deps.db.query("SELECT git_identity FROM project WHERE id = '/tmp/test-project'").get())
+      .toEqual({ git_identity: "/tmp/test-project/.git" })
+    expect(deps.db.query("SELECT repository_root, repository_git_identity FROM team_member WHERE name = 'legacy-writer'").get())
+      .toEqual({ repository_root: "/tmp/test-project", repository_git_identity: "/tmp/test-project/.git" })
+  })
+
+  test("gives an actionable child-repository retry when legacy root recovery fails", async () => {
+    deps.db.run("UPDATE project SET git_identity = NULL WHERE id = '/tmp/test-project'")
+    deps.repositoryBindingOps!.verifyRepositoryRoot = async () => {
+      throw new Error("repository_root is not inside a Git repository")
+    }
+
+    await expect(executeTeamSpawn(deps, {
+      name: "legacy-writer",
+      profile: "backend",
+      prompt: "Continue the existing Team",
+    }, "lead-sess")).rejects.toThrow("retry team_spawn with repository_root set to the exact child Git repository root")
+    expect(deps.client.calls).toHaveLength(0)
+  })
+
   test("rejects repository_root for read-only profiles", async () => {
     await expect(executeTeamSpawn(deps, {
       name: "scout",

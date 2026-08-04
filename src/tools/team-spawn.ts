@@ -11,7 +11,7 @@ import { recomputeCurrentPhase } from "../task-phase"
 import { appendTeamEvent } from "../team-event"
 import { immediateTransaction } from "../db"
 import { resolveProfile } from "../profiles"
-import { getTeamRepositoryBinding, repositoryBindingOps } from "../repository-binding"
+import { getTeamRepositoryBinding, recoverTeamRepositoryBinding, repositoryBindingOps } from "../repository-binding"
 import { parseTaskResult } from "../result-parser"
 import { renderError } from "../error"
 
@@ -209,7 +209,19 @@ async function resolveSpawnRepository(
   }
   if (!explicitRoot) {
     if (!team.gitIdentity && !isReadOnly) {
-      throw new Error(`Team "${teamInfo.teamName}" has no verified Git identity; recreate it with team_create before spawning a writer`)
+      const repositoryOps = deps.repositoryBindingOps ?? repositoryBindingOps
+      try {
+        const recovered = await recoverTeamRepositoryBinding(deps.db, teamInfo.teamId, repositoryOps)
+        if (!recovered.gitIdentity) throw new Error("verified repository did not produce a Git identity")
+        return { repositoryRoot: recovered.repositoryRoot, gitIdentity: recovered.gitIdentity }
+      } catch (error) {
+        const detail = renderError(error)
+        throw new Error(
+          `Team "${teamInfo.teamName}" has no verified Git identity and its persisted root could not be recovered (${detail}). `
+          + "For a multi-repository workspace, retry team_spawn with repository_root set to the exact child Git repository root. "
+          + "If the persisted Team root should itself be a Git repository, restore that repository and retry the same team_spawn call.",
+        )
+      }
     }
     return { repositoryRoot: team.repositoryRoot, gitIdentity: team.gitIdentity ?? "" }
   }
