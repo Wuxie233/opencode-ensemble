@@ -265,7 +265,7 @@ member, the call is blocked. This covers sub-agents at arbitrary depth.
 | team_cleanup        | Lead only   | Archive only after every writer branch is explicitly merged and verified |
 | team_status         | Any member  | View members, statuses, task summary |
 | team_view           | Any member  | Navigate TUI to teammate's session   |
-| team_metrics        | Lead or own member Team | Read bounded, privacy-safe aggregate telemetry; timeline requires explicit authorized Team IDs |
+| team_metrics        | Any session | Read bounded, privacy-safe aggregate telemetry across projects and conversations; timeline requires explicit Team IDs |
 | team_artifact_publish | Active Team member | Publish immutable text contracts or owned task results under role/task authorization |
 | team_artifact_list  | Active Team member | List bounded same-Team artifact metadata without content |
 | team_artifact_read  | Active Team member | Read one exact same-Team artifact by opaque ID |

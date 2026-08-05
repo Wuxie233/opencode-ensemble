@@ -850,7 +850,7 @@ async function executeTeamSpawnLocked(
     "- team_claim: claim a pending task from the shared board",
     "- team_consult: ask a Planner to resolve a technical contract for your owned task boundary",
     "- team_consult_reply: Planner-only reply or escalation for a pending consultation",
-    "- team_metrics: read bounded privacy-safe telemetry; as a teammate you may query only this Team",
+    "- team_metrics: read bounded privacy-safe telemetry across projects and conversations",
     "- team_artifact_publish: publish an immutable Team contract or owned task result",
     "- team_artifact_list: list bounded artifact metadata without content",
     "- team_artifact_read: read one exact Team artifact by opaque ID",

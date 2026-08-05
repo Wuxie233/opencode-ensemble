@@ -39,7 +39,7 @@ describe("team_metrics", () => {
     expect(JSON.stringify(body)).not.toContain("task-one")
   })
 
-  test("allows a member only its own explicit timeline and projects safe payload keys", () => {
+  test("allows any conversation an explicit timeline and projects safe payload keys", () => {
     const db = seedTeam()
     insertMember(db, "team-one", "worker", "worker-session")
     const deps = setupDeps(db)
@@ -49,7 +49,7 @@ describe("team_metrics", () => {
       view: "timeline",
       metrics: ["task_created"],
       limit: 10,
-    }, "worker-session")) as { events: Array<{ team_id: string; payload: Record<string, unknown> }> }
+    }, "unrelated-session")) as { events: Array<{ team_id: string; payload: Record<string, unknown> }> }
     expect(body.events.some(event => event.team_id === "team-one")).toBe(true)
     const task = body.events.find(event => event.payload.task_id === "task-one")
     expect(task?.payload).toEqual({ task_id: "task-one", status: "pending" })
@@ -60,10 +60,10 @@ describe("team_metrics", () => {
     const db = seedTeam()
     const deps = setupDeps(db)
     const request = { view: "summary" as const, metrics: ["task_created"], window: { from: FROM, to: TO } }
-    expect(() => executeTeamMetrics(db, deps.registry, { ...request, metrics: ["not_a_metric"] }, "lead-session")).toThrow("invalid or outside")
-    expect(() => executeTeamMetrics(db, deps.registry, { ...request, cursor: "anything" }, "lead-session")).toThrow("invalid or outside")
-    expect(() => executeTeamMetrics(db, deps.registry, { ...request, view: "timeline" }, "lead-session")).toThrow("invalid or outside")
-    expect(() => executeTeamMetrics(db, deps.registry, { ...request, window: { from: "2026-07-01T00:00:00Z", to: TO } }, "lead-session")).toThrow("invalid or outside")
+    expect(() => executeTeamMetrics(db, deps.registry, { ...request, metrics: ["not_a_metric"] }, "lead-session")).toThrow("invalid or references")
+    expect(() => executeTeamMetrics(db, deps.registry, { ...request, cursor: "anything" }, "lead-session")).toThrow("invalid or references")
+    expect(() => executeTeamMetrics(db, deps.registry, { ...request, view: "timeline" }, "lead-session")).toThrow("invalid or references")
+    expect(() => executeTeamMetrics(db, deps.registry, { ...request, window: { from: "2026-07-01T00:00:00Z", to: TO } }, "lead-session")).toThrow("invalid or references")
   })
 
   test("returns structured unsupported reasons instead of inventing quality metrics", () => {
@@ -95,7 +95,7 @@ describe("team_metrics", () => {
     expect(body.metrics.find(metric => metric.metric === "cycle_time_ms_p50")?.censored).toBe(1)
   })
 
-  test("compares one mechanism with none and suppresses project-wide cells below five Teams", () => {
+  test("compares one mechanism with none and suppresses unscoped cells below five Teams", () => {
     const db = setupDb()
     for (let index = 0; index < 6; index++) {
       const id = `team-${index}`
@@ -121,10 +121,10 @@ describe("team_metrics", () => {
     const deps = setupDeps(db)
     expect(() => executeTeamMetrics(db, deps.registry, {
       scope: { team_ids: ["team-one"] }, window: { from: FROM, to: TO }, view: "timeline", metrics: ["private_metric"],
-    }, "lead-session")).toThrow("invalid or outside")
+    }, "lead-session")).toThrow("invalid or references")
   })
 
-  test("rejects cross-project Team scope and another member's Team without leaking existence", () => {
+  test("allows cross-project scopes from unrelated conversations", () => {
     const db = setupDb()
     insertTeam(db, "team-one", "team-one", "lead-one")
     db.run(
@@ -140,10 +140,35 @@ describe("team_metrics", () => {
     const deps = setupDeps(db)
     const request = { window: { from: FROM, to: TO }, view: "timeline" as const, metrics: ["team_created"] }
 
-    expect(() => executeTeamMetrics(db, deps.registry, { ...request, scope: { team_ids: ["team-two"] } }, "lead-one"))
-      .toThrow("Metrics request is invalid or outside caller scope")
-    expect(() => executeTeamMetrics(db, deps.registry, { ...request, scope: { team_ids: ["team-two"] } }, "alice-session"))
-      .toThrow("Metrics request is invalid or outside caller scope")
+    const crossProject = JSON.parse(executeTeamMetrics(db, deps.registry, {
+      ...request, scope: { team_ids: ["team-two"] },
+    }, "lead-one")) as { events: Array<{ team_id: string }> }
+    const unrelated = JSON.parse(executeTeamMetrics(db, deps.registry, {
+      ...request, scope: { team_ids: ["team-one", "team-two"] },
+    }, "unrelated-session")) as { events: Array<{ team_id: string }> }
+
+    expect(crossProject.events.map(event => event.team_id)).toEqual(["team-two"])
+    expect(new Set(unrelated.events.map(event => event.team_id))).toEqual(new Set(["team-one", "team-two"]))
+  })
+
+  test("aggregates every project by default from a non-Team conversation", () => {
+    const db = setupDb()
+    insertTeam(db, "team-one", "team-one", "lead-one")
+    db.run(
+      "INSERT INTO project (id, name, path, status, time_created, time_updated, slug) VALUES ('project-two', 'project-two', '/tmp/project-two', 'active', 1, 1, 'project-two')",
+    )
+    db.run(
+      "INSERT INTO team (id, name, project_id, lead_session_id, status, delegate, time_created, time_updated) VALUES ('team-two', 'team-two', 'project-two', 'lead-two', 'active', 0, 1, 1)",
+    )
+    appendTeamEvent(db, { teamId: "team-one", kind: "team.created", payload: {} })
+    appendTeamEvent(db, { teamId: "team-two", kind: "team.created", payload: {} })
+    const deps = setupDeps(db)
+
+    const body = JSON.parse(executeTeamMetrics(db, deps.registry, {
+      window: { from: FROM, to: TO }, view: "summary", metrics: ["team_created"],
+    }, "unrelated-session")) as { metrics: Array<{ value: number }> }
+
+    expect(body.metrics[0]?.value).toBe(2)
   })
 
   test("does not return a lifetime usage aggregate when its coverage crosses the request window", () => {
@@ -193,13 +218,13 @@ describe("team_metrics", () => {
     const db = seedTeam()
     const deps = setupDeps(db)
     const base = { window: { from: FROM, to: TO }, view: "compare" as const, metrics: ["task_created"] }
-    expect(() => executeTeamMetrics(db, deps.registry, { ...base, filters: { status: ["secret"] } }, "lead-session")).toThrow("invalid or outside")
-    expect(() => executeTeamMetrics(db, deps.registry, { ...base, compare: { dimension: "execution_mode", values: ["ensemble"] } }, "lead-session")).toThrow("invalid or outside")
-    expect(() => executeTeamMetrics(db, deps.registry, { ...base, compare: { dimension: "model", values: ["a", "b"] }, group_by: "model" }, "lead-session")).toThrow("invalid or outside")
-    expect(() => executeTeamMetrics(db, deps.registry, { ...base, compare: { dimension: "model", values: ["a", "b"] }, cursor: "0" }, "lead-session")).toThrow("invalid or outside")
-    expect(() => executeTeamMetrics(db, deps.registry, { ...base, percentile: 50 } as typeof base, "lead-session")).toThrow("invalid or outside")
-    expect(() => executeTeamMetrics(db, deps.registry, { ...base, metrics: ["cycle_time_ms"] } as typeof base, "lead-session")).toThrow("invalid or outside")
-    expect(() => executeTeamMetrics(db, deps.registry, { ...base, metrics: ["cycle_time_ms"], percentile: 75 } as typeof base, "lead-session")).toThrow("invalid or outside")
+    expect(() => executeTeamMetrics(db, deps.registry, { ...base, filters: { status: ["secret"] } }, "lead-session")).toThrow("invalid or references")
+    expect(() => executeTeamMetrics(db, deps.registry, { ...base, compare: { dimension: "execution_mode", values: ["ensemble"] } }, "lead-session")).toThrow("invalid or references")
+    expect(() => executeTeamMetrics(db, deps.registry, { ...base, compare: { dimension: "model", values: ["a", "b"] }, group_by: "model" }, "lead-session")).toThrow("invalid or references")
+    expect(() => executeTeamMetrics(db, deps.registry, { ...base, compare: { dimension: "model", values: ["a", "b"] }, cursor: "0" }, "lead-session")).toThrow("invalid or references")
+    expect(() => executeTeamMetrics(db, deps.registry, { ...base, percentile: 50 } as typeof base, "lead-session")).toThrow("invalid or references")
+    expect(() => executeTeamMetrics(db, deps.registry, { ...base, metrics: ["cycle_time_ms"] } as typeof base, "lead-session")).toThrow("invalid or references")
+    expect(() => executeTeamMetrics(db, deps.registry, { ...base, metrics: ["cycle_time_ms"], percentile: 75 } as typeof base, "lead-session")).toThrow("invalid or references")
   })
 
   test("applies requested p50, p90, and p95 cycle-time percentiles", () => {

@@ -140,8 +140,8 @@ export function buildLeadSystemPrompt(db: Database, teamId: string, config?: Req
   lines.push(
     "",
     "METRICS:",
-    "Use team_metrics for bounded, privacy-safe telemetry aggregates. Leads may query Teams in this project, including archived Teams; teammates may query only their own Team.",
-    "Use summary or funnel first. Timeline requires explicit authorized team_ids (at most 10) and returns only allowlisted enum, boolean, number, and opaque IDs. Metrics never expose prompts, messages, paths, sessions, branches, raw payloads, or free text.",
+    "Use team_metrics for bounded, privacy-safe telemetry aggregates across all projects and conversations, including archived Teams. Optional project and team_ids scopes filter results but do not authorize access.",
+    "Use summary or funnel first. Timeline requires explicit team_ids (at most 10) and returns only allowlisted enum, boolean, number, and opaque IDs. Metrics never expose prompts, messages, paths, sessions, branches, raw payloads, or free text.",
     "Treat unsupported quality, causal, active-time, and cost-per-success metrics as unavailable; do not infer them from task or archive state.",
     "",
     "Spawn only tasks in the ready frontier: pending tasks whose dependencies are complete.",

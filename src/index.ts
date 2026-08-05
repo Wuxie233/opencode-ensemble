@@ -749,7 +749,7 @@ const plugin: Plugin = async (input) => {
       }),
 
       team_metrics: tool({
-        description: "Query bounded, privacy-safe aggregate Team telemetry. Leads may query their project's Teams; members may query only their own Team. Timeline requires explicit team_ids and never returns prompts, messages, paths, sessions, branches, or raw payload text.",
+        description: "Query bounded, privacy-safe aggregate Team telemetry across all projects and conversations. Optional project and team_ids scopes filter results but do not authorize access. Timeline requires explicit team_ids and never returns prompts, messages, paths, sessions, branches, or raw payload text.",
         args: {
           scope: tool.schema.object({
             project: tool.schema.string().optional(),

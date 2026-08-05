@@ -115,7 +115,6 @@ interface Coverage {
 }
 
 interface AuthorizedScope {
-  projectId: string
   teamIds: string[]
   explicit: boolean
   filterUnknown: number
@@ -136,7 +135,7 @@ interface Page<T> {
 }
 
 function fail(): never {
-  throw new Error("Metrics request is invalid or outside caller scope")
+  throw new Error("Metrics request is invalid or references an unknown scope")
 }
 
 function unsupportedFilter(name: "workflow_kind" | "complexity_band"): never {
@@ -168,39 +167,24 @@ function iso(ms: number | null): string | null {
   return ms === null ? null : new Date(ms).toISOString()
 }
 
-function authorize(db: Database, _registry: MemberRegistry, sessionId: string, request: TeamMetricsRequest): AuthorizedScope {
-  const identities = db.query(
-    `SELECT id, project_id, 'lead' AS role FROM team WHERE lead_session_id = ?
-     UNION ALL
-     SELECT t.id, t.project_id, 'member' AS role
-     FROM team_member tm JOIN team t ON t.id = tm.team_id WHERE tm.session_id = ?`,
-  ).all(sessionId, sessionId) as Array<{ id: string; project_id: string; role: "lead" | "member" }>
-  if (identities.length === 0) fail()
-  const leadRows = identities.filter(row => row.role === "lead")
-  const roleRows = leadRows.length > 0 ? leadRows : identities.filter(row => row.role === "member")
-  const projectIds = [...new Set(roleRows.map(row => row.project_id))]
-  if (projectIds.length !== 1) fail()
-  const projectId = projectIds[0]
-  if (!projectId) fail()
+function resolveScope(db: Database, request: TeamMetricsRequest): AuthorizedScope {
   const requestedProject = request.scope?.project
+  let projectId: string | undefined
   if (requestedProject) {
     const project = db.query("SELECT id FROM project WHERE id = ? OR name = ? OR slug = ?").get(requestedProject, requestedProject, requestedProject) as { id: string } | null
-    if (!project || project.id !== projectId) fail()
+    if (!project) fail()
+    projectId = project.id
   }
   const requested = request.scope?.team_ids
   if (requested && (requested.length === 0 || requested.length > MAX_LIMIT || new Set(requested).size !== requested.length || requested.some(id => !IDENTIFIER.test(id)))) fail()
   if (request.view === "timeline" && (!requested || requested.length > MAX_TIMELINE_TEAMS)) fail()
-  if (leadRows.length === 0) {
-    const ownIds = [...new Set(roleRows.map(row => row.id))]
-    if (ownIds.length !== 1) fail()
-    if (requested && (requested.length !== 1 || requested[0] !== ownIds[0])) fail()
-    return { projectId, teamIds: ownIds, explicit: Boolean(requested), filterUnknown: 0 }
-  }
+  const projectClause = projectId ? " AND project_id = ?" : ""
+  const projectParams = projectId ? [projectId] : []
   const rows = requested
-    ? db.query(`SELECT id FROM team WHERE project_id = ? AND id IN (${placeholders(requested)})`).all(projectId, ...requested) as Array<{ id: string }>
-    : db.query("SELECT id FROM team WHERE project_id = ? ORDER BY id").all(projectId) as Array<{ id: string }>
+    ? db.query(`SELECT id FROM team WHERE id IN (${placeholders(requested)})${projectClause} ORDER BY id`).all(...requested, ...projectParams) as Array<{ id: string }>
+    : db.query(`SELECT id FROM team WHERE 1 = 1${projectClause} ORDER BY id`).all(...projectParams) as Array<{ id: string }>
   if (requested && rows.length !== requested.length) fail()
-  return { projectId, teamIds: rows.map(row => row.id), explicit: Boolean(requested), filterUnknown: 0 }
+  return { teamIds: rows.map(row => row.id), explicit: Boolean(requested), filterUnknown: 0 }
 }
 
 function createdCohort(db: Database, scope: AuthorizedScope, window: TimeWindow, version?: number): string[] {
@@ -706,7 +690,7 @@ function compareView(db: Database, scope: AuthorizedScope, window: TimeWindow, r
 }
 
 /** Execute a bounded, read-only and privacy-safe metrics request. */
-export function executeTeamMetrics(db: Database, registry: MemberRegistry, request: TeamMetricsRequest, sessionId: string): string {
+export function executeTeamMetrics(db: Database, _registry: MemberRegistry, request: TeamMetricsRequest, _sessionId: string): string {
   if (!request || !Array.isArray(request.metrics) || request.metrics.length === 0 || request.metrics.length > MAX_METRICS) fail()
   assertRequestShape(request)
   if (!request.metrics.every(metric => Object.hasOwn(METRIC_DEFINITIONS, metric))) fail()
@@ -720,7 +704,7 @@ export function executeTeamMetrics(db: Database, registry: MemberRegistry, reque
   const limit = request.limit ?? MAX_LIMIT
   if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIMIT) fail()
   const window = parseWindow(request.window)
-  const scope = applyFilters(db, authorize(db, registry, sessionId, request), request.filters, window)
+  const scope = applyFilters(db, resolveScope(db, request), request.filters, window)
   const coverage = baseCoverage(db, scope, window)
   if (request.view === "timeline") {
     return JSON.stringify({ view: request.view, request_window: { from: window.fromIso, to: window.toIso }, coverage, ...timeline(db, scope, window, limit) })
