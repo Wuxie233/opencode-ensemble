@@ -85,7 +85,22 @@ export function teamResourceSegment(teamName: string, teamId: string): string {
 
 /** Build an OpenCode worktree name for a team member. */
 export function teamWorktreeName(projectName: string, teamName: string, teamId: string, memberName: string): string {
-  return `ensemble-${teamResourceSlug(projectName, teamName, teamId)}-${memberName}`
+  return normalizeWorktreeName(`ensemble-${teamResourceSlug(projectName, teamName, teamId)}-${memberName}`)
+}
+
+/** Normalize a requested worktree name exactly as OpenCode does before creation. */
+export function normalizeWorktreeName(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+}
+
+/** Check whether a create response is the requested worktree or OpenCode's unique-name variant. */
+export function matchesCreatedWorktreeName(requestedName: string, actualName: string): boolean {
+  const normalizedName = normalizeWorktreeName(requestedName)
+  return actualName === normalizedName || actualName.startsWith(`${normalizedName}-`)
 }
 
 /**

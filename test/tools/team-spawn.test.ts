@@ -1380,7 +1380,7 @@ describe("team_spawn", () => {
     // Worktree.create should have been called
     const wtCalls = deps.client.calls.filter(c => c.method === "worktree.create")
     expect(wtCalls).toHaveLength(1)
-    expect((wtCalls[0]!.args[0] as Record<string, unknown>).worktreeCreateInput).toEqual({ name: "ensemble-test-project-my-team#t1-alice" })
+    expect((wtCalls[0]!.args[0] as Record<string, unknown>).worktreeCreateInput).toEqual({ name: "ensemble-test-project-my-team-t1-alice" })
 
     // DB should have worktree columns populated
     const row = deps.db.query("SELECT worktree_dir, worktree_branch, worktree_source_branch, worktree_baseline_oid FROM team_member WHERE name = ?").get("alice") as Record<string, string | null>
@@ -1409,7 +1409,43 @@ describe("team_spawn", () => {
     const names = deps.client.calls
       .filter(c => c.method === "worktree.create")
       .map(c => ((c.args[0] as { worktreeCreateInput: { name: string } }).worktreeCreateInput).name)
-    expect(names).toEqual(["ensemble-test-project-my-team#t1-alice", "ensemble-other-project-my-team#t2-alice"])
+    expect(names).toEqual(["ensemble-test-project-my-team-t1-alice", "ensemble-other-project-my-team-t2-alice"])
+  })
+
+  test("accepts the OpenCode-normalized unique worktree name", async () => {
+    deps.client.worktree.create = async options => {
+      deps.client.calls.push({ method: "worktree.create", args: [options] })
+      const requested = options.worktreeCreateInput?.name ?? "default"
+      const normalized = requested
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+      const name = `${normalized}-quiet-river`
+      return {
+        data: {
+          name,
+          branch: `opencode/${name}`,
+          directory: `/tmp/worktree/${name}`,
+        },
+      }
+    }
+
+    const result = await executeTeamSpawn(deps, {
+      name: "runtime-builder",
+      agent: "build",
+      prompt: "Fix the runtime",
+    }, "lead-sess")
+
+    expect(result).toContain("runtime-builder")
+    expect(deps.db.query(
+      "SELECT worktree_dir, worktree_branch FROM team_member WHERE name = 'runtime-builder'",
+    ).get()).toEqual({
+      worktree_dir: "/tmp/worktree/ensemble-test-project-my-team-t1-runtime-builder-quiet-river",
+      worktree_branch: "opencode/ensemble-test-project-my-team-t1-runtime-builder-quiet-river",
+    })
+    expect(deps.db.query("SELECT name FROM team_spawn_attempt").all()).toHaveLength(0)
+    expect(deps.client.calls.filter(call => call.method === "worktree.remove")).toHaveLength(0)
   })
 
   test("skips worktree when worktree: false", async () => {
@@ -1450,11 +1486,20 @@ describe("team_spawn", () => {
   })
 
   test.each([
+    ["returned name", async () => ({ gitIdentity: "/tmp/test-project/.git", headOid: "baseline-oid" })],
     ["repository identity", async () => ({ gitIdentity: "/other/.git", headOid: "baseline-oid" })],
     ["source ref", async () => null],
     ["baseline OID", async () => ({ gitIdentity: "/tmp/test-project/.git", headOid: "other-oid" })],
   ])("rolls back the worktree when %s verification fails", async (_label, replacement) => {
-    if (_label === "source ref") {
+    if (_label === "returned name") {
+      deps.client.worktree.create = async () => ({
+        data: {
+          name: "unrelated-worktree",
+          branch: "opencode/unrelated-worktree",
+          directory: "/tmp/unrelated-worktree",
+        },
+      })
+    } else if (_label === "source ref") {
       deps.repositoryBindingOps = { ...deps.repositoryBindingOps!, resolveGitRefOid: replacement as () => Promise<null> }
     } else {
       deps.repositoryBindingOps = { ...deps.repositoryBindingOps!, resolveWorktreeIdentity: replacement as () => Promise<{ gitIdentity: string; headOid: string }> }
@@ -1802,7 +1847,7 @@ describe("team_spawn — agent mode enforcement", () => {
     const createCall = deps.client.calls.find(c => c.method === "session.create")
     const opts = createCall!.args[0] as { permission?: Array<{ permission: string; pattern: string; action: string }> }
     expect(opts.permission).toEqual([
-      { permission: "edit", pattern: "/tmp/worktree-ensemble-test-project-my-team#t1-builder/**", action: "allow" },
+      { permission: "edit", pattern: "/tmp/worktree-ensemble-test-project-my-team-t1-builder/**", action: "allow" },
       { permission: "bash", pattern: "*", action: "allow" },
       ...TEAM_TOOL_PERMISSIONS,
     ])

@@ -114,6 +114,10 @@ stage and discovered identifiers before crossing the next boundary, and remove
 it only after member ownership transfers or cleanup is proven. Timeouts retain
 the attempt and task because the SDK request may complete late; startup recovery
 and `team_cleanup` reconcile attempts before releasing tasks or archiving.
+OpenCode normalizes requested worktree names and may append a unique slug on
+collision. Persist the actual returned name, directory, and branch immediately;
+validate ownership with the repository common-dir plus branch/HEAD identity,
+and keep list-based recovery exact so it fails closed on ambiguous candidates.
 
 The SQLite connection, dashboard listener, and `ActivityBuffer` are process-shared across directory plugin instances. Directory-local watchdogs, registries, trackers, and rate limiters remain isolated. Release shared resources only after the final directory and any in-flight recovery task finish.
 

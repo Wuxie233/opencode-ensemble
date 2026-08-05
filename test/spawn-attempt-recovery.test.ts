@@ -67,4 +67,37 @@ describe("spawn attempt recovery", () => {
     expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-1'").get())
       .toEqual({ status: "in_progress", assignee: "writer" })
   })
+
+  test("recovers a legacy attempt after OpenCode normalized its worktree name", async () => {
+    const deps = setupDeps()
+    insertTeam(deps.db, "t1", "team", "lead")
+    insertClaimedAttempt(deps, "worktree_creating")
+    deps.db.run(
+      `UPDATE team_spawn_attempt
+       SET worktree_name = 'ensemble-test-project-team#t1-writer',
+           worktree_dir = NULL,
+           worktree_branch = NULL,
+           worktree_source_branch = NULL,
+           workspace_id = NULL
+       WHERE name = 'writer'`,
+    )
+    deps.client.worktree.list = async () => ({
+      data: [{
+        name: "ensemble-test-project-team-t1-writer",
+        branch: "opencode/ensemble-test-project-team-t1-writer",
+        directory: "/tmp/legacy-normalized-writer",
+      }],
+    })
+
+    expect(await recoverSpawnAttempts(deps.db, deps.client, undefined, "t1"))
+      .toEqual({ recovered: 1, blocked: 0 })
+    expect(deps.client.calls.find(call => call.method === "worktree.remove")?.args[0])
+      .toEqual({
+        directory: "/tmp/test-project",
+        worktreeRemoveInput: { directory: "/tmp/legacy-normalized-writer" },
+      })
+    expect(deps.db.query("SELECT name FROM team_spawn_attempt").all()).toHaveLength(0)
+    expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-1'").get())
+      .toEqual({ status: "pending", assignee: null })
+  })
 })

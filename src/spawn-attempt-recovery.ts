@@ -4,7 +4,7 @@ import { sendLeadAlert } from "./messaging"
 import { recomputeCurrentPhase } from "./task-phase"
 import { appendTeamEvent } from "./team-event"
 import type { PluginClient } from "./types"
-import { preserveBranch, preservedBranchName } from "./tools/merge-helper"
+import { normalizeWorktreeName, preserveBranch, preservedBranchName } from "./tools/merge-helper"
 
 interface SpawnAttempt {
   team_id: string
@@ -56,8 +56,9 @@ export async function recoverSpawnAttempts(
     }
     try {
       const worktrees = await client.worktree.list({ directory: attempt.repository_root })
+      const normalizedWorktreeName = normalizeWorktreeName(attempt.worktree_name)
       const matchingWorktrees = (worktrees.data ?? []).filter(worktree =>
-        worktree.name === attempt.worktree_name || worktree.directory === attempt.worktree_dir
+        worktree.name === normalizedWorktreeName || worktree.directory === attempt.worktree_dir
       )
       if (matchingWorktrees.length > 1) throw new Error("multiple matching worktrees were discovered")
       const worktree = matchingWorktrees[0]

@@ -5,7 +5,7 @@ import { requireLead } from "./shared"
 import { sendLeadAlert } from "../messaging"
 import { log } from "../log"
 import type { EnsembleConfig } from "../config"
-import { getTeamResourceParts, preserveBranch, preservedBranchName, teamWorktreeName } from "./merge-helper"
+import { getTeamResourceParts, matchesCreatedWorktreeName, normalizeWorktreeName, preserveBranch, preservedBranchName, teamWorktreeName } from "./merge-helper"
 import type { PreserveBranchFn } from "./merge-helper"
 import { recomputeCurrentPhase } from "../task-phase"
 import { appendTeamEvent } from "../team-event"
@@ -262,6 +262,7 @@ function updateSpawnAttempt(
     worktree_branch: string
     worktree_source_branch: string
     worktree_baseline_oid: string
+    worktree_name: string
     workspace_id: string
     session_id: string
     safe_branch: string
@@ -314,7 +315,7 @@ async function identifyWorktree(
   worktreeName: string,
   result: { name: string; branch: string; directory: string },
 ): Promise<SpawnWorktree> {
-  if (result.name !== worktreeName || !result.directory || !result.branch.trim()) {
+  if (!matchesCreatedWorktreeName(worktreeName, result.name) || !result.directory || !result.branch.trim()) {
     throw new Error("worktree.create returned incomplete or mismatched resource identity")
   }
   const repositoryOps = deps.repositoryBindingOps ?? repositoryBindingOps
@@ -334,7 +335,8 @@ async function reconcileWorktree(
   worktreeName: string,
 ): Promise<SpawnWorktree | null> {
   const listed = await deps.client.worktree.list({ directory: repository.repositoryRoot })
-  const matches = (listed.data ?? []).filter(worktree => worktree.name === worktreeName)
+  const normalizedName = normalizeWorktreeName(worktreeName)
+  const matches = (listed.data ?? []).filter(worktree => worktree.name === normalizedName)
   if (matches.length > 1) throw new Error(`worktree.list returned multiple resources named ${worktreeName}`)
   return matches[0] ? identifyWorktree(deps, repository, worktreeName, matches[0]) : null
 }
@@ -450,9 +452,10 @@ async function executeTeamSpawnLocked(
       })
       worktreeCreate.then(result => {
         const late = result.data
-        if (!late || late.name !== worktreeName || !late.directory || !late.branch.trim()) return
+        if (!late?.directory || !late.branch.trim()) return
         try {
           updateSpawnAttempt(deps, teamInfo.teamId, args.name, {
+            worktree_name: late.name,
             worktree_dir: late.directory,
             worktree_branch: late.branch,
           })
@@ -465,10 +468,11 @@ async function executeTeamSpawnLocked(
         getSpawnTimeout(), `worktree.create for "${args.name}"`
       )
       if (!result.data) throw new Error("worktree.create returned no worktree")
-      if (result.data.name === worktreeName && result.data.directory && result.data.branch.trim()) {
+      if (result.data.directory && result.data.branch.trim()) {
         worktreeDir = result.data.directory
         worktreeBranch = result.data.branch
         updateSpawnAttempt(deps, teamInfo.teamId, args.name, {
+          worktree_name: result.data.name,
           worktree_dir: worktreeDir,
           worktree_branch: worktreeBranch,
         })
