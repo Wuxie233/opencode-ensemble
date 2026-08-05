@@ -39,6 +39,24 @@ describe("team_metrics", () => {
     expect(JSON.stringify(body)).not.toContain("task-one")
   })
 
+  test("accepts timezone-offset windows and normalizes them to UTC", () => {
+    const db = seedTeam()
+    const deps = setupDeps(db)
+    const body = JSON.parse(executeTeamMetrics(db, deps.registry, {
+      window: {
+        from: "2026-08-05T19:20:10+08:00",
+        to: "2026-08-05T22:05:02+08:00",
+      },
+      view: "summary",
+      metrics: ["team_created"],
+    }, "unrelated-session")) as { request_window: { from: string; to: string } }
+
+    expect(body.request_window).toEqual({
+      from: "2026-08-05T11:20:10.000Z",
+      to: "2026-08-05T14:05:02.000Z",
+    })
+  })
+
   test("allows any conversation an explicit timeline and projects safe payload keys", () => {
     const db = seedTeam()
     insertMember(db, "team-one", "worker", "worker-session")
@@ -63,7 +81,8 @@ describe("team_metrics", () => {
     expect(() => executeTeamMetrics(db, deps.registry, { ...request, metrics: ["not_a_metric"] }, "lead-session")).toThrow("invalid or references")
     expect(() => executeTeamMetrics(db, deps.registry, { ...request, cursor: "anything" }, "lead-session")).toThrow("invalid or references")
     expect(() => executeTeamMetrics(db, deps.registry, { ...request, view: "timeline" }, "lead-session")).toThrow("invalid or references")
-    expect(() => executeTeamMetrics(db, deps.registry, { ...request, window: { from: "2026-07-01T00:00:00Z", to: TO } }, "lead-session")).toThrow("invalid or references")
+    expect(() => executeTeamMetrics(db, deps.registry, { ...request, window: { from: "2026-07-01T00:00:00", to: TO } }, "lead-session")).toThrow("invalid or references")
+    expect(() => executeTeamMetrics(db, deps.registry, { ...request, window: { from: "2026-02-30T00:00:00Z", to: TO } }, "lead-session")).toThrow("invalid or references")
   })
 
   test("returns structured unsupported reasons instead of inventing quality metrics", () => {

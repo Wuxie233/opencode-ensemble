@@ -6,7 +6,7 @@ const MAX_METRICS = 20
 const MAX_FILTER_VALUES = 20
 const MAX_TIMELINE_TEAMS = 10
 const MAX_WINDOW_MS = 366 * 24 * 60 * 60 * 1000
-const UTC_ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
+const RFC3339_TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(?:Z|([+-])(\d{2}):(\d{2}))$/
 const IDENTIFIER = /^[a-z0-9][a-z0-9_-]{0,127}$/
 const DIMENSION_VALUE = /^[A-Za-z0-9][A-Za-z0-9._/+:-]{0,127}$/
 const TELEMETRY_VERSION = 1
@@ -142,14 +142,34 @@ function unsupportedFilter(name: "workflow_kind" | "complexity_band"): never {
   throw new Error(`Metrics filter ${name} is unsupported because the dimension is not instrumented`)
 }
 
+function parseTimestamp(value: string): number {
+  const match = RFC3339_TIMESTAMP.exec(value)
+  if (!match) fail()
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, , offsetHourText, offsetMinuteText] = match
+  const year = Number(yearText)
+  const month = Number(monthText)
+  const day = Number(dayText)
+  const hour = Number(hourText)
+  const minute = Number(minuteText)
+  const second = Number(secondText)
+  const offsetHour = Number(offsetHourText ?? 0)
+  const offsetMinute = Number(offsetMinuteText ?? 0)
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1] ?? 0
+  if (month < 1 || month > 12 || day < 1 || day > daysInMonth
+    || hour > 23 || minute > 59 || second > 59 || offsetHour > 23 || offsetMinute > 59) fail()
+  const timestamp = Date.parse(value)
+  if (!Number.isFinite(timestamp)) fail()
+  return timestamp
+}
+
 function parseWindow(window?: TeamMetricsRequest["window"]): TimeWindow {
   const to = window?.to ?? new Date().toISOString()
-  const from = window?.from ?? new Date(Date.parse(to) - 30 * 24 * 60 * 60 * 1000).toISOString()
-  if (!UTC_ISO.test(from) || !UTC_ISO.test(to) || from !== new Date(Date.parse(from)).toISOString() || to !== new Date(Date.parse(to)).toISOString()) fail()
-  const fromMs = Date.parse(from)
-  const toMs = Date.parse(to)
-  if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs <= fromMs || toMs - fromMs > MAX_WINDOW_MS) fail()
-  return { from: fromMs, to: toMs, fromIso: from, toIso: to }
+  const toMs = parseTimestamp(to)
+  const from = window?.from ?? new Date(toMs - 30 * 24 * 60 * 60 * 1000).toISOString()
+  const fromMs = parseTimestamp(from)
+  if (toMs <= fromMs || toMs - fromMs > MAX_WINDOW_MS) fail()
+  return { from: fromMs, to: toMs, fromIso: new Date(fromMs).toISOString(), toIso: new Date(toMs).toISOString() }
 }
 
 function placeholders(values: string[]): string {

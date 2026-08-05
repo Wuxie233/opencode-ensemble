@@ -160,7 +160,8 @@ Contract rules:
 
 - Permit every caller to query across projects and conversations. Treat project
   and explicit Team scopes only as filters, not authorization boundaries.
-- Default to completed cohorts in the last 30 days, UTC, with `limit <= 100`.
+- Accept RFC 3339 windows with `Z` or an explicit numeric timezone offset,
+  normalize them to UTC, and default to the previous 30 days with `limit <= 100`.
 - Return metric definitions, units, numerator, denominator, unknown/censored
   counts, sampling rate, coverage, and instrumentation version with every view.
 - `summary` returns aggregate values; `funnel` returns ordered lifecycle counts;
