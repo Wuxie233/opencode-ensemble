@@ -244,6 +244,57 @@ describe("already-integrated Git evidence", () => {
     }
   })
 
+  test("proves writer content remains integrated after later HEAD commits", async () => {
+    const repository = await createRepository()
+    try {
+      await git(repository.repo, ["checkout", "-b", "writer", repository.baseline])
+      const sourceOid = await commitFile(repository.repo, "writer.txt", "writer")
+      await git(repository.repo, ["checkout", "main"])
+      await git(repository.repo, ["merge", "--squash", "writer"])
+      await git(repository.repo, ["-c", "user.name=Ensemble Test", "-c", "user.email=ensemble@example.com", "commit", "-m", "squashed writer"])
+      await commitFile(repository.repo, "later.txt", "later")
+
+      expect(await verifySourceAlreadyIntegrated(repository.repo, repository.identity, sourceOid, repository.baseline))
+        .toEqual({ kind: "integrated" })
+    } finally {
+      await rm(repository.repo, { recursive: true, force: true })
+    }
+  })
+
+  test("proves a pure deletion already integrated after later HEAD commits", async () => {
+    const repository = await createRepository()
+    try {
+      await git(repository.repo, ["checkout", "-b", "writer", repository.baseline])
+      await git(repository.repo, ["rm", "base.txt"])
+      await git(repository.repo, ["-c", "user.name=Ensemble Test", "-c", "user.email=ensemble@example.com", "commit", "-m", "delete"])
+      const sourceOid = await git(repository.repo, ["rev-parse", "HEAD"])
+      await git(repository.repo, ["checkout", "main"])
+      await git(repository.repo, ["merge", "--squash", "writer"])
+      await git(repository.repo, ["-c", "user.name=Ensemble Test", "-c", "user.email=ensemble@example.com", "commit", "-m", "squashed deletion"])
+      await commitFile(repository.repo, "later.txt", "later")
+
+      expect(await verifySourceAlreadyIntegrated(repository.repo, repository.identity, sourceOid, repository.baseline))
+        .toEqual({ kind: "integrated" })
+    } finally {
+      await rm(repository.repo, { recursive: true, force: true })
+    }
+  })
+
+  test("classifies a resolvable three-way content conflict separately", async () => {
+    const repository = await createRepository()
+    try {
+      await git(repository.repo, ["checkout", "-b", "writer", repository.baseline])
+      const sourceOid = await commitFile(repository.repo, "base.txt", "writer")
+      await git(repository.repo, ["checkout", "main"])
+      await commitFile(repository.repo, "base.txt", "lead")
+
+      expect(await verifySourceAlreadyIntegrated(repository.repo, repository.identity, sourceOid, repository.baseline))
+        .toEqual({ kind: "conflict" })
+    } finally {
+      await rm(repository.repo, { recursive: true, force: true })
+    }
+  })
+
   test("uses a merge base for legacy null baseline but never calls a changed tree integrated", async () => {
     const repository = await createRepository()
     try {
@@ -272,7 +323,7 @@ describe("already-integrated Git evidence", () => {
 
       await commitFile(repository.repo, "base.txt", "lead")
       expect((await verifySourceAlreadyIntegrated(repository.repo, repository.identity, sourceOid, repository.baseline)).kind)
-        .toBe("unverifiable")
+        .toBe("conflict")
       expect((await verifySourceAlreadyIntegrated(repository.repo, `${repository.repo}/other.git`, sourceOid, repository.baseline)).kind)
         .toBe("unverifiable")
 

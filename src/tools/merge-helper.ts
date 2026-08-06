@@ -173,6 +173,19 @@ async function isAncestor(repositoryRoot: string, ancestor: string, descendant: 
   return result.exitCode === 0
 }
 
+async function changedPaths(repositoryRoot: string, baseOid: string, sourceOid: string): Promise<string[] | null> {
+  const result = await runCommand(["git", "diff-tree", "--no-commit-id", "--name-only", "-z", "-r", baseOid, sourceOid], { cwd: repositoryRoot })
+  if (result.exitCode !== 0) return null
+  return result.stdout.split("\0").filter(Boolean)
+}
+
+async function treeEntry(repositoryRoot: string, treeOid: string, filePath: string): Promise<string | null> {
+  const result = await runCommand(["git", "ls-tree", "-z", "-r", "--full-tree", treeOid, "--", filePath], { cwd: repositoryRoot })
+  if (result.exitCode !== 0) return null
+  const entry = result.stdout.split("\0").find(Boolean)
+  return entry ? entry.slice(0, entry.indexOf("\t")) : ""
+}
+
 async function repositoryGitIdentity(repositoryRoot: string): Promise<string | null> {
   const result = await runCommand(["git", "rev-parse", "--git-common-dir"], { cwd: repositoryRoot })
   if (result.exitCode !== 0 || !result.stdout.trim()) return null
@@ -190,6 +203,7 @@ export interface PinnedMergeSource {
 export type IntegratedSourceEvidence =
   | { kind: "integrated" }
   | { kind: "not-integrated" }
+  | { kind: "conflict" }
   | { kind: "unverifiable"; reason: string }
 
 /** Injectable source pinning function for team_merge tests. */
@@ -260,15 +274,49 @@ export async function verifySourceAlreadyIntegrated(
       cwd: repositoryRoot,
       env,
     })
+    let hasConflicts = false
     if (readTree.exitCode !== 0) {
-      return { kind: "unverifiable", reason: "Git could not apply the source net change in an isolated index" }
+      const conflicts = await runCommand(["git", "ls-files", "-u"], { cwd: repositoryRoot, env })
+      if (conflicts.exitCode === 0 && conflicts.stdout.trim()) hasConflicts = true
+      else return { kind: "unverifiable", reason: "Git could not apply the source net change in an isolated index" }
+    } else {
+      const conflicts = await runCommand(["git", "ls-files", "-u"], { cwd: repositoryRoot, env })
+      if (conflicts.exitCode !== 0) return { kind: "unverifiable", reason: "Git could not inspect the isolated merge index" }
+      hasConflicts = conflicts.stdout.trim().length > 0
+    }
+    if (hasConflicts) {
+      // Continue to the path proof: Git can report a deletion/delete conflict
+      // even when both trees already have the same absent entry.
+      const paths = await changedPaths(repositoryRoot, baseOid, sourceOid)
+      if (paths === null) return { kind: "unverifiable", reason: "Git could not resolve the source net-change paths" }
+      for (const filePath of paths) {
+        const sourceEntry = await treeEntry(repositoryRoot, sourceOid, filePath)
+        const headEntry = await treeEntry(repositoryRoot, headOid, filePath)
+        if (sourceEntry === null || headEntry === null) {
+          return { kind: "unverifiable", reason: "Git could not resolve a source net-change tree entry" }
+        }
+        if (sourceEntry !== headEntry) return { kind: "conflict" }
+      }
+      return { kind: "integrated" }
     }
     const resultTree = await runCommand(["git", "write-tree"], { cwd: repositoryRoot, env })
     const headTree = await gitOid(repositoryRoot, `${headOid}^{tree}`)
-    if (resultTree.exitCode !== 0 || !resultTree.stdout.trim() || !headTree) {
-      return { kind: "unverifiable", reason: "Git could not resolve the isolated merge result tree" }
+    if (!headTree) return { kind: "unverifiable", reason: "Git could not resolve the current HEAD tree" }
+    if (resultTree.exitCode === 0 && resultTree.stdout.trim() === headTree) return { kind: "integrated" }
+
+    // A path-wise comparison proves the writer's net content independently
+    // of unrelated commits added to HEAD and represents deletions as no entry.
+    const paths = await changedPaths(repositoryRoot, baseOid, sourceOid)
+    if (paths === null) return { kind: "unverifiable", reason: "Git could not resolve the source net-change paths" }
+    for (const filePath of paths) {
+      const sourceEntry = await treeEntry(repositoryRoot, sourceOid, filePath)
+      const headEntry = await treeEntry(repositoryRoot, headOid, filePath)
+      if (sourceEntry === null || headEntry === null) {
+        return { kind: "unverifiable", reason: "Git could not resolve a source net-change tree entry" }
+      }
+      if (sourceEntry !== headEntry) return { kind: "not-integrated" }
     }
-    return resultTree.stdout.trim() === headTree ? { kind: "integrated" } : { kind: "not-integrated" }
+    return { kind: "integrated" }
   } finally {
     await rm(temporary, { recursive: true, force: true })
   }
