@@ -14,6 +14,7 @@ import { resolveProfile } from "../profiles"
 import { getTeamRepositoryBinding, recoverTeamRepositoryBinding, repositoryBindingOps } from "../repository-binding"
 import { parseTaskResult } from "../result-parser"
 import { renderError } from "../error"
+import { preflightRepositoryLocalTools } from "../tool-resolution"
 
 /** Tracks consecutive spawn failures per team for circuit breaker. */
 export const spawnFailures = new Map<string, { count: number; lastError: string }>()
@@ -482,6 +483,7 @@ async function executeTeamSpawnLocked(
       worktreeBranch = identified.branch
       worktreeSourceBranch = identified.sourceBranch
       worktreeBaselineOid = identified.baselineOid
+      await preflightRepositoryLocalTools(worktreeDir)
       updateSpawnAttempt(deps, teamInfo.teamId, args.name, {
         worktree_dir: worktreeDir,
         worktree_branch: worktreeBranch,

@@ -58,6 +58,53 @@ describe("team_spawn", () => {
     expect(promptCalls).toHaveLength(1)
   })
 
+  test("rejects unresolved repository-local tools before workspace or session creation", async () => {
+    const fs = await import("node:fs/promises")
+    const path = await import("node:path")
+    const worktree = await fs.mkdtemp("/tmp/ensemble-spawn-tool-resolution-")
+    try {
+      await fs.mkdir(path.join(worktree, ".opencode", "tools"), { recursive: true })
+      await fs.writeFile(path.join(worktree, "package.json"), JSON.stringify({
+        packageManager: "pnpm@10.0.0",
+        dependencies: { "@acme/shared-tool": "workspace:*" },
+      }))
+      await fs.writeFile(path.join(worktree, ".opencode", "tools", "inspect.ts"), 'import { helper } from "@acme/shared-tool"\nexport default helper\n')
+      deps.client.worktree.create = async options => {
+        deps.client.calls.push({ method: "worktree.create", args: [options] })
+        return { data: { name: options.worktreeCreateInput?.name ?? "default", branch: "ensemble-tool-resolution", directory: worktree } }
+      }
+      const repositoryOps = deps.repositoryBindingOps
+      if (!repositoryOps) throw new Error("test setup is missing repository binding operations")
+      deps.repositoryBindingOps = {
+        canonicalControllerDirectory: repositoryOps.canonicalControllerDirectory,
+        verifyRepositoryRoot: repositoryOps.verifyRepositoryRoot,
+        resolveGitRefOid: repositoryOps.resolveGitRefOid,
+        async resolveWorktreeIdentity() {
+          return { gitIdentity: "/tmp/test-project/.git", headOid: "baseline-oid" }
+        },
+      }
+      insertTask(deps, "t1", "local-tool-task")
+
+      await expect(executeTeamSpawn(deps, {
+        name: "local-tool-writer",
+        agent: "build",
+        prompt: "Use the local tool",
+        claim_task: "local-tool-task",
+      }, "lead-sess", async () => true)).rejects.toThrow("pnpm install --offline")
+
+      expect(deps.client.calls.map(call => call.method)).not.toContain("workspace.create")
+      expect(deps.client.calls.map(call => call.method)).not.toContain("session.create")
+      expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'local-tool-task'").get()).toEqual({
+        status: "pending",
+        assignee: null,
+      })
+      expect(deps.db.query("SELECT name FROM team_member WHERE name = 'local-tool-writer'").get()).toBeNull()
+      expect(deps.client.calls.map(call => call.method)).toContain("worktree.remove")
+    } finally {
+      await fs.rm(worktree, { recursive: true, force: true })
+    }
+  })
+
   test("rejects if caller is not the lead", async () => {
     insertMember(deps.db, "t1", "bob", "bob-sess")
     deps.registry.register("t1", "bob", "bob-sess")
