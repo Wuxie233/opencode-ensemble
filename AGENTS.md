@@ -610,6 +610,21 @@ Each teammate now gets their own git worktree by default.
 - Race condition tests via Promise.all()
 - No mocks for business logic
 
+## Gotchas & Decisions
+
+- `team_task.required_capabilities` is a nullable JSON column introduced by migration 23. Null or empty requirements preserve legacy task behavior; `team_spawn(claim_task)` validates concrete capabilities before task claim or any SDK resource creation.
+- Writer profiles expose concrete execution capabilities separately from their semantic mission. Keep `file_read`, `file_write`, `shell`, `browser`, and `device` aligned with the actual permission/runtime boundary when adding profiles or task contracts.
+- Writer worktree setup preflights repository-local `.opencode/tool` and `.opencode/tools` package metadata after Git identity verification. It reports missing workspace/file/link dependencies and fails closed; it must not install packages, share canonical `node_modules`, change CWD, or relax session permissions.
+- `createDb()` clears the singleton before initialization, closes partial handles on failure, and assigns the singleton only after migrations succeed. Startup errors are wrapped in `DatabaseInitializationError`; user notifications remain privacy-safe and never delete or rebuild the database.
+- `verifySourceAlreadyIntegrated()` uses pinned source OIDs, repository identity, baseline ancestry, and an isolated `GIT_INDEX_FILE`. Path-level net-content proof handles later unrelated HEAD commits and pure deletions; explicit unmerged index entries are classified as conflicts, while other proof failures remain unverifiable and fail closed.
+- `team_merge` proof changes require real Git regression tests in `test/missing-branch-recovery.test.ts`; do not infer integration from messages, branch names, or patch IDs.
+
+## Commands
+
+- Focused capability/spawn checks: `bun test test/db.test.ts test/tools/team-tasks.test.ts test/tools/team-spawn.test.ts test/profiles.test.ts`
+- Focused merge/tool-resolution checks: `bun test test/missing-branch-recovery.test.ts test/merge-flow.test.ts test/tool-resolution.test.ts`
+- Full verification: `bun run lint && bun run typecheck && bun test && bun run build && git diff --check`
+
 ## Open Question Handling
 
 For open questions (Section 9 of .opencode/plans/architecture-plan.md):
