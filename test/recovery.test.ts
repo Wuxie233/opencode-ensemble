@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { applyMigrations } from "../src/schema"
-import { recoverStaleMembers, recoverUndeliveredMessages, rehydrateRegistry } from "../src/recovery"
+import { recoverLiveMembers, recoverStaleMembers, recoverUndeliveredMessages, rehydrateRegistry } from "../src/recovery"
 import type { PluginClient } from "../src/types"
 import { MemberRegistry } from "../src/state"
 import { sendMessage, broadcastMessage } from "../src/messaging"
@@ -562,6 +562,148 @@ describe("recoverStaleMembers", () => {
     expect(alice.status).toBe("error")
     expect(bob.status).toBe("error")
     expect(cara.status).toBe("busy")
+  })
+})
+
+describe("recoverLiveMembers", () => {
+  let db: Database
+  let client: ReturnType<typeof mockClient>
+
+  beforeEach(() => {
+    db = setupDb()
+    client = mockClient()
+    insertTeam(db, "t1", "my-team", "lead-sess")
+    insertMember(db, "t1", "alice", "sess-alice", "busy", "running")
+    db.run(
+      "INSERT INTO team_task (id, team_id, content, status, priority, assignee, time_created, time_updated) VALUES ('task-a', 't1', 'continue work', 'in_progress', 'high', 'alice', ?, ?)",
+      [Date.now(), Date.now()],
+    )
+    client.session.status = async () => ({ data: {} })
+    client.session.get = async options => {
+      client.calls.push({ method: "session.get", args: [options] })
+      return { data: { id: "sess-alice" } }
+    }
+  })
+
+  test("prompts one eligible live member and keeps ownership active", async () => {
+    const result = await recoverLiveMembers(db, client, "boot-1")
+
+    expect(result).toEqual({ continued: 1 })
+    expect(client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(1)
+    expect(JSON.stringify(client.calls.find(call => call.method === "session.promptAsync")?.args)).toContain("without replaying")
+    expect(db.query("SELECT startup_recovery_token, startup_recovery_state, status, execution_status FROM team_member WHERE name = 'alice'").get())
+      .toEqual({ startup_recovery_token: "boot-1", startup_recovery_state: "prompted", status: "busy", execution_status: "running" })
+    expect(db.query("SELECT status, assignee FROM team_task WHERE id = 'task-a'").get())
+      .toEqual({ status: "in_progress", assignee: "alice" })
+  })
+
+  test("claims a member only once for a recovery token across concurrent calls", async () => {
+    const [first, second] = await Promise.all([
+      recoverLiveMembers(db, client, "boot-1"),
+      recoverLiveMembers(db, client, "boot-1"),
+    ])
+
+    expect([first.continued, second.continued].sort()).toEqual([0, 1])
+    expect(client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(1)
+  })
+
+  test.each(["busy", "retry"])("does not interrupt an original session that is already %s", async status => {
+    client.session.status = async () => ({ data: { "sess-alice": { type: status } } })
+
+    expect(await recoverLiveMembers(db, client, "boot-1")).toEqual({ continued: 0 })
+    expect(client.calls.filter(call => call.method === "session.get")).toHaveLength(0)
+    expect(client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(0)
+    expect(db.query("SELECT status, assignee FROM team_task WHERE id = 'task-a'").get())
+      .toEqual({ status: "in_progress", assignee: "alice" })
+  })
+
+  test("does not claim an idle session that no longer exists", async () => {
+    client.session.get = async options => {
+      client.calls.push({ method: "session.get", args: [options] })
+      throw new Error("session not found")
+    }
+
+    expect(await recoverLiveMembers(db, client, "boot-1")).toEqual({ continued: 0 })
+    expect(client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(0)
+    expect(db.query("SELECT startup_recovery_token, startup_recovery_state FROM team_member WHERE name = 'alice'").get())
+      .toEqual({ startup_recovery_token: null, startup_recovery_state: "none" })
+  })
+
+  test("rechecks unfinished ownership atomically after session verification", async () => {
+    client.session.get = async options => {
+      client.calls.push({ method: "session.get", args: [options] })
+      db.run("UPDATE team_task SET status = 'completed' WHERE id = 'task-a'")
+      return { data: { id: "sess-alice" } }
+    }
+
+    expect(await recoverLiveMembers(db, client, "boot-1")).toEqual({ continued: 0 })
+    expect(client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(0)
+    expect(db.query("SELECT startup_recovery_token, startup_recovery_state FROM team_member WHERE name = 'alice'").get())
+      .toEqual({ startup_recovery_token: null, startup_recovery_state: "none" })
+  })
+
+  test("same-boot stale recovery keeps a continued idle session and its task active", async () => {
+    expect(await recoverLiveMembers(db, client, "boot-1")).toEqual({ continued: 1 })
+
+    expect(await recoverStaleMembers(db, client, undefined, undefined, "boot-1")).toEqual({ interrupted: 0 })
+    expect(client.calls.filter(call => call.method === "session.abort")).toHaveLength(0)
+    expect(db.query("SELECT status, assignee FROM team_task WHERE id = 'task-a'").get())
+      .toEqual({ status: "in_progress", assignee: "alice" })
+  })
+
+  test.each([
+    ["completed", "completed", 0, 0],
+    ["shutdown", "idle", 0, 0],
+    ["error", "failed", 0, 0],
+    ["retry exhausted", "running", 1, 0],
+    ["reported", "running", 0, 1],
+    ["cancel requested", "cancel_requested", 0, 0],
+  ])("does not revive %s members", async (_label, executionStatus, retryTripped, reported) => {
+    db.run(
+      "UPDATE team_member SET status = ?, execution_status = ?, retry_tripped = ?, reported_to_lead = ? WHERE name = 'alice'",
+      [_label === "completed" ? "ready" : _label === "shutdown" ? "shutdown" : _label === "error" ? "error" : "busy", executionStatus, retryTripped, reported],
+    )
+
+    const result = await recoverLiveMembers(db, client, "boot-1")
+
+    expect(result).toEqual({ continued: 0 })
+    expect(client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(0)
+  })
+
+  test("does not revive a member without unfinished assigned work", async () => {
+    db.run("UPDATE team_task SET status = 'completed' WHERE id = 'task-a'")
+
+    expect(await recoverLiveMembers(db, client, "boot-1")).toEqual({ continued: 0 })
+    expect(client.calls.filter(call => call.method === "session.promptAsync")).toHaveLength(0)
+  })
+
+  test("falls back to safe stale recovery after prompt failure", async () => {
+    let resolveAbort: (() => void) | undefined
+    client.session.promptAsync = async options => {
+      client.calls.push({ method: "session.promptAsync", args: [options] })
+      throw new Error("delivery failed")
+    }
+    client.session.abort = async options => {
+      client.calls.push({ method: "session.abort", args: [options] })
+      expect(db.query("SELECT status, execution_status FROM team_member WHERE name = 'alice'").get())
+        .toEqual({ status: "busy", execution_status: "cancelling" })
+      expect(db.query("SELECT status, assignee FROM team_task WHERE id = 'task-a'").get())
+        .toEqual({ status: "in_progress", assignee: "alice" })
+      return new Promise<void>(resolve => { resolveAbort = resolve })
+    }
+
+    expect(await recoverLiveMembers(db, client, "boot-1")).toEqual({ continued: 1 })
+    await Bun.sleep(10)
+    expect(client.calls.filter(call => call.method === "session.abort")).toHaveLength(1)
+    expect(db.query("SELECT status, assignee FROM team_task WHERE id = 'task-a'").get())
+      .toEqual({ status: "in_progress", assignee: "alice" })
+
+    resolveAbort?.()
+    for (let index = 0; index < 20; index++) await Bun.sleep(1)
+    expect(db.query("SELECT status, execution_status FROM team_member WHERE name = 'alice'").get())
+      .toEqual({ status: "error", execution_status: "idle" })
+    expect(db.query("SELECT status, assignee FROM team_task WHERE id = 'task-a'").get())
+      .toEqual({ status: "pending", assignee: null })
   })
 })
 

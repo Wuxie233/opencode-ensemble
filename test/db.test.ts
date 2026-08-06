@@ -57,6 +57,7 @@ describe("schema migrations", () => {
 
     expect(memberColumns.map(column => column.name)).toEqual(expect.arrayContaining([
       "retry_attempts", "retry_count", "retry_tripped", "merge_state", "merged_source_branch",
+      "startup_recovery_token", "startup_recovery_state",
     ]))
     expect(teamColumns.map(column => column.name)).toEqual(expect.arrayContaining([
       "current_phase", "lead_brief", "lead_brief_updated_at",

@@ -29,7 +29,13 @@ import { getMemberRepositoryBinding } from "./repository-binding"
  * Only processes members in active teams.
  * Returns the count of interrupted members.
  */
-export async function recoverStaleMembers(db: Database, client?: PluginClient, cwd?: string): Promise<{ interrupted: number }> {
+export async function recoverStaleMembers(
+  db: Database,
+  client?: PluginClient,
+  cwd?: string,
+  forcedSessionIds = new Set<string>(),
+  recoveryToken?: string,
+): Promise<{ interrupted: number }> {
   // Find stale members with branch info so we can preserve before aborting
   const stale = db.query(
     `SELECT tm.session_id, tm.worktree_branch, tm.worktree_dir, tm.name, tm.team_id,
@@ -84,7 +90,15 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
         : member.execution_status === "cancelling"
           ? "watchdog"
           : "stale"
-    if (liveSessions[member.session_id] && kind === "stale") continue
+    if (kind === "stale" && !forcedSessionIds.has(member.session_id)) {
+      if (liveSessions[member.session_id]) continue
+      const continuedThisBoot = recoveryToken && db.query(
+        `SELECT 1 AS found FROM team_member
+          WHERE team_id = ? AND name = ?
+            AND startup_recovery_token = ? AND startup_recovery_state = 'prompted'`,
+      ).get(member.team_id, member.name, recoveryToken)
+      if (continuedThisBoot) continue
+    }
     appendTeamEventBestEffort(db, {
       teamId: member.team_id,
       kind: "recovery.stage",
@@ -224,6 +238,109 @@ export async function recoverStaleMembers(db: Database, client?: PluginClient, c
   }
 
   return { interrupted }
+}
+
+/**
+ * Continue live teammates from their existing sessions after a plugin restart.
+ * Claims are durable and scoped to one recovery token so overlapping instances
+ * cannot deliver duplicate continuation prompts.
+ */
+export async function recoverLiveMembers(
+  db: Database,
+  client: PluginClient,
+  recoveryToken: string,
+  cwd?: string,
+): Promise<{ continued: number }> {
+  let liveSessions: Record<string, { type: string }>
+  try {
+    liveSessions = (await client.session.status()).data ?? {}
+  } catch {
+    log("recovery:continuation:status:failed; skipping live-member continuation")
+    return { continued: 0 }
+  }
+
+  const candidates = db.query(
+    `SELECT tm.team_id, tm.name, tm.session_id, tm.status, tm.execution_status,
+            tm.retry_tripped, tm.reported_to_lead
+       FROM team_member tm
+       JOIN team t ON tm.team_id = t.id
+      WHERE t.status = 'active'
+        AND tm.status = 'busy'
+        AND tm.execution_status IN ('idle', 'starting', 'running')
+        AND tm.retry_tripped = 0
+        AND tm.reported_to_lead = 0
+        AND tm.abort_recovery_state NOT IN ('checking', 'prompted')
+        AND EXISTS (
+          SELECT 1 FROM team_task task
+           WHERE task.team_id = tm.team_id
+             AND task.assignee = tm.name
+             AND task.status = 'in_progress'
+        )
+        AND (? IS NULL OR t.controller_directory = ?
+          OR (t.controller_directory IS NULL AND (t.project_id = ? OR t.project_id = 'default')))`
+  ).all(cwd ?? null, cwd ?? null, cwd ?? null) as Array<{
+    team_id: string
+    name: string
+    session_id: string
+    status: string
+    execution_status: string
+  }>
+
+  let continued = 0
+  for (const member of candidates) {
+    if (liveSessions[member.session_id]) continue
+    try {
+      const session = await client.session.get({ sessionID: member.session_id })
+      if (!session.data) continue
+    } catch {
+      continue
+    }
+    const claimed = db.run(
+      `UPDATE team_member
+          SET startup_recovery_token = ?, startup_recovery_state = 'prompted', time_updated = ?
+        WHERE team_id = ? AND name = ?
+          AND status = 'busy'
+          AND execution_status IN ('idle', 'starting', 'running')
+          AND retry_tripped = 0
+          AND reported_to_lead = 0
+          AND abort_recovery_state NOT IN ('checking', 'prompted')
+          AND startup_recovery_token IS NOT ?
+          AND EXISTS (
+            SELECT 1 FROM team_task task
+             WHERE task.team_id = team_member.team_id
+               AND task.assignee = team_member.name
+               AND task.status = 'in_progress'
+          )`,
+      [recoveryToken, Date.now(), member.team_id, member.name, recoveryToken],
+    )
+    if (claimed.changes !== 1) continue
+
+    void Promise.resolve().then(() => client.session.promptAsync({
+      sessionID: member.session_id,
+      parts: [{
+        type: "text",
+        text: "[System: OpenCode restarted. Inspect your current worktree, task board, and messages, then continue the assigned work from actual state without replaying completed side effects. Report progress or completion to the lead.]",
+      }],
+    })).then(() => {
+      log(`recovery:continuation:delivered member=${member.name}`)
+    }).catch((error) => {
+      const failed = db.run(
+        `UPDATE team_member
+            SET startup_recovery_state = 'failed', time_updated = ?
+          WHERE team_id = ? AND name = ?
+            AND startup_recovery_token = ? AND startup_recovery_state = 'prompted'`,
+        [Date.now(), member.team_id, member.name, recoveryToken],
+      )
+      if (failed.changes !== 1) return
+      log(`recovery:continuation:failed member=${member.name} err=${error instanceof Error ? error.message : String(error)}`)
+      void recoverStaleMembers(db, client, cwd, new Set([member.session_id])).catch((fallbackError) => {
+        log(`recovery:continuation:fallback:failed member=${member.name} err=${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`)
+      })
+    })
+    continued++
+  }
+
+  return { continued }
 }
 
 type RecoveryKind = "retry" | "shutdown" | "watchdog" | "stale"

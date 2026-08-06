@@ -338,7 +338,7 @@ Teammate messages arrive in the lead's session as `[Team message from alice]: ..
 - **Bounded Lead Brief**: structured milestone summaries, active work, blockers, and phases remain available without copying raw evidence into the Lead context
 - **Shell environment**: teammate shells get `ENSEMBLE_TEAM`, `ENSEMBLE_MEMBER`, `ENSEMBLE_ROLE`, and `ENSEMBLE_BRANCH` variables
 - **Sub-agent isolation**: teammates' sub-agents can't use team tools (parent chain tracking, max depth 10)
-- **Crash recovery**: stale busy members marked as errored on restart, orphaned sessions aborted, orphaned worktrees cleaned up, undelivered messages redelivered
+- **Crash recovery**: eligible unfinished teammates continue in their original Sessions after restart; missing or failed Sessions fall back to preserved replacement recovery, while orphaned worktrees are cleaned up and undelivered messages are redelivered
 - **Spawn rollback**: if the initial prompt fails, the member, session, and worktree are all cleaned up
 - **Timeout watchdog**: teammates stuck busy beyond the TTL are automatically timed out and aborted
 - **Stall detection**: detects teammates making no progress (low output tokens or no communication) and escalates to the lead

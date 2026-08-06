@@ -123,6 +123,8 @@ The SQLite connection, dashboard listener, and `ActivityBuffer` are process-shar
 
 Main-directory recovery is deduplicated per resolved project and starts after registry rehydration. Keep recovery asynchronous so SDK calls back into OpenCode cannot block directory bootstrap; worktree instances continue to skip recovery entirely.
 
+Startup recovery prefers continuing an eligible unfinished teammate in its original Session. OpenCode omits idle Sessions from `session.status()`, so verify an absent status with `session.get()` before sending one per-boot continuation prompt. Busy or retrying Sessions continue without an extra prompt. A durable recovery token prevents duplicate prompts across overlapping instances; the same token also keeps stale-member recovery from aborting a Session just prompted to continue. Missing Sessions and failed continuation delivery fall back to the existing preserve-before-abort path and `resume_from` guidance.
+
 WAL mode. Migrations via PRAGMA user_version.
 
 ### Dashboard Triage
@@ -618,6 +620,7 @@ Each teammate now gets their own git worktree by default.
 - `createDb()` clears the singleton before initialization, closes partial handles on failure, and assigns the singleton only after migrations succeed. Startup errors are wrapped in `DatabaseInitializationError`; user notifications remain privacy-safe and never delete or rebuild the database.
 - `verifySourceAlreadyIntegrated()` uses pinned source OIDs, repository identity, baseline ancestry, and an isolated `GIT_INDEX_FILE`. Path-level net-content proof handles later unrelated HEAD commits and pure deletions; explicit unmerged index entries are classified as conflicts, while other proof failures remain unverifiable and fail closed.
 - `team_merge` proof changes require real Git regression tests in `test/missing-branch-recovery.test.ts`; do not infer integration from messages, branch names, or patch IDs.
+- `team_member.startup_recovery_token/state` is a per-boot continuation claim introduced by migration 24. Only active busy members with unfinished assigned work, no completion report, no retry trip, and no SafeAbort claim are eligible. Do not include cancelling or terminal execution states.
 
 ## Commands
 

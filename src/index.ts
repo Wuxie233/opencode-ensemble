@@ -3,9 +3,10 @@ import { tool } from "@opencode-ai/plugin"
 import { OpencodeClient } from "@opencode-ai/sdk/v2"
 import path from "node:path"
 import { mkdirSync } from "node:fs"
+import { randomUUID } from "node:crypto"
 import { DatabaseInitializationError, getDbPath } from "./db"
 import { wrapThrowingClient } from "./client"
-import { recoverStaleMembers, recoverUndeliveredMessages, recoverOrphanedWorktrees, recoverOrphanedBranches, rehydrateRegistry } from "./recovery"
+import { recoverLiveMembers, recoverStaleMembers, recoverUndeliveredMessages, recoverOrphanedWorktrees, recoverOrphanedBranches, rehydrateRegistry } from "./recovery"
 import { MemberRegistry, DescendantTracker, PendingPurgeApprovals } from "./state"
 import { isWorktreeInstance } from "./util"
 import { handleSessionStatusEvent, handleSessionCreatedEvent, checkToolIsolation, shouldNudgeIdleMember, handleSessionErrorEvent, RetryTracker, shouldReleaseShutdownTracking } from "./hooks"
@@ -131,7 +132,10 @@ const plugin: Plugin = async (input) => {
     void runtime
       .recover(path.resolve(input.worktree || input.directory), async (sharedDb) => {
         log("init:recovery:start (main instance)")
-        const recovery = await recoverStaleMembers(sharedDb, client, controllerDirectory)
+        const recoveryToken = randomUUID()
+        const continuation = await recoverLiveMembers(sharedDb, client, recoveryToken, controllerDirectory)
+        if (continuation.continued > 0) log(`init:recovery:continued=${continuation.continued}`)
+        const recovery = await recoverStaleMembers(sharedDb, client, controllerDirectory, undefined, recoveryToken)
         if (recovery.interrupted > 0) log(`init:recovery:interrupted=${recovery.interrupted}`)
         const spawnRecovery = await recoverSpawnAttempts(sharedDb, client, controllerDirectory)
         if (spawnRecovery.recovered > 0 || spawnRecovery.blocked > 0) {

@@ -418,6 +418,10 @@ export const MIGRATIONS: string[] = [
   // Migration 23: Persist concrete execution capabilities required by a task.
   // NULL preserves compatibility for tasks created before capability contracts.
   `ALTER TABLE team_task ADD COLUMN required_capabilities TEXT;`,
+  // Migration 24: Durable per-boot startup continuation claim for live teammates.
+  `ALTER TABLE team_member ADD COLUMN startup_recovery_token TEXT;
+   ALTER TABLE team_member ADD COLUMN startup_recovery_state TEXT NOT NULL DEFAULT 'none'
+     CHECK(startup_recovery_state IN ('none', 'prompted', 'failed'));`,
 ]
 
 /**
