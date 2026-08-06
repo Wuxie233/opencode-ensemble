@@ -10,7 +10,7 @@ import type { PreserveBranchFn } from "./merge-helper"
 import { recomputeCurrentPhase } from "../task-phase"
 import { appendTeamEvent } from "../team-event"
 import { immediateTransaction } from "../db"
-import { resolveProfile } from "../profiles"
+import { EXECUTION_CAPABILITIES, resolveProfile, type ExecutionCapability } from "../profiles"
 import { getTeamRepositoryBinding, recoverTeamRepositoryBinding, repositoryBindingOps } from "../repository-binding"
 import { parseTaskResult } from "../result-parser"
 import { renderError } from "../error"
@@ -145,6 +145,40 @@ function claimSpawnTask(deps: ToolDeps, teamId: string, taskId: string, assignee
       contractArtifactSha256: task.contract_artifact_sha256,
     }
   })()
+}
+
+function readRequiredCapabilities(deps: ToolDeps, teamId: string, taskId: string): ExecutionCapability[] {
+  const task = deps.db.query(
+    "SELECT required_capabilities FROM team_task WHERE id = ? AND team_id = ?",
+  ).get(taskId, teamId) as { required_capabilities: string | null } | null
+  if (!task) throw new Error(`Task "${taskId}" not found`)
+  if (!task.required_capabilities) return []
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(task.required_capabilities)
+  } catch {
+    throw new Error(`Task "${taskId}" has an invalid execution capability contract`)
+  }
+  if (!Array.isArray(parsed) || parsed.some(value => typeof value !== "string")) {
+    throw new Error(`Task "${taskId}" has an invalid execution capability contract`)
+  }
+  const capabilities = parsed as string[]
+  const unknown = capabilities.filter(value => !(EXECUTION_CAPABILITIES as readonly string[]).includes(value))
+  if (unknown.length > 0) throw new Error(`Task "${taskId}" requires unknown execution capability "${unknown[0]}"`)
+  return [...new Set(capabilities)] as ExecutionCapability[]
+}
+
+function validateTaskCapabilities(
+  deps: ToolDeps,
+  teamId: string,
+  taskId: string,
+  available: readonly string[],
+): void {
+  const required = readRequiredCapabilities(deps, teamId, taskId)
+  const missing = required.filter(capability => !available.includes(capability))
+  if (missing.length > 0) {
+    throw new Error(`Teammate profile lacks required task capabilities: ${missing.join(", ")}`)
+  }
 }
 
 function rollbackSpawnTask(
@@ -402,6 +436,7 @@ async function executeTeamSpawnLocked(
   if (!isReadOnly && args.worktree === false) {
     throw new Error(`Ensemble profile "${profile.name}" is a writer and requires an isolated worktree`)
   }
+  if (args.claim_task) validateTaskCapabilities(deps, teamInfo.teamId, args.claim_task, profile.capabilities)
   const repository = await resolveSpawnRepository(deps, teamInfo, args.repository_root, isReadOnly)
   if (!isReadOnly && isWorktreeDirectory(repository.repositoryRoot)) {
     throw new Error(`Ensemble profile "${profile.name}" cannot create an isolated writer worktree from ${repository.repositoryRoot}`)

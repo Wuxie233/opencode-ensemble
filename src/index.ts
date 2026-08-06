@@ -553,6 +553,7 @@ const plugin: Plugin = async (input) => {
             depends_on: tool.schema.array(tool.schema.string()).optional().describe("Existing same-Team task IDs or batch-local keys this task depends on"),
             phase: tool.schema.string().optional().describe("Optional workflow phase used to derive the Team's current phase from its active ready frontier"),
             contract_artifact_id: tool.schema.string().optional().describe("Exact same-Team contract artifact ID to bind immutably to this task"),
+            required_capabilities: tool.schema.array(tool.schema.enum(["file_read", "file_write", "shell", "browser", "device"])).optional().describe("Concrete execution capabilities required by this task"),
           })).describe("Tasks to add"),
         },
         async execute(args, ctx) {

@@ -415,6 +415,9 @@ export const MIGRATIONS: string[] = [
   // Migration 22: Track which external spawn operation may still finish late.
   `ALTER TABLE team_spawn_attempt ADD COLUMN stage TEXT NOT NULL DEFAULT 'worktree_creating'
      CHECK(stage IN ('worktree_creating', 'workspace_creating', 'session_creating', 'registered'));`,
+  // Migration 23: Persist concrete execution capabilities required by a task.
+  // NULL preserves compatibility for tasks created before capability contracts.
+  `ALTER TABLE team_task ADD COLUMN required_capabilities TEXT;`,
 ]
 
 /**

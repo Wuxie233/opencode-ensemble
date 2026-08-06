@@ -21,6 +21,17 @@ export async function executeTeamTasksList(
     const contract = t.contract_artifact_id
       ? ` [contract: ${t.contract_artifact_id} sha256:${t.contract_artifact_sha256}]`
       : ""
-    return `[${status}] ${t.content} (${t.id})${t.assignee ? ` → ${t.assignee}` : ""}${t.priority !== "medium" ? ` [${t.priority}]` : ""}${t.phase ? ` [phase: ${t.phase}]` : ""}${contract}`
+    let capabilities = ""
+    if (typeof t.required_capabilities === "string" && t.required_capabilities) {
+      try {
+        const parsed = JSON.parse(t.required_capabilities) as unknown
+        if (Array.isArray(parsed) && parsed.every(value => typeof value === "string")) {
+          capabilities = ` [requires: ${(parsed as string[]).join(", ")}]`
+        }
+      } catch {
+        capabilities = " [requires: invalid-contract]"
+      }
+    }
+    return `[${status}] ${t.content} (${t.id})${t.assignee ? ` → ${t.assignee}` : ""}${t.priority !== "medium" ? ` [${t.priority}]` : ""}${t.phase ? ` [phase: ${t.phase}]` : ""}${capabilities}${contract}`
   }).join("\n")
 }

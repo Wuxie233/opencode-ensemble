@@ -371,6 +371,63 @@ describe("team_spawn", () => {
     expect(task).toEqual({ status: "in_progress", assignee: "alice" })
   })
 
+  test("accepts a task when the selected profile provides every required capability", async () => {
+    deps.db.run(
+      `INSERT INTO team_task
+         (id, team_id, content, status, priority, required_capabilities, time_created, time_updated)
+       VALUES ('task-browser', 't1', 'Browser task', 'pending', 'high', ?, ?, ?)`,
+      [JSON.stringify(["file_read", "browser"]), Date.now(), Date.now()],
+    )
+
+    await executeTeamSpawn(deps, {
+      name: "frontend",
+      profile: "frontend",
+      prompt: "Run browser checks",
+      claim_task: "task-browser",
+    }, "lead-sess", async () => true)
+
+    expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-browser'").get())
+      .toEqual({ status: "in_progress", assignee: "frontend" })
+  })
+
+  test("rejects incompatible task capability before claim or resource creation", async () => {
+    deps.db.run(
+      `INSERT INTO team_task
+         (id, team_id, content, status, priority, required_capabilities, time_created, time_updated)
+       VALUES ('task-shell', 't1', 'Shell task', 'pending', 'high', ?, ?, ?)`,
+      [JSON.stringify(["shell"]), Date.now(), Date.now()],
+    )
+
+    await expect(executeTeamSpawn(deps, {
+      name: "alice",
+      profile: "scout",
+      prompt: "Run shell",
+      claim_task: "task-shell",
+      worktree: false,
+    }, "lead-sess")).rejects.toThrow("lacks required task capabilities: shell")
+
+    expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-shell'").get())
+      .toEqual({ status: "pending", assignee: null })
+    expect(deps.db.query("SELECT name FROM team_spawn_attempt").all()).toHaveLength(0)
+    expect(deps.client.calls).toHaveLength(0)
+  })
+
+  test("concurrent compatible claims leave only one owner", async () => {
+    deps.db.run(
+      `INSERT INTO team_task
+         (id, team_id, content, status, priority, required_capabilities, time_created, time_updated)
+       VALUES ('task-race', 't1', 'Race task', 'pending', 'high', ?, ?, ?)`,
+      [JSON.stringify(["file_read"]), Date.now(), Date.now()],
+    )
+
+    const results = await Promise.allSettled([
+      executeTeamSpawn(deps, { name: "alice", profile: "scout", prompt: "Read", claim_task: "task-race", worktree: false }, "lead-sess"),
+      executeTeamSpawn(deps, { name: "bob", profile: "scout", prompt: "Read", claim_task: "task-race", worktree: false }, "lead-sess"),
+    ])
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1)
+    expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-race'").get()).toMatchObject({ status: "in_progress" })
+  })
+
   test("recomputes current phase when claim_task enters the active frontier", async () => {
     insertTask(deps, "t1", "task-first")
     insertTask(deps, "t1", "task-build")

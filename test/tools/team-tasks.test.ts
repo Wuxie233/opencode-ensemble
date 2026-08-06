@@ -67,6 +67,32 @@ describe("team_tasks_list", () => {
     expect(result).not.toContain("private contract")
   })
 
+  test("persists and lists concrete execution capability requirements", async () => {
+    await executeTeamTasksAdd(deps, { tasks: [{
+      content: "Run browser checks",
+      priority: "high",
+      required_capabilities: ["file_read", "browser"],
+    }] }, "sess-alice")
+
+    const row = deps.db.query("SELECT required_capabilities FROM team_task WHERE content = 'Run browser checks'").get() as { required_capabilities: string }
+    expect(JSON.parse(row.required_capabilities)).toEqual(["file_read", "browser"])
+    expect(await executeTeamTasksList(deps, "sess-alice")).toContain("[requires: file_read, browser]")
+  })
+
+  test("rejects unknown and duplicate capability requirements atomically", async () => {
+    await expect(executeTeamTasksAdd(deps, { tasks: [{
+      content: "Unknown",
+      priority: "high",
+      required_capabilities: ["network"],
+    }] }, "sess-alice")).rejects.toThrow("Unknown task execution capability")
+    await expect(executeTeamTasksAdd(deps, { tasks: [{
+      content: "Duplicate",
+      priority: "high",
+      required_capabilities: ["shell", "shell"],
+    }] }, "sess-alice")).rejects.toThrow("must not contain duplicates")
+    expect(deps.db.query("SELECT id FROM team_task WHERE team_id = 't1'").all()).toHaveLength(0)
+  })
+
   test("rejects if not in a team", async () => {
     await expect(executeTeamTasksList(deps, "random-sess"))
       .rejects.toThrow("not in a team")

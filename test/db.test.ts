@@ -62,6 +62,7 @@ describe("schema migrations", () => {
       "current_phase", "lead_brief", "lead_brief_updated_at",
     ]))
     expect(taskColumns.map(column => column.name)).toContain("phase")
+    expect(taskColumns.map(column => column.name)).toContain("required_capabilities")
     expect(projectColumns.map(column => column.name)).toContain("slug")
   })
 

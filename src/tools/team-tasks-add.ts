@@ -4,6 +4,7 @@ import { generateId } from "../util"
 import { immediateTransaction } from "../db"
 import { recomputeCurrentPhase } from "../task-phase"
 import { appendTeamEvent } from "../team-event"
+import { EXECUTION_CAPABILITIES, type ExecutionCapability } from "../profiles"
 
 interface TaskInput {
   key?: string
@@ -12,6 +13,7 @@ interface TaskInput {
   depends_on?: string[]
   phase?: string
   contract_artifact_id?: string
+  required_capabilities?: string[]
 }
 
 interface ContractSnapshot {
@@ -69,6 +71,7 @@ export async function executeTeamTasksAdd(
       }
       return artifact
     })
+    const capabilityRequirements = args.tasks.map(task => normalizeRequiredCapabilities(task.required_capabilities))
 
     args.tasks.forEach((task, index) => {
       const dependencies = resolvedDependencies[index]
@@ -83,14 +86,17 @@ export async function executeTeamTasksAdd(
       })
       const status = dependencies.length > 0 && !resolved ? "blocked" : "pending"
       const contract = contractSnapshots[index]
+      const requiredCapabilities = capabilityRequirements[index]
       deps.db.run(
         `INSERT INTO team_task
            (id, team_id, content, status, priority, depends_on, phase,
-            contract_artifact_id, contract_artifact_sha256, time_created, time_updated)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            contract_artifact_id, contract_artifact_sha256, required_capabilities,
+            time_created, time_updated)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [taskId, teamInfo.teamId, task.content, status,
           task.priority, dependencies.length > 0 ? JSON.stringify(dependencies) : null, task.phase ?? null,
-          contract?.id ?? null, contract?.sha256 ?? null, now, now],
+          contract?.id ?? null, contract?.sha256 ?? null,
+          requiredCapabilities ? JSON.stringify(requiredCapabilities) : null, now, now],
       )
       appendTeamEvent(deps.db, {
         teamId: teamInfo.teamId,
@@ -104,6 +110,17 @@ export async function executeTeamTasksAdd(
   const mapping = [...keyedIds].map(([key, id]) => `${key}=${id}`)
   const detail = mapping.length > 0 ? mapping.join(", ") : ids.join(", ")
   return `Added ${ids.length} task${ids.length !== 1 ? "s" : ""}: ${detail}`
+}
+
+function normalizeRequiredCapabilities(values: string[] | undefined): ExecutionCapability[] | null {
+  if (values === undefined || values.length === 0) return null
+  const unknown = values.filter(value => !(EXECUTION_CAPABILITIES as readonly string[]).includes(value))
+  if (unknown.length > 0) {
+    throw new Error(`Unknown task execution capability "${unknown[0]}". Use one of: ${EXECUTION_CAPABILITIES.join(", ")}.`)
+  }
+  const unique = [...new Set(values)]
+  if (unique.length !== values.length) throw new Error("Task execution capabilities must not contain duplicates")
+  return unique as ExecutionCapability[]
 }
 
 function assertAcyclic(ids: string[], dependencies: string[][]): void {
