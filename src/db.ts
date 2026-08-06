@@ -52,6 +52,21 @@ const requireRuntimeModule = createRequire(import.meta.url)
 
 let instance: Database | undefined
 
+/**
+ * A privacy-safe description of a database startup failure.
+ * The original runtime error is retained as `cause` for internal diagnostics.
+ */
+export class DatabaseInitializationError extends Error {
+  readonly code = "ENSEMBLE_DATABASE_INITIALIZATION_FAILED"
+  readonly phase: "open" | "configure" | "migrate"
+
+  constructor(phase: "open" | "configure" | "migrate", cause: unknown) {
+    super("Ensemble 数据库初始化失败。请先备份数据库文件，再检查文件权限或恢复受信任的备份；插件不会自动删除或重建数据。", { cause })
+    this.name = "DatabaseInitializationError"
+    this.phase = phase
+  }
+}
+
 class NodeSqliteAdapter implements Database {
   private readonly db: NodeSqliteDatabase
 
@@ -115,12 +130,38 @@ export function getDbPath(env: Record<string, string | undefined> = process.env)
  * Applies all pending migrations and enables WAL mode.
  */
 export function createDb(path: string): Database {
-  const db = openDatabase(path)
-  db.exec("PRAGMA journal_mode=WAL")
-  db.exec("PRAGMA foreign_keys=ON")
-  applyMigrations(db)
-  instance = db
-  return db
+  instance = undefined
+  let db: Database | undefined
+  try {
+    try {
+      db = openDatabase(path)
+    } catch (cause) {
+      throw new DatabaseInitializationError("open", cause)
+    }
+
+    try {
+      db.exec("PRAGMA journal_mode=WAL")
+      db.exec("PRAGMA foreign_keys=ON")
+    } catch (cause) {
+      throw new DatabaseInitializationError("configure", cause)
+    }
+
+    try {
+      applyMigrations(db)
+    } catch (cause) {
+      throw new DatabaseInitializationError("migrate", cause)
+    }
+
+    instance = db
+    return db
+  } catch (error) {
+    try {
+      db?.close()
+    } catch {
+      // Preserve the initialization failure if cleanup itself fails.
+    }
+    throw error
+  }
 }
 
 /** Get the singleton database instance. Must call createDb first. */

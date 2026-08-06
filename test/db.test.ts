@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach } from "bun:test"
 import { Database } from "bun:sqlite"
 import { applyMigrations, MIGRATIONS } from "../src/schema"
-import { createDb, getDb, getDbPath } from "../src/db"
+import { createDb, DatabaseInitializationError, getDb, getDbPath } from "../src/db"
 import path from "path"
 
 describe("schema migrations", () => {
@@ -473,6 +473,43 @@ describe("createDb", () => {
     try { require("fs").unlinkSync(tmpPath) } catch {}
     try { require("fs").unlinkSync(tmpPath + "-wal") } catch {}
     try { require("fs").unlinkSync(tmpPath + "-shm") } catch {}
+  })
+
+  test("reports malformed databases without replacing or deleting the file", async () => {
+    const tmpPath = `/tmp/ensemble-corrupt-${Date.now()}-${Math.random().toString(36).slice(2)}.db`
+    const contents = "not a sqlite database"
+    await Bun.write(tmpPath, contents)
+
+    try {
+      expect(() => createDb(tmpPath)).toThrow(DatabaseInitializationError)
+      expect(() => createDb(tmpPath)).toThrow("Ensemble 数据库初始化失败")
+      expect(await Bun.file(tmpPath).text()).toBe(contents)
+      expect(() => getDb()).toThrow("Database not initialized")
+    } finally {
+      await Bun.file(tmpPath).unlink()
+    }
+  })
+
+  test("keeps the original initialization error as an internal cause", async () => {
+    const tmpPath = `/tmp/ensemble-corrupt-${Date.now()}-${Math.random().toString(36).slice(2)}.db`
+    await Bun.write(tmpPath, "not a sqlite database")
+
+    try {
+      let failure: unknown
+      try {
+        createDb(tmpPath)
+      } catch (error) {
+        failure = error
+      }
+
+      expect(failure).toBeInstanceOf(DatabaseInitializationError)
+      const diagnostic = failure as DatabaseInitializationError
+      expect(diagnostic.phase).toBe("configure")
+      expect(diagnostic.cause).toBeInstanceOf(Error)
+      expect(diagnostic.message).not.toContain(tmpPath)
+    } finally {
+      await Bun.file(tmpPath).unlink()
+    }
   })
 })
 

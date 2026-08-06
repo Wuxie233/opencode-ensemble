@@ -3,13 +3,13 @@ import { tool } from "@opencode-ai/plugin"
 import { OpencodeClient } from "@opencode-ai/sdk/v2"
 import path from "node:path"
 import { mkdirSync } from "node:fs"
-import { getDbPath } from "./db"
+import { DatabaseInitializationError, getDbPath } from "./db"
 import { wrapThrowingClient } from "./client"
 import { recoverStaleMembers, recoverUndeliveredMessages, recoverOrphanedWorktrees, recoverOrphanedBranches, rehydrateRegistry } from "./recovery"
 import { MemberRegistry, DescendantTracker, PendingPurgeApprovals } from "./state"
 import { isWorktreeInstance } from "./util"
 import { handleSessionStatusEvent, handleSessionCreatedEvent, checkToolIsolation, shouldNudgeIdleMember, handleSessionErrorEvent, RetryTracker, shouldReleaseShutdownTracking } from "./hooks"
-import { notifyTeamEvent, notifyWorkingProgress } from "./notify"
+import { notifyDatabaseInitializationFailure, notifyTeamEvent, notifyWorkingProgress } from "./notify"
 import { sendLeadAlert, hasReportedCompletion, flushPendingPeerMessage, releasePendingPeerDelivery, isMemberPromptEligible, wakeTeamLead } from "./messaging"
 import { buildLeadSystemPrompt, buildTeammateSystemPrompt, buildTeamCompactionContext } from "./system-prompt"
 import { log, initLog } from "./log"
@@ -93,6 +93,13 @@ const plugin: Plugin = async (input) => {
     dbPath,
     dashboardPort: mainInstance ? config.dashboardPort : undefined,
     dashboardClient: mainInstance ? client : undefined,
+    onDatabaseInitializationError: (error) => {
+      const diagnostic = error instanceof DatabaseInitializationError
+        ? `阶段=${error.phase} 原因=${error.cause instanceof Error ? error.cause.message : String(error.cause)}`
+        : `原因=${error instanceof Error ? error.message : String(error)}`
+      log(`数据库初始化失败 ${diagnostic}`)
+      void notifyDatabaseInitializationFailure(client)
+    },
   })
   const db = runtime.db
   const activityBuffer = runtime.activityBuffer

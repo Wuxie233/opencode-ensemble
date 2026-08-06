@@ -1,6 +1,25 @@
 import type { Database } from "./db"
 import type { PluginClient } from "./types"
 
+const DATABASE_INITIALIZATION_MESSAGE = "Ensemble 数据库初始化失败。请备份数据库文件并检查权限或恢复受信任的备份；未执行自动恢复。"
+
+/**
+ * Notify the user that the database could not initialize without exposing a
+ * path, runtime error, or database contents.
+ */
+export async function notifyDatabaseInitializationFailure(client: PluginClient): Promise<void> {
+  try {
+    await client.tui.showToast({
+      title: "Ensemble",
+      message: DATABASE_INITIALIZATION_MESSAGE,
+      variant: "error",
+      duration: 8000,
+    })
+  } catch {
+    // Startup must still reject when the TUI is unavailable.
+  }
+}
+
 type TeamEventType = "spawn" | "message" | "completed" | "error" | "shutdown"
 
 const TOAST_CONFIG: Record<TeamEventType, { variant: "info" | "success" | "warning" | "error"; duration: number }> = {

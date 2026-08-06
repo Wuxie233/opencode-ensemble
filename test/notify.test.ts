@@ -1,6 +1,27 @@
 import { describe, test, expect, beforeEach } from "bun:test"
 import { setupDeps, insertTeam, insertMember } from "./helpers"
-import { notifyTeamEvent, notifyWorkingProgress } from "../src/notify"
+import { notifyDatabaseInitializationFailure, notifyTeamEvent, notifyWorkingProgress } from "../src/notify"
+
+describe("notifyDatabaseInitializationFailure", () => {
+  test("shows an actionable privacy-safe startup message", async () => {
+    const deps = setupDeps()
+    await notifyDatabaseInitializationFailure(deps.client)
+
+    const toasts = deps.client.calls.filter(c => c.method === "tui.showToast")
+    expect(toasts).toHaveLength(1)
+    const toast = toasts[0]!.args[0] as Record<string, unknown>
+    expect(toast.variant).toBe("error")
+    expect(toast.message).toContain("备份数据库文件")
+    expect(toast.message).not.toContain("/tmp")
+    expect(toast.message).not.toContain("not a database")
+  })
+
+  test("does not mask startup failures when the TUI is unavailable", async () => {
+    const deps = setupDeps()
+    deps.client.tui.showToast = async () => { throw new Error("TUI unavailable") }
+    await expect(notifyDatabaseInitializationFailure(deps.client)).resolves.toBeUndefined()
+  })
+})
 
 describe("notifyTeamEvent", () => {
   let deps: ReturnType<typeof setupDeps>

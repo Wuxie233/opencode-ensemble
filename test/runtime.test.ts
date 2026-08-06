@@ -140,6 +140,24 @@ describe("process runtime lifecycle", () => {
     expect(closes).toBe(1)
   })
 
+  test("reports database startup failures once and preserves the rejection", async () => {
+    const failure = new Error("file is not a database: /private/project/ensemble.db")
+    let diagnostics = 0
+    const runtime = createRuntimeCoordinator({
+      openDb: () => { throw failure },
+      startDashboard: async () => null,
+    })
+
+    await expect(runtime.acquire({
+      dbPath: "/private/project/ensemble.db",
+      onDatabaseInitializationError: (error) => {
+        diagnostics++
+        expect(error).toBe(failure)
+      },
+    })).rejects.toBe(failure)
+    expect(diagnostics).toBe(1)
+  })
+
   test("each directory dispose stops its own watchdog before releasing shared resources", () => {
     const calls: string[] = []
     const first = createLocalDisposer(

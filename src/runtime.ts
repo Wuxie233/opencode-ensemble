@@ -16,6 +16,7 @@ interface AcquireOptions {
   dbPath: string
   dashboardPort?: number
   dashboardClient?: PluginClient
+  onDatabaseInitializationError?: (error: unknown) => void
 }
 
 export interface RuntimeHandle {
@@ -95,7 +96,12 @@ export function createRuntimeCoordinator(dependencies: RuntimeDependencies) {
       throw new Error(`Ensemble runtime already owns database ${dbPath}`)
     }
     if (!db) {
-      db = dependencies.openDb(options.dbPath)
+      try {
+        db = dependencies.openDb(options.dbPath)
+      } catch (error) {
+        options.onDatabaseInitializationError?.(error)
+        throw error
+      }
       dbPath = options.dbPath
     }
     if (!activityBuffer) activityBuffer = new ActivityBuffer()
