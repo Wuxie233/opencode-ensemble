@@ -29,6 +29,7 @@ export interface RepositoryBindingOps {
   verifyRepositoryRoot(directory: string, explicit: boolean): Promise<VerifiedRepositoryBinding>
   resolveGitRefOid(repositoryRoot: string, ref: string): Promise<string | null>
   resolveWorktreeIdentity(worktreeDir: string): Promise<{ gitIdentity: string; headOid: string }>
+  resolveWorktreeBranch(worktreeDir: string): Promise<string | null>
 }
 
 /** Production repository operations. */
@@ -37,6 +38,7 @@ export const repositoryBindingOps: RepositoryBindingOps = {
   verifyRepositoryRoot,
   resolveGitRefOid,
   resolveWorktreeIdentity,
+  resolveWorktreeBranch,
 }
 
 /** Load the persisted repository binding for a Team. */
@@ -203,4 +205,10 @@ export async function resolveWorktreeIdentity(worktreeDir: string): Promise<{ gi
     ? common.stdout.trim()
     : path.resolve(worktreeDir, common.stdout.trim())
   return { gitIdentity: await realpath(commonPath), headOid: head.stdout.trim() }
+}
+
+/** Resolve the symbolic branch checked out in a worktree. */
+export async function resolveWorktreeBranch(worktreeDir: string): Promise<string | null> {
+  const result = await runCommand(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: worktreeDir })
+  return result.exitCode === 0 && result.stdout.trim() ? result.stdout.trim() : null
 }

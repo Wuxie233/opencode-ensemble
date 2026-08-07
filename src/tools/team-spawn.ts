@@ -1,3 +1,4 @@
+import { realpath, stat } from "node:fs/promises"
 import path from "node:path"
 import type { ToolDeps, PermissionRule } from "../types"
 import { validateMemberName } from "../util"
@@ -440,20 +441,53 @@ async function readRetainedPreflightAttempt(
   if (!matchesCreatedWorktreeName(requestedWorktreeName, attempt.worktree_name)) {
     throw new Error(`Retained spawn attempt for teammate "${name}" has a mismatched worktree name.`)
   }
-  const listed = await deps.client.worktree.list({ directory: repository.repositoryRoot })
-  const matches = (listed.data ?? []).filter(worktree =>
-    worktree.directory === attempt.worktree_dir && worktree.name === attempt.worktree_name
-  )
-  if (matches.length !== 1) {
-    throw new Error(`Retained spawn attempt for teammate "${name}" could not resolve exactly one owned worktree.`)
+  let worktreeStat: Awaited<ReturnType<typeof stat>>
+  try {
+    worktreeStat = await stat(attempt.worktree_dir)
+  } catch (error) {
+    if (!isMissingPath(error)) throw error
+    await settleMissingRetainedPreflightAttempt(
+      deps,
+      teamId,
+      name,
+      repository.repositoryRoot,
+      attempt.worktree_dir,
+      attempt.worktree_name,
+      requestedWorktreeName,
+      attempt.claim_task_id ?? undefined,
+      attempt.claim_event_id ?? undefined,
+    )
+    throw new Error(
+      `The stale retained spawn attempt for teammate "${name}" was settled and its claimed task was released; retry the same team_spawn call to create a new isolated worktree.`,
+    )
   }
-  const matchedWorktree = matches[0]
-  if (!matchedWorktree) throw new Error(`Retained spawn attempt for teammate "${name}" has no owned worktree.`)
-  const worktree = await identifyWorktree(deps, repository, requestedWorktreeName, matchedWorktree)
-  if (worktree.branch !== attempt.worktree_branch
-    || worktree.sourceBranch !== attempt.worktree_source_branch
-    || worktree.baselineOid !== attempt.worktree_baseline_oid) {
+  if (!worktreeStat.isDirectory()) {
+    throw new Error(`Retained spawn attempt for teammate "${name}" worktree path is not a directory.`)
+  }
+  const actualDirectory = await realpath(attempt.worktree_dir)
+  if (actualDirectory !== path.resolve(attempt.worktree_dir)) {
+    throw new Error(`Retained spawn attempt for teammate "${name}" worktree directory no longer matches its persisted path.`)
+  }
+  const repositoryOps = deps.repositoryBindingOps ?? repositoryBindingOps
+  const identity = await repositoryOps.resolveWorktreeIdentity(attempt.worktree_dir)
+  if (identity.gitIdentity !== repository.gitIdentity || identity.gitIdentity !== attempt.repository_git_identity) {
     throw new Error(`Retained spawn attempt for teammate "${name}" no longer matches its persisted Git identity.`)
+  }
+  const branch = await repositoryOps.resolveWorktreeBranch(attempt.worktree_dir)
+  const sourceOid = await repositoryOps.resolveGitRefOid(
+    repository.repositoryRoot,
+    `refs/heads/${attempt.worktree_source_branch}`,
+  )
+  if (branch !== attempt.worktree_branch
+    || identity.headOid !== attempt.worktree_baseline_oid
+    || sourceOid !== attempt.worktree_baseline_oid) {
+    throw new Error(`Retained spawn attempt for teammate "${name}" no longer matches its persisted Git identity.`)
+  }
+  const worktree: SpawnWorktree = {
+    directory: attempt.worktree_dir,
+    branch: attempt.worktree_branch,
+    sourceBranch: attempt.worktree_source_branch,
+    baselineOid: attempt.worktree_baseline_oid,
   }
 
   let claimedTask: ClaimedTask | undefined
@@ -482,6 +516,32 @@ async function readRetainedPreflightAttempt(
     claimEventId: attempt.claim_event_id ?? undefined,
     claimedTask,
   }
+}
+
+function isMissingPath(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT"
+}
+
+async function settleMissingRetainedPreflightAttempt(
+  deps: ToolDeps,
+  teamId: string,
+  name: string,
+  repositoryRoot: string,
+  worktreeDirectory: string,
+  worktreeName: string,
+  requestedWorktreeName: string,
+  taskId: string | undefined,
+  claimEventId: string | undefined,
+): Promise<void> {
+  const listed = await deps.client.worktree.list({ directory: repositoryRoot })
+  const owned = (listed.data ?? []).some(worktree =>
+    worktree.directory === worktreeDirectory
+    || worktree.name === worktreeName
+    || matchesCreatedWorktreeName(requestedWorktreeName, worktree.name)
+    || matchesCreatedWorktreeName(worktreeName, worktree.name)
+  )
+  if (owned) throw new Error(`Retained spawn attempt for teammate "${name}" has an ambiguous owned worktree resource.`)
+  settleSpawnAttempt(deps, teamId, name, taskId, claimEventId)
 }
 
 /**

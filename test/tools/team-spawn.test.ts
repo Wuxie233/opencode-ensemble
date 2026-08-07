@@ -71,7 +71,7 @@ describe("team_spawn", () => {
       await fs.writeFile(path.join(worktree, ".opencode", "tools", "inspect.ts"), 'import { helper } from "@acme/shared-tool"\nexport default helper\n')
       deps.client.worktree.create = async options => {
         deps.client.calls.push({ method: "worktree.create", args: [options] })
-        return { data: { name: options.worktreeCreateInput?.name ?? "default", branch: "ensemble-tool-resolution", directory: worktree } }
+        return { data: { name: `${options.worktreeCreateInput?.name ?? "default"}-normalized`, branch: "ensemble-tool-resolution", directory: worktree } }
       }
       const repositoryOps = deps.repositoryBindingOps
       if (!repositoryOps) throw new Error("test setup is missing repository binding operations")
@@ -81,6 +81,9 @@ describe("team_spawn", () => {
         resolveGitRefOid: repositoryOps.resolveGitRefOid,
         async resolveWorktreeIdentity() {
           return { gitIdentity: "/tmp/test-project/.git", headOid: "baseline-oid" }
+        },
+        async resolveWorktreeBranch() {
+          return "ensemble-tool-resolution"
         },
       }
       insertTask(deps, "t1", "local-tool-task")
@@ -105,12 +108,7 @@ describe("team_spawn", () => {
       expect(deps.db.query("SELECT worktree_dir, worktree_branch FROM team_spawn_attempt WHERE name = 'local-tool-writer'").get())
         .toEqual({ worktree_dir: worktree, worktree_branch: "ensemble-tool-resolution" })
 
-      const createdName = (deps.client.calls.find(call => call.method === "worktree.create")!.args[0] as {
-        worktreeCreateInput: { name: string }
-      }).worktreeCreateInput.name
-      deps.client.worktree.list = async () => ({
-        data: [{ name: createdName, branch: "ensemble-tool-resolution", directory: worktree }],
-      })
+      deps.client.worktree.list = async () => ({ data: [] })
       await fs.mkdir(path.join(worktree, "node_modules", "@acme", "shared-tool"), { recursive: true })
 
       const result = await executeTeamSpawn(deps, spawnArgs, "lead-sess", async () => true)
@@ -119,6 +117,42 @@ describe("team_spawn", () => {
       expect(deps.client.calls.map(call => call.method)).toContain("workspace.create")
       expect(deps.client.calls.map(call => call.method)).toContain("session.create")
       expect(deps.db.query("SELECT name FROM team_spawn_attempt WHERE name = 'local-tool-writer'").get()).toBeNull()
+    } finally {
+      await fs.rm(worktree, { recursive: true, force: true })
+    }
+  })
+
+  test("releases a claimed task when a retained preflight worktree is provably absent", async () => {
+    const fs = await import("node:fs/promises")
+    const path = await import("node:path")
+    const worktree = await fs.mkdtemp("/tmp/ensemble-spawn-missing-retained-")
+    try {
+      await fs.mkdir(path.join(worktree, ".opencode", "tools"), { recursive: true })
+      await fs.writeFile(path.join(worktree, "package.json"), JSON.stringify({
+        packageManager: "pnpm@10.0.0",
+        dependencies: { "@acme/shared-tool": "workspace:*" },
+      }))
+      await fs.writeFile(path.join(worktree, ".opencode", "tools", "inspect.ts"), "import { helper } from '@acme/shared-tool'\nexport default helper\n")
+      const repositoryOps = deps.repositoryBindingOps
+      if (!repositoryOps) throw new Error("test setup is missing repository binding operations")
+      deps.repositoryBindingOps = { ...repositoryOps, async resolveWorktreeBranch() { return "ensemble-missing-retained-writer" } }
+      deps.client.worktree.create = async options => {
+        deps.client.calls.push({ method: "worktree.create", args: [options] })
+        return { data: { name: options.worktreeCreateInput?.name ?? "default", branch: "ensemble-missing-retained-writer", directory: worktree } }
+      }
+      insertTask(deps, "t1", "missing-retained-task")
+      const spawnArgs = { name: "missing-retained-writer", agent: "build", prompt: "Use the local tool", claim_task: "missing-retained-task" }
+      await expect(executeTeamSpawn(deps, spawnArgs, "lead-sess", async () => true)).rejects.toThrow("retained")
+      await fs.rm(worktree, { recursive: true, force: true })
+      deps.client.worktree.list = async () => ({ data: [] })
+
+      await expect(executeTeamSpawn(deps, spawnArgs, "lead-sess", async () => true)).rejects.toThrow("stale retained spawn attempt")
+      expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'missing-retained-task'").get()).toEqual({ status: "pending", assignee: null })
+      expect(deps.db.query("SELECT name FROM team_spawn_attempt WHERE name = 'missing-retained-writer'").get()).toBeNull()
+      const releaseEvent = deps.db.query("SELECT payload, cause_event_id FROM team_event WHERE team_id = 't1' AND kind = 'task.released'").get() as { payload: string; cause_event_id: string }
+      expect(releaseEvent.cause_event_id).toBeTruthy()
+      expect(JSON.parse(releaseEvent.payload)).toEqual({ task_id: "missing-retained-task", reason: "spawn_rollback" })
+      expect(deps.client.calls.filter(call => call.method === "worktree.create")).toHaveLength(1)
     } finally {
       await fs.rm(worktree, { recursive: true, force: true })
     }

@@ -121,8 +121,13 @@ and keep list-based recovery exact so it fails closed on ambiguous candidates.
 If repository-local tool dependency preflight fails after identity verification,
 retain the durable attempt, claimed task, and exact worktree. A retry with the
 same teammate name and task may reuse that worktree only after re-verifying all
-persisted Git identity fields; never replace it with a fresh worktree or share
-the Lead's `node_modules`.
+persisted Git identity fields; the persisted exact directory plus repository
+common-dir, symbolic branch, HEAD, source-ref, and baseline OID are authoritative
+and SDK worktree-list names/cardinality/omissions are advisory. Only a proven
+`ENOENT` directory absence with no discoverable owned resource may release the
+claimed task and delete the attempt; ambiguity, I/O errors, timeouts, or Git
+mismatches fail closed. Never replace a verifiable retained worktree with a
+fresh worktree or share the Lead's `node_modules`.
 
 The SQLite connection, dashboard listener, and `ActivityBuffer` are process-shared across directory plugin instances. Directory-local watchdogs, registries, trackers, and rate limiters remain isolated. Release shared resources only after the final directory and any in-flight recovery task finish.
 

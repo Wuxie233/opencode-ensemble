@@ -113,6 +113,10 @@ export function setupDeps(db?: EnsembleDatabase): ToolDeps & { client: ReturnTyp
           headOid: "baseline-oid",
         }
       },
+      async resolveWorktreeBranch(worktreeDir) {
+        const marker = "/tmp/worktree-"
+        return worktreeDir.startsWith(marker) ? `ensemble-${worktreeDir.slice(marker.length)}` : "baseline-branch"
+      },
     },
     mergeEvidenceOps: {
       async pinSource(_repositoryRoot, sourceBranch) { return { sourceBranch, sourceOid: "pinned-source-oid" } },
