@@ -24,6 +24,14 @@ const BUILTIN_PREFIXES = ["bun:", "node:"]
 const TOOL_DIRECTORIES = [".opencode/tools", ".opencode/tool"]
 const SOURCE_EXTENSIONS = new Set([".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"])
 
+/** A dependency installation can repair this preflight without replacing the verified worktree. */
+export class RepositoryToolDependenciesMissingError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "RepositoryToolDependenciesMissingError"
+  }
+}
+
 /**
  * Check whether an isolated writer worktree can resolve its repository-local
  * OpenCode tools without borrowing the lead repository's dependencies.
@@ -56,7 +64,7 @@ export async function preflightRepositoryLocalTools(
 
   if (!manifest) {
     if (imports.size === 0) return
-    throw new Error(
+    throw new RepositoryToolDependenciesMissingError(
       `Repository-local OpenCode tools in ${toolFiles.map(filePath => path.relative(worktreeDirectory, filePath)).join(", ")} `
       + "import external packages but the isolated worktree has no package.json to verify their installation. "
       + `Add package metadata and install dependencies in ${worktreeDirectory}, then retry team_spawn. `
@@ -85,7 +93,7 @@ export async function preflightRepositoryLocalTools(
       : packageManager === "yarn"
         ? "yarn install --immutable"
         : "bun install --frozen-lockfile"
-  throw new Error(
+  throw new RepositoryToolDependenciesMissingError(
     `Repository-local OpenCode tools in ${toolFiles.map(filePath => path.relative(worktreeDirectory, filePath)).join(", ")} `
     + `require unresolved workspace package(s): ${unresolved.join(", ")}. `
     + `The isolated writer worktree has no local dependency installation for these packages. `

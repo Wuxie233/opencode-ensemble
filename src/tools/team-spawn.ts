@@ -14,7 +14,7 @@ import { EXECUTION_CAPABILITIES, resolveProfile, type ExecutionCapability } from
 import { getTeamRepositoryBinding, recoverTeamRepositoryBinding, repositoryBindingOps } from "../repository-binding"
 import { parseTaskResult } from "../result-parser"
 import { renderError } from "../error"
-import { preflightRepositoryLocalTools } from "../tool-resolution"
+import { preflightRepositoryLocalTools, RepositoryToolDependenciesMissingError } from "../tool-resolution"
 
 /** Tracks consecutive spawn failures per team for circuit breaker. */
 export const spawnFailures = new Map<string, { count: number; lastError: string }>()
@@ -58,6 +58,13 @@ interface SpawnWorktree {
   branch: string
   sourceBranch: string
   baselineOid: string
+}
+
+interface RetainedPreflightAttempt {
+  worktree: SpawnWorktree
+  worktreeName: string
+  claimEventId: string | undefined
+  claimedTask: ClaimedTask | undefined
 }
 
 /** Parse "provider/model" string into { providerID, modelID } for the SDK. */
@@ -173,12 +180,13 @@ function validateTaskCapabilities(
   teamId: string,
   taskId: string,
   available: readonly string[],
-): void {
+): ExecutionCapability[] {
   const required = readRequiredCapabilities(deps, teamId, taskId)
   const missing = required.filter(capability => !available.includes(capability))
   if (missing.length > 0) {
     throw new Error(`Teammate profile lacks required task capabilities: ${missing.join(", ")}`)
   }
+  return required
 }
 
 function rollbackSpawnTask(
@@ -301,6 +309,7 @@ function updateSpawnAttempt(
     workspace_id: string
     session_id: string
     safe_branch: string
+    preflight_error: string | null
   }>,
 ): void {
   const entries = Object.entries(fields)
@@ -383,6 +392,98 @@ async function reconcileWorkspace(deps: ToolDeps, repositoryRoot: string, branch
   return matches[0]?.id ?? null
 }
 
+async function readRetainedPreflightAttempt(
+  deps: ToolDeps,
+  teamId: string,
+  name: string,
+  requestedTaskId: string | undefined,
+  repository: SpawnRepository,
+  requestedWorktreeName: string,
+): Promise<RetainedPreflightAttempt | null> {
+  const attempt = deps.db.query(
+    `SELECT repository_root, repository_git_identity, worktree_name, stage,
+            worktree_dir, worktree_branch, worktree_source_branch,
+            worktree_baseline_oid, workspace_id, session_id,
+            claim_task_id, claim_event_id, preflight_error
+     FROM team_spawn_attempt WHERE team_id = ? AND name = ?`,
+  ).get(teamId, name) as {
+    repository_root: string
+    repository_git_identity: string
+    worktree_name: string
+    stage: string
+    worktree_dir: string | null
+    worktree_branch: string | null
+    worktree_source_branch: string | null
+    worktree_baseline_oid: string | null
+    workspace_id: string | null
+    session_id: string | null
+    claim_task_id: string | null
+    claim_event_id: string | null
+    preflight_error: string | null
+  } | null
+  if (!attempt) return null
+  if (!attempt.preflight_error) {
+    throw new Error(`Retained spawn attempt for teammate "${name}" is not waiting for dependency repair.`)
+  }
+  if (attempt.claim_task_id !== (requestedTaskId ?? null)) {
+    throw new Error(`Retained spawn attempt for teammate "${name}" belongs to task ${attempt.claim_task_id ?? "none"}; retry with the same claim_task.`)
+  }
+  if (attempt.repository_root !== repository.repositoryRoot || attempt.repository_git_identity !== repository.gitIdentity) {
+    throw new Error(`Retained spawn attempt for teammate "${name}" belongs to a different repository binding.`)
+  }
+  if (attempt.stage !== "worktree_creating" || attempt.workspace_id || attempt.session_id) {
+    throw new Error(`Retained spawn attempt for teammate "${name}" is not at the dependency-preflight recovery stage.`)
+  }
+  if (!attempt.worktree_dir || !attempt.worktree_branch || !attempt.worktree_source_branch || !attempt.worktree_baseline_oid) {
+    throw new Error(`Retained spawn attempt for teammate "${name}" is missing verified worktree identity.`)
+  }
+  if (!matchesCreatedWorktreeName(requestedWorktreeName, attempt.worktree_name)) {
+    throw new Error(`Retained spawn attempt for teammate "${name}" has a mismatched worktree name.`)
+  }
+  const listed = await deps.client.worktree.list({ directory: repository.repositoryRoot })
+  const matches = (listed.data ?? []).filter(worktree =>
+    worktree.directory === attempt.worktree_dir && worktree.name === attempt.worktree_name
+  )
+  if (matches.length !== 1) {
+    throw new Error(`Retained spawn attempt for teammate "${name}" could not resolve exactly one owned worktree.`)
+  }
+  const matchedWorktree = matches[0]
+  if (!matchedWorktree) throw new Error(`Retained spawn attempt for teammate "${name}" has no owned worktree.`)
+  const worktree = await identifyWorktree(deps, repository, requestedWorktreeName, matchedWorktree)
+  if (worktree.branch !== attempt.worktree_branch
+    || worktree.sourceBranch !== attempt.worktree_source_branch
+    || worktree.baselineOid !== attempt.worktree_baseline_oid) {
+    throw new Error(`Retained spawn attempt for teammate "${name}" no longer matches its persisted Git identity.`)
+  }
+
+  let claimedTask: ClaimedTask | undefined
+  if (attempt.claim_task_id) {
+    const task = deps.db.query(
+      `SELECT status, assignee, contract_artifact_id, contract_artifact_sha256
+       FROM team_task WHERE id = ? AND team_id = ?`,
+    ).get(attempt.claim_task_id, teamId) as {
+      status: string
+      assignee: string | null
+      contract_artifact_id: string | null
+      contract_artifact_sha256: string | null
+    } | null
+    if (!task || task.status !== "in_progress" || task.assignee !== name || !attempt.claim_event_id) {
+      throw new Error(`Retained spawn attempt for teammate "${name}" no longer owns its claimed task.`)
+    }
+    claimedTask = {
+      claimEventId: attempt.claim_event_id,
+      contractArtifactId: task.contract_artifact_id,
+      contractArtifactSha256: task.contract_artifact_sha256,
+    }
+  }
+  return {
+    worktree,
+    worktreeName: attempt.worktree_name,
+    claimEventId: attempt.claim_event_id ?? undefined,
+    claimedTask,
+  }
+}
+
 /**
  * Execute the team_spawn tool. Creates a child session and starts a teammate.
  * By default, each teammate gets their own git worktree for file isolation.
@@ -436,7 +537,9 @@ async function executeTeamSpawnLocked(
   if (!isReadOnly && args.worktree === false) {
     throw new Error(`Ensemble profile "${profile.name}" is a writer and requires an isolated worktree`)
   }
-  if (args.claim_task) validateTaskCapabilities(deps, teamInfo.teamId, args.claim_task, profile.capabilities)
+  const requiredCapabilities = args.claim_task
+    ? validateTaskCapabilities(deps, teamInfo.teamId, args.claim_task, profile.capabilities)
+    : []
   const repository = await resolveSpawnRepository(deps, teamInfo, args.repository_root, isReadOnly)
   if (!isReadOnly && isWorktreeDirectory(repository.repositoryRoot)) {
     throw new Error(`Ensemble profile "${profile.name}" cannot create an isolated writer worktree from ${repository.repositoryRoot}`)
@@ -452,17 +555,19 @@ async function executeTeamSpawnLocked(
     ? await buildResumeContext(deps, teamInfo.teamId, args.resume_from)
     : undefined
 
-  const claimedTask = args.claim_task
-    ? claimSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name)
-    : undefined
-  const claimEventId = claimedTask?.claimEventId
-
   const useWorktree = args.worktree !== false && !isReadOnly && !isWorktreeDirectory(repository.repositoryRoot)
   const usePlanApproval = args.plan_approval === true
   const resource = getTeamResourceParts(deps.db, teamInfo.teamId)
   const worktreeName = teamWorktreeName(resource.projectName, resource.teamName, resource.teamId, args.name)
+  const retainedAttempt = useWorktree
+    ? await readRetainedPreflightAttempt(deps, teamInfo.teamId, args.name, args.claim_task, repository, worktreeName)
+    : null
+  const claimedTask = retainedAttempt?.claimedTask ?? (args.claim_task
+    ? claimSpawnTask(deps, teamInfo.teamId, args.claim_task, args.name)
+    : undefined)
+  const claimEventId = retainedAttempt?.claimEventId ?? claimedTask?.claimEventId
 
-  if (useWorktree) {
+  if (useWorktree && !retainedAttempt) {
     try {
       createSpawnAttempt(deps, teamInfo.teamId, args.name, repository, worktreeName, args.claim_task, claimEventId)
     } catch (error) {
@@ -474,61 +579,77 @@ async function executeTeamSpawnLocked(
   log(`spawn:start name=${args.name} profile=${profile.name} agent=${runtimeAgent} worktree=${useWorktree}`)
 
   // Create worktree if enabled
-  let worktreeDir: string | null = null
-  let worktreeBranch: string | null = null
-  let worktreeSourceBranch: string | null = null
-  let worktreeBaselineOid: string | null = null
+  let worktreeDir: string | null = retainedAttempt?.worktree.directory ?? null
+  let worktreeBranch: string | null = retainedAttempt?.worktree.branch ?? null
+  let worktreeSourceBranch: string | null = retainedAttempt?.worktree.sourceBranch ?? null
+  let worktreeBaselineOid: string | null = retainedAttempt?.worktree.baselineOid ?? null
+  let worktreeIdentityVerified = retainedAttempt !== null
 
   if (useWorktree) {
     try {
-      log(`spawn:worktree:start name=${args.name}`)
-      const worktreeCreate = deps.client.worktree.create({
-        directory: repository.repositoryRoot,
-        worktreeCreateInput: { name: worktreeName },
-      })
-      worktreeCreate.then(result => {
-        const late = result.data
-        if (!late?.directory || !late.branch.trim()) return
-        try {
+      if (!retainedAttempt) {
+        log(`spawn:worktree:start name=${args.name}`)
+        const worktreeCreate = deps.client.worktree.create({
+          directory: repository.repositoryRoot,
+          worktreeCreateInput: { name: worktreeName },
+        })
+        worktreeCreate.then(result => {
+          const late = result.data
+          if (!late?.directory || !late.branch.trim()) return
+          try {
+            updateSpawnAttempt(deps, teamInfo.teamId, args.name, {
+              worktree_name: late.name,
+              worktree_dir: late.directory,
+              worktree_branch: late.branch,
+            })
+          } catch {
+            // Ownership already transferred or settled before the late response.
+          }
+        }).catch(() => { /* the normal await path renders the error */ })
+        const result = await withTimeout(
+          worktreeCreate,
+          getSpawnTimeout(), `worktree.create for "${args.name}"`
+        )
+        if (!result.data) throw new Error("worktree.create returned no worktree")
+        if (result.data.directory && result.data.branch.trim()) {
+          worktreeDir = result.data.directory
+          worktreeBranch = result.data.branch
           updateSpawnAttempt(deps, teamInfo.teamId, args.name, {
-            worktree_name: late.name,
-            worktree_dir: late.directory,
-            worktree_branch: late.branch,
+            worktree_name: result.data.name,
+            worktree_dir: worktreeDir,
+            worktree_branch: worktreeBranch,
           })
-        } catch {
-          // Ownership already transferred or settled before the late response.
         }
-      }).catch(() => { /* the normal await path renders the error */ })
-      const result = await withTimeout(
-        worktreeCreate,
-        getSpawnTimeout(), `worktree.create for "${args.name}"`
-      )
-      if (!result.data) throw new Error("worktree.create returned no worktree")
-      if (result.data.directory && result.data.branch.trim()) {
-        worktreeDir = result.data.directory
-        worktreeBranch = result.data.branch
+        const identified = await identifyWorktree(deps, repository, worktreeName, result.data)
+        worktreeDir = identified.directory
+        worktreeBranch = identified.branch
+        worktreeSourceBranch = identified.sourceBranch
+        worktreeBaselineOid = identified.baselineOid
+        worktreeIdentityVerified = true
         updateSpawnAttempt(deps, teamInfo.teamId, args.name, {
-          worktree_name: result.data.name,
           worktree_dir: worktreeDir,
           worktree_branch: worktreeBranch,
+          worktree_source_branch: worktreeSourceBranch,
+          worktree_baseline_oid: worktreeBaselineOid,
         })
       }
-      const identified = await identifyWorktree(deps, repository, worktreeName, result.data)
-      worktreeDir = identified.directory
-      worktreeBranch = identified.branch
-      worktreeSourceBranch = identified.sourceBranch
-      worktreeBaselineOid = identified.baselineOid
+      if (!worktreeDir || !worktreeBranch || !worktreeSourceBranch || !worktreeBaselineOid) {
+        throw new Error("verified worktree has incomplete Git identity")
+      }
       await preflightRepositoryLocalTools(worktreeDir)
-      updateSpawnAttempt(deps, teamInfo.teamId, args.name, {
-        worktree_dir: worktreeDir,
-        worktree_branch: worktreeBranch,
-        worktree_source_branch: worktreeSourceBranch,
-        worktree_baseline_oid: worktreeBaselineOid,
-      })
+      if (retainedAttempt) updateSpawnAttempt(deps, teamInfo.teamId, args.name, { preflight_error: null })
       log(`spawn:worktree:done name=${args.name} dir=${worktreeDir}`)
     } catch (err) {
       const detail = renderError(err)
       log(`spawn:worktree:failed name=${args.name} err=${detail}`)
+      if (err instanceof RepositoryToolDependenciesMissingError && worktreeIdentityVerified && worktreeDir) {
+        updateSpawnAttempt(deps, teamInfo.teamId, args.name, { preflight_error: detail })
+        throw new Error(
+          `Failed repository-local tool dependency preflight for teammate "${args.name}": ${detail} `
+          + `The verified worktree ${worktreeDir}, durable spawn attempt, and claimed task were retained. `
+          + `Install the reported dependencies in that exact worktree, then retry team_spawn with the same name${args.claim_task ? " and claim_task" : ""}.`,
+        )
+      }
       if (isSpawnTimeout(detail)) {
         alertSpawnAttemptFailure(deps, teamInfo.teamId, args.name, `Worktree creation timed out, so absence cannot be proven while the SDK request may still complete. Repository: ${repository.repositoryRoot}. Worktree name: ${worktreeName}.`, args.claim_task)
         throw new Error(`Failed to create isolated worktree for teammate "${args.name}": ${detail}. The durable attempt and claimed task were retained because the request may still complete.`)
@@ -541,23 +662,30 @@ async function executeTeamSpawnLocked(
           worktreeDir = reconciled.directory
           worktreeBranch = reconciled.branch
           worktreeSourceBranch = reconciled.sourceBranch
-          worktreeBaselineOid = reconciled.baselineOid
-          updateSpawnAttempt(deps, teamInfo.teamId, args.name, {
-            worktree_dir: reconciled.directory,
-            worktree_branch: reconciled.branch,
-            worktree_source_branch: reconciled.sourceBranch,
-            worktree_baseline_oid: reconciled.baselineOid,
-          })
-          await deps.client.worktree.remove({
-            directory: repository.repositoryRoot,
-            worktreeRemoveInput: { directory: reconciled.directory },
-          })
+           worktreeBaselineOid = reconciled.baselineOid
+           updateSpawnAttempt(deps, teamInfo.teamId, args.name, {
+             worktree_dir: reconciled.directory,
+             worktree_branch: reconciled.branch,
+             worktree_source_branch: reconciled.sourceBranch,
+             worktree_baseline_oid: reconciled.baselineOid,
+           })
+           if (worktreeIdentityVerified) {
+             const safeBranch = preservedBranchName(resource.projectName, resource.teamName, resource.teamId, args.name)
+             if (!await preserve(reconciled.branch, safeBranch, repository.repositoryRoot)) {
+               throw new Error(`branch ${reconciled.branch} could not be preserved before removing failed worktree`)
+             }
+             updateSpawnAttempt(deps, teamInfo.teamId, args.name, { safe_branch: safeBranch })
+           }
+           await deps.client.worktree.remove({
+             directory: repository.repositoryRoot,
+             worktreeRemoveInput: { directory: reconciled.directory },
+           })
         }
         settleSpawnAttempt(deps, teamInfo.teamId, args.name, args.claim_task, claimEventId)
       } catch (cleanupError) {
         const cleanupDetail = renderError(cleanupError)
-        alertSpawnAttemptFailure(deps, teamInfo.teamId, args.name, `Worktree setup error: ${detail}. Cleanup error: ${cleanupDetail}. Repository: ${repository.repositoryRoot}. Worktree name: ${worktreeName}.`, args.claim_task)
-        throw new Error(`Failed to create isolated worktree for teammate "${args.name}": ${detail}. Cleanup could not be proven complete: ${cleanupDetail}. The durable attempt and claimed task were retained.`)
+         alertSpawnAttemptFailure(deps, teamInfo.teamId, args.name, `Worktree setup error: ${detail}. Cleanup error: ${cleanupDetail}. Repository: ${repository.repositoryRoot}. Worktree name: ${worktreeName}. Worktree: ${worktreeDir ?? "unknown"}. Preserved branch: ${worktreeBranch ? preservedBranchName(resource.projectName, resource.teamName, resource.teamId, args.name) : "unknown"}.`, args.claim_task)
+         throw new Error(`Failed to create isolated worktree for teammate "${args.name}": ${detail}. Cleanup could not be proven complete: ${cleanupDetail}. The durable attempt and claimed task were retained.`)
       }
       try {
         await deps.client.tui.showToast({
@@ -567,7 +695,7 @@ async function executeTeamSpawnLocked(
           duration: 4000,
         })
       } catch { /* TUI may not be available */ }
-      throw new Error(`Failed to create isolated worktree for teammate "${args.name}": ${detail}. Writer profiles require an isolated worktree; inspect the reported Git/worktree failure before retrying.`)
+       throw new Error(`Failed to create isolated worktree for teammate "${args.name}": ${detail}. ${worktreeIdentityVerified ? `The verified failed worktree branch was preserved before removal; install the reported dependencies in ${worktreeDir ?? "the isolated worktree"} and retry team_spawn.` : "Inspect the reported Git/worktree failure before retrying."} Writer profiles require an isolated worktree.`)
     }
   }
 
@@ -652,7 +780,7 @@ async function executeTeamSpawnLocked(
   if (isReadOnly) {
     permission.push(
       { permission: "edit", pattern: "*", action: "deny" },
-      { permission: "bash", pattern: "*", action: "deny" },
+      { permission: "bash", pattern: "*", action: requiredCapabilities.includes("shell") ? "allow" : "deny" },
       ...READ_ONLY_TOOLS.map(t => ({ permission: t, pattern: "*", action: "allow" as const })),
     )
   }

@@ -523,7 +523,8 @@ export async function executeTeamCleanup(
   const members = deps.db.query(
     `SELECT name, session_id, status, worktree_dir, worktree_branch,
             worktree_source_branch, worktree_baseline_oid, workspace_id,
-             merge_state, merged_source_branch, merged_source_oid
+             merge_state, merged_source_branch, merged_source_oid,
+             merge_disposition, merge_disposition_evidence
      FROM team_member WHERE team_id = ?`,
   ).all(teamInfo.teamId) as Array<{
     name: string
@@ -537,6 +538,8 @@ export async function executeTeamCleanup(
     merge_state: string
     merged_source_branch: string | null
     merged_source_oid: string | null
+    merge_disposition: string
+    merge_disposition_evidence: string | null
   }>
 
   const active = members.filter(m => m.status !== "shutdown" && m.status !== "error")
@@ -659,9 +662,12 @@ export async function executeTeamCleanup(
   const isWriter = (member: (typeof members)[number]) => member.worktree_branch !== null
     || member.worktree_source_branch !== null
     || member.worktree_baseline_oid !== null
-  const awaitingMerge = members.filter(member => isWriter(member) && member.merge_state === "none")
+  const awaitingMerge = members.filter(member => isWriter(member) && member.merge_state === "none" && member.merge_disposition === "none")
   const interruptedMerges = members.filter(member => isWriter(member) && member.merge_state === "merging")
   const invalidMissingRefSettlements = members.filter(member => {
+    if (member.merge_disposition !== "none" && member.merge_disposition !== "merged" && member.merge_disposition !== "verified_empty" && member.merge_disposition !== "already_integrated") {
+      return !member.merge_disposition_evidence?.trim()
+    }
     if (member.worktree_branch !== null || !isWriter(member) || member.merge_state !== "merged") return false
     if (!member.merged_source_branch) return true
     const completed = deps.db.query(
@@ -681,7 +687,7 @@ export async function executeTeamCleanup(
     }
     if (invalidMissingRefSettlements.length > 0) {
       const names = invalidMissingRefSettlements.map(member => member.name).join(", ")
-      guidance.push(`Missing-ref merge settlement is incomplete for: ${names}. Retry team_merge after restoring verifiable branch or worktree evidence.`)
+      guidance.push(`Missing-ref merge settlement is incomplete for: ${names}. Terminal writer disposition is incomplete. Record an explicit team_merge disposition with written evidence, or restore verifiable branch/worktree evidence.`)
     }
     return guidance.join("\n")
   }

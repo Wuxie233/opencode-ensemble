@@ -54,6 +54,20 @@ describe("spawn attempt recovery", () => {
     expect(deps.client.calls).toHaveLength(0)
   })
 
+  test("keeps a dependency-preflight attempt available for an exact retry", async () => {
+    const deps = setupDeps()
+    insertTeam(deps.db, "t1", "team", "lead")
+    insertClaimedAttempt(deps, "worktree_creating")
+    deps.db.run("UPDATE team_spawn_attempt SET preflight_error = 'install dependencies in the retained worktree' WHERE name = 'writer'")
+
+    expect(await recoverSpawnAttempts(deps.db, deps.client, undefined, "t1"))
+      .toEqual({ recovered: 0, blocked: 1 })
+    expect(deps.db.query("SELECT name FROM team_spawn_attempt").all()).toHaveLength(1)
+    expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-1'").get())
+      .toEqual({ status: "in_progress", assignee: "writer" })
+    expect(deps.client.calls).toHaveLength(0)
+  })
+
   test("does not release a worktree-create attempt before a late resource appears", async () => {
     const deps = setupDeps()
     insertTeam(deps.db, "t1", "team", "lead")

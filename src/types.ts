@@ -109,29 +109,38 @@ export function findTeamBySession(
   // Fast path: registry cache
   const entry = registry.getBySession(sessionId)
   if (entry) {
-    const team = db.query("SELECT name FROM team WHERE id = ? AND status = 'active'").get(entry.teamId) as { name: string } | null
-    if (team) return { teamId: entry.teamId, teamName: team.name, role: "member", memberName: entry.memberName }
-  }
-
-  // SQLite fallback: another Plugin instance may have registered this teammate
-  if (!entry) {
     const memberRow = db.query(
       `SELECT tm.team_id, tm.name as member_name, t.name as team_name
        FROM team_member tm
        JOIN team t ON tm.team_id = t.id
        WHERE tm.session_id = ?
+         AND tm.team_id = ?
          AND t.status = 'active'
          AND tm.status NOT IN ('shutdown', 'error')`
-    ).get(sessionId) as { team_id: string; member_name: string; team_name: string } | null
+    ).get(sessionId, entry.teamId) as { team_id: string; member_name: string; team_name: string } | null
     if (memberRow) {
-      // Populate the cache so subsequent lookups skip the SQL query.
-      // Safe without TTL: session IDs are server-generated UUIDs and are
-      // never reused across team_spawn invocations, so a session ID maps
-      // to at most one (teamId, memberName) for the life of the process.
-      // team_cleanup explicitly invalidates via registry.unregisterTeam.
-      registry.register(memberRow.team_id, memberRow.member_name, sessionId)
       return { teamId: memberRow.team_id, teamName: memberRow.team_name, role: "member", memberName: memberRow.member_name }
     }
+    registry.unregister(sessionId)
+  }
+
+  // SQLite fallback: another Plugin instance may have registered this teammate
+  const memberRow = db.query(
+    `SELECT tm.team_id, tm.name as member_name, t.name as team_name
+     FROM team_member tm
+     JOIN team t ON tm.team_id = t.id
+     WHERE tm.session_id = ?
+       AND t.status = 'active'
+       AND tm.status NOT IN ('shutdown', 'error')`
+  ).get(sessionId) as { team_id: string; member_name: string; team_name: string } | null
+  if (memberRow) {
+    // Populate the cache so subsequent lookups skip the SQL query.
+    // Safe without TTL: session IDs are server-generated UUIDs and are
+    // never reused across team_spawn invocations, so a session ID maps
+    // to at most one (teamId, memberName) for the life of the process.
+    // team_cleanup explicitly invalidates via registry.unregisterTeam.
+    registry.register(memberRow.team_id, memberRow.member_name, sessionId)
+    return { teamId: memberRow.team_id, teamName: memberRow.team_name, role: "member", memberName: memberRow.member_name }
   }
 
   // Check if session is a team lead (already SQLite-backed, naturally cross-instance)

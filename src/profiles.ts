@@ -43,7 +43,7 @@ const PROFILES: Record<ProfileName, EnsembleProfile> = {
     name: "scout",
     agent: "explore",
     access: "read",
-    capabilities: ["codebase-reconnaissance", "evidence-mapping", "readable-tool-evidence", "file_read"],
+    capabilities: ["codebase-reconnaissance", "evidence-mapping", "readable-tool-evidence", "file_read", "shell"],
     mission: "Return concise evidence, unknowns, and implementation boundaries without writing files.",
   },
   researcher: {

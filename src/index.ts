@@ -680,9 +680,12 @@ const plugin: Plugin = async (input) => {
       team_merge: tool({
         description: "Merge a shutdown teammate's branch into the working directory as unstaged changes. " +
           "Use this after team_shutdown to review and integrate a teammate's work. Repeated calls and read-only teammates are safe no-ops. " +
-          "The teammate must be shut down first.",
+          "The teammate must be shut down first. For an obsolete branch or an error with no surviving Git evidence, the Lead may pass disposition (superseded or evidence_missing) and a written evidence rationale. A corrected baseline may be supplied as baseline_oid after Git proof succeeds.",
         args: {
           member: tool.schema.string().describe("Teammate name whose branch to merge"),
+          disposition: tool.schema.enum(["superseded", "evidence_missing"]).optional().describe("Explicit Lead-reviewed terminal disposition; does not claim Git integration"),
+          evidence: tool.schema.string().optional().describe("Required written rationale for an explicit terminal disposition"),
+          baseline_oid: tool.schema.string().optional().describe("Corrected immutable baseline commit to use for Git proof"),
         },
         async execute(args, ctx) {
           const result = await executeTeamMerge(deps, args, ctx.sessionID)

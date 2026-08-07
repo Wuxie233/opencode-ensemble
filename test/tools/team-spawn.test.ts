@@ -85,21 +85,40 @@ describe("team_spawn", () => {
       }
       insertTask(deps, "t1", "local-tool-task")
 
-      await expect(executeTeamSpawn(deps, {
+      const spawnArgs = {
         name: "local-tool-writer",
         agent: "build",
         prompt: "Use the local tool",
         claim_task: "local-tool-task",
-      }, "lead-sess", async () => true)).rejects.toThrow("pnpm install --offline")
+      }
+      await expect(executeTeamSpawn(deps, spawnArgs, "lead-sess", async () => true))
+        .rejects.toThrow("retained")
 
       expect(deps.client.calls.map(call => call.method)).not.toContain("workspace.create")
       expect(deps.client.calls.map(call => call.method)).not.toContain("session.create")
       expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'local-tool-task'").get()).toEqual({
-        status: "pending",
-        assignee: null,
+        status: "in_progress",
+        assignee: "local-tool-writer",
       })
       expect(deps.db.query("SELECT name FROM team_member WHERE name = 'local-tool-writer'").get()).toBeNull()
-      expect(deps.client.calls.map(call => call.method)).toContain("worktree.remove")
+      expect(deps.client.calls.map(call => call.method)).not.toContain("worktree.remove")
+      expect(deps.db.query("SELECT worktree_dir, worktree_branch FROM team_spawn_attempt WHERE name = 'local-tool-writer'").get())
+        .toEqual({ worktree_dir: worktree, worktree_branch: "ensemble-tool-resolution" })
+
+      const createdName = (deps.client.calls.find(call => call.method === "worktree.create")!.args[0] as {
+        worktreeCreateInput: { name: string }
+      }).worktreeCreateInput.name
+      deps.client.worktree.list = async () => ({
+        data: [{ name: createdName, branch: "ensemble-tool-resolution", directory: worktree }],
+      })
+      await fs.mkdir(path.join(worktree, "node_modules", "@acme", "shared-tool"), { recursive: true })
+
+      const result = await executeTeamSpawn(deps, spawnArgs, "lead-sess", async () => true)
+      expect(result).toContain("spawned")
+      expect(deps.client.calls.filter(call => call.method === "worktree.create")).toHaveLength(1)
+      expect(deps.client.calls.map(call => call.method)).toContain("workspace.create")
+      expect(deps.client.calls.map(call => call.method)).toContain("session.create")
+      expect(deps.db.query("SELECT name FROM team_spawn_attempt WHERE name = 'local-tool-writer'").get()).toBeNull()
     } finally {
       await fs.rm(worktree, { recursive: true, force: true })
     }
@@ -400,7 +419,7 @@ describe("team_spawn", () => {
 
     await expect(executeTeamSpawn(deps, {
       name: "alice",
-      profile: "scout",
+      profile: "planner",
       prompt: "Run shell",
       claim_task: "task-shell",
       worktree: false,
@@ -410,6 +429,55 @@ describe("team_spawn", () => {
       .toEqual({ status: "pending", assignee: null })
     expect(deps.db.query("SELECT name FROM team_spawn_attempt").all()).toHaveLength(0)
     expect(deps.client.calls).toHaveLength(0)
+  })
+
+  test("allows a read-only Scout to run a shell-required task without a worktree", async () => {
+    deps.db.run(
+      `INSERT INTO team_task
+         (id, team_id, content, status, priority, required_capabilities, time_created, time_updated)
+       VALUES ('task-read-shell', 't1', 'Inspect with shell', 'pending', 'high', ?, ?, ?)`,
+      [JSON.stringify(["file_read", "shell"]), Date.now(), Date.now()],
+    )
+
+    await executeTeamSpawn(deps, {
+      name: "shell-scout",
+      profile: "scout",
+      prompt: "Inspect the repository with shell tools",
+      worktree: false,
+      claim_task: "task-read-shell",
+    }, "lead-sess")
+
+    const createCall = deps.client.calls.find(call => call.method === "session.create")
+    const opts = createCall!.args[0] as { permission?: Array<{ permission: string; pattern: string; action: string }> }
+    expect(opts.permission).toEqual(expect.arrayContaining([
+      { permission: "edit", pattern: "*", action: "deny" },
+      { permission: "bash", pattern: "*", action: "allow" },
+    ]))
+    expect(opts.permission).not.toContainEqual({ permission: "edit", pattern: "*", action: "allow" })
+    expect(deps.client.calls.filter(call => call.method === "worktree.create")).toHaveLength(0)
+    expect(deps.db.query("SELECT status, assignee FROM team_task WHERE id = 'task-read-shell'").get())
+      .toEqual({ status: "in_progress", assignee: "shell-scout" })
+  })
+
+  test("keeps shell denied for read-only tasks that do not require shell", async () => {
+    deps.db.run(
+      `INSERT INTO team_task
+         (id, team_id, content, status, priority, required_capabilities, time_created, time_updated)
+       VALUES ('task-read-files', 't1', 'Inspect files', 'pending', 'high', ?, ?, ?)`,
+      [JSON.stringify(["file_read"]), Date.now(), Date.now()],
+    )
+
+    await executeTeamSpawn(deps, {
+      name: "file-scout",
+      profile: "scout",
+      prompt: "Inspect the repository",
+      worktree: false,
+      claim_task: "task-read-files",
+    }, "lead-sess")
+
+    const createCall = deps.client.calls.find(call => call.method === "session.create")
+    const opts = createCall!.args[0] as { permission?: Array<{ permission: string; pattern: string; action: string }> }
+    expect(opts.permission).toContainEqual({ permission: "bash", pattern: "*", action: "deny" })
   })
 
   test("concurrent compatible claims leave only one owner", async () => {

@@ -187,7 +187,9 @@ export function readArtifact(db: Database, teamId: string, artifactId: string): 
     content: string
     time_created: number
   } | null
-  if (!row) throw new Error("Artifact not found.")
+  if (!row) {
+    throw new Error(`Artifact "${artifactId}" was not found in the caller's active Team. Check the exact artifact ID and Team scope.`)
+  }
   const bytes = new TextEncoder().encode(row.content)
   const digest = createHash("sha256").update(bytes).digest("hex")
   if (bytes.byteLength !== row.byte_count || digest !== row.sha256) {

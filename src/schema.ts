@@ -422,6 +422,14 @@ export const MIGRATIONS: string[] = [
   `ALTER TABLE team_member ADD COLUMN startup_recovery_token TEXT;
    ALTER TABLE team_member ADD COLUMN startup_recovery_state TEXT NOT NULL DEFAULT 'none'
      CHECK(startup_recovery_state IN ('none', 'prompted', 'failed'));`,
+  // Migration 25: Explicit, auditable terminal writer dispositions. These
+  // dispositions are human-reviewed outcomes, not Git integration proof.
+  `ALTER TABLE team_member ADD COLUMN merge_disposition TEXT NOT NULL DEFAULT 'none'
+     CHECK(merge_disposition IN ('none', 'merged', 'verified_empty', 'already_integrated', 'superseded', 'evidence_missing'));
+   ALTER TABLE team_member ADD COLUMN merge_disposition_evidence TEXT;`,
+  // Migration 26: Keep a verified worktree available while the Lead repairs
+  // repository-local dependencies, including across plugin restarts.
+  `ALTER TABLE team_spawn_attempt ADD COLUMN preflight_error TEXT;`,
 ]
 
 /**

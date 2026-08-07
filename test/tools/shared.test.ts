@@ -40,6 +40,15 @@ describe("requireTeamMember", () => {
   test("throws if session is not in a team", () => {
     expect(() => requireTeamMember(deps, "random-sess")).toThrow("not in a team")
   })
+
+  test("does not trust a cached member after the member becomes terminal", () => {
+    insertMember(deps.db, "t1", "alice", "sess-alice")
+    deps.registry.register("t1", "alice", "sess-alice")
+    deps.db.run("UPDATE team_member SET status = 'shutdown' WHERE session_id = 'sess-alice'")
+
+    expect(() => requireTeamMember(deps, "sess-alice")).toThrow("not in a team")
+    expect(deps.registry.getBySession("sess-alice")).toBeUndefined()
+  })
 })
 
 describe("requireCanPurgeArchivedTeams", () => {

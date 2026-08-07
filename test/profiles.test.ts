@@ -6,7 +6,10 @@ import { insertTeam, setupDeps } from "./helpers"
 describe("Ensemble profiles", () => {
   test("maps broad profiles to runtime agents and access capabilities", () => {
     expect(resolveProfile("general", undefined)).toMatchObject({ agent: "build", access: "write" })
-    expect(resolveProfile("scout", undefined)).toMatchObject({ agent: "explore", access: "read" })
+    const scout = resolveProfile("scout", undefined)
+    expect(scout).toMatchObject({ agent: "explore", access: "read" })
+    expect(scout.capabilities).toContain("file_read")
+    expect(scout.capabilities).toContain("shell")
     expect(resolveProfile("planner", undefined)).toMatchObject({ agent: "plan", access: "read" })
     expect(resolveProfile("frontend", undefined)).toMatchObject({ agent: "build", access: "write" })
     expect(resolveProfile(undefined, "explore")).toMatchObject({ name: "scout", agent: "explore" })

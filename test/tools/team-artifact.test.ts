@@ -9,6 +9,8 @@ import { deleteArchivedTeamForExplicitPurge } from "../../src/team-event"
 import { executeTeamArtifactList } from "../../src/tools/team-artifact-list"
 import { executeTeamArtifactPublish } from "../../src/tools/team-artifact-publish"
 import { executeTeamArtifactRead } from "../../src/tools/team-artifact-read"
+import { executeTeamTasksAdd } from "../../src/tools/team-tasks-add"
+import { executeTeamClaim } from "../../src/tools/team-claim"
 import { insertMember, insertTeam, setupDeps } from "../helpers"
 
 function insertTask(
@@ -63,6 +65,29 @@ describe("Team artifact tools", () => {
     expect(read).toContain("----- BEGIN ARTIFACT CONTENT -----")
     expect(read).toContain(content)
     expect(read).toContain("----- END ARTIFACT CONTENT -----")
+  })
+
+  test("Lead publication binds to a task and the assigned teammate reads the exact contract", async () => {
+    const content = "Bound execution contract"
+    const published = executeTeamArtifactPublish(deps, { kind: "contract", content }, "lead-one")
+    const id = artifactId(published)
+
+    await executeTeamTasksAdd(deps, {
+      tasks: [{
+        key: "bound-contract",
+        content: "Implement the bound contract",
+        priority: "high",
+        contract_artifact_id: id,
+      }],
+    }, "lead-one")
+    const task = deps.db.query("SELECT id FROM team_task WHERE team_id = 't1' AND contract_artifact_id = ?")
+      .get(id) as { id: string }
+    const claim = await executeTeamClaim(deps, { task_id: task.id }, "sess-alice")
+    expect(claim).toContain(`Bound contract: ${id}`)
+
+    const read = executeTeamArtifactRead(deps, { artifact_id: id }, "sess-alice")
+    expect(read).toContain(content)
+    expect(read).toContain(`SHA-256: ${createHash("sha256").update(content).digest("hex")}`)
   })
 
   test("rejects member contracts and malformed content contracts", () => {
@@ -130,8 +155,10 @@ describe("Team artifact tools", () => {
     const id = artifactId(executeTeamArtifactPublish(deps, { kind: "contract", content: "private" }, "lead-one"))
     insertTeam(deps.db, "t2", "team-two", "lead-two")
 
-    expect(() => executeTeamArtifactRead(deps, { artifact_id: id }, "lead-two")).toThrow("Artifact not found")
-    expect(() => executeTeamArtifactRead(deps, { artifact_id: "artifact_missing" }, "lead-two")).toThrow("Artifact not found")
+    expect(() => executeTeamArtifactRead(deps, { artifact_id: id }, "lead-two"))
+      .toThrow(`Artifact "${id}" was not found in the caller's active Team`)
+    expect(() => executeTeamArtifactRead(deps, { artifact_id: "artifact_missing" }, "lead-two"))
+      .toThrow("Check the exact artifact ID and Team scope")
     expect(executeTeamArtifactList(deps, {}, "lead-two")).toBe("No Team artifacts found.")
   })
 

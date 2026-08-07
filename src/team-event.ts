@@ -24,6 +24,8 @@ interface TeamEventPayloads {
   "merge.started": { member_name: string }
   "merge.completed": { member_name: string }
   "merge.failed": { member_name: string }
+  "merge.disposed": { member_name: string; disposition: MergeDisposition; evidence: string }
+  "merge.baseline_rebound": { member_name: string; baseline_oid: string }
   "consultation.requested": { consultation_id: string; task_id: string; requester: string; planner: string }
   "consultation.resolved": { consultation_id: string; task_id: string; requester: string; planner: string }
   "consultation.escalated": { consultation_id: string; task_id: string; requester: string; planner: string }
@@ -41,6 +43,7 @@ export type TaskReleaseReason = "spawn_rollback" | "session_error" | "retry_exha
 export type MemberTransitionReason = "session_status" | "session_error" | "retry_exhausted" | "timeout" | "startup_recovery" | "shutdown" | "force_cleanup" | "task_completed"
 export type RecoveryMechanism = "startup" | "safe_abort" | "watchdog" | "late_terminal"
 export type RecoveryStage = "detected" | "claimed" | "preserved" | "settled" | "failed" | "prompted" | "reaborted"
+export type MergeDisposition = "none" | "merged" | "verified_empty" | "already_integrated" | "superseded" | "evidence_missing"
 
 export type TeamEventKind = keyof TeamEventPayloads
 
@@ -67,6 +70,8 @@ const PAYLOAD_KEYS: { [K in TeamEventKind]: readonly (keyof TeamEventPayloads[K]
   "merge.started": ["member_name"],
   "merge.completed": ["member_name"],
   "merge.failed": ["member_name"],
+  "merge.disposed": ["member_name", "disposition", "evidence"],
+  "merge.baseline_rebound": ["member_name", "baseline_oid"],
   "consultation.requested": ["consultation_id", "task_id", "requester", "planner"],
   "consultation.resolved": ["consultation_id", "task_id", "requester", "planner"],
   "consultation.escalated": ["consultation_id", "task_id", "requester", "planner"],
@@ -114,6 +119,12 @@ function validatePayloadValue(kind: TeamEventKind, key: string, value: unknown):
   } else if (key === "stage") {
     if (typeof value === "string" && RECOVERY_STAGES.has(value as RecoveryStage)) return value
   } else if (key === "context_truncated" && typeof value === "boolean") {
+    return value
+  } else if (key === "disposition" && typeof value === "string" && ["none", "merged", "verified_empty", "already_integrated", "superseded", "evidence_missing"].includes(value)) {
+    return value
+  } else if (key === "baseline_oid" && typeof value === "string" && /^[0-9a-f]{7,64}$/.test(value)) {
+    return value
+  } else if (key === "evidence" && typeof value === "string" && value.trim().length > 0) {
     return value
   }
   throw new Error(`Invalid payload value for team event kind ${kind}`)

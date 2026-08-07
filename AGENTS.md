@@ -118,6 +118,11 @@ OpenCode normalizes requested worktree names and may append a unique slug on
 collision. Persist the actual returned name, directory, and branch immediately;
 validate ownership with the repository common-dir plus branch/HEAD identity,
 and keep list-based recovery exact so it fails closed on ambiguous candidates.
+If repository-local tool dependency preflight fails after identity verification,
+retain the durable attempt, claimed task, and exact worktree. A retry with the
+same teammate name and task may reuse that worktree only after re-verifying all
+persisted Git identity fields; never replace it with a fresh worktree or share
+the Lead's `node_modules`.
 
 The SQLite connection, dashboard listener, and `ActivityBuffer` are process-shared across directory plugin instances. Directory-local watchdogs, registries, trackers, and rate limiters remain isolated. Release shared resources only after the final directory and any in-flight recovery task finish.
 

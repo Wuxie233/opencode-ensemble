@@ -58,10 +58,13 @@ describe("schema migrations", () => {
     expect(memberColumns.map(column => column.name)).toEqual(expect.arrayContaining([
       "retry_attempts", "retry_count", "retry_tripped", "merge_state", "merged_source_branch",
       "startup_recovery_token", "startup_recovery_state",
+      "merge_disposition", "merge_disposition_evidence",
     ]))
     expect(teamColumns.map(column => column.name)).toEqual(expect.arrayContaining([
       "current_phase", "lead_brief", "lead_brief_updated_at",
     ]))
+    const spawnAttemptColumns = db.query("PRAGMA table_info(team_spawn_attempt)").all() as Array<{ name: string }>
+    expect(spawnAttemptColumns.map(column => column.name)).toContain("preflight_error")
     expect(taskColumns.map(column => column.name)).toContain("phase")
     expect(taskColumns.map(column => column.name)).toContain("required_capabilities")
     expect(projectColumns.map(column => column.name)).toContain("slug")

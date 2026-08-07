@@ -22,6 +22,7 @@ interface SpawnAttempt {
   safe_branch: string | null
   claim_task_id: string | null
   claim_event_id: string | null
+  preflight_error: string | null
 }
 
 /** Recover task-owned resources left by a spawn that did not reach member registration. */
@@ -50,6 +51,10 @@ export async function recoverSpawnAttempts(
   let recovered = 0
   let blocked = 0
   for (const attempt of attempts) {
+    if (attempt.preflight_error) {
+      blocked++
+      continue
+    }
     if (attempt.stage === "session_creating" && !attempt.session_id) {
       blocked++
       continue

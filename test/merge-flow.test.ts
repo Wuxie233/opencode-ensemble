@@ -427,6 +427,80 @@ describe("team_merge", () => {
     expect(result).toContain("No branch to merge")
   })
 
+  test("records an explicit superseded disposition without applying obsolete changes", async () => {
+    await executeTeamCreate(deps, { name: "superseded" }, lead)
+    await executeTeamSpawn(deps, { name: "alice", agent: "build", prompt: "obsolete task" }, lead)
+    await executeTeamShutdown(deps, { member: "alice" }, lead, undefined, noopPreserve)
+
+    const result = await executeTeamMerge(deps, {
+      member: "alice",
+      disposition: "superseded",
+      evidence: "Accepted replacement task superseded this branch; current HEAD is the reviewed implementation.",
+    }, lead, noopMerge, noopDelete, noopOverlap)
+
+    expect(result).toContain("superseded")
+    expect(deps.db.query("SELECT merge_state, merge_disposition, merge_disposition_evidence FROM team_member WHERE name = 'alice'").get()).toMatchObject({
+      merge_state: "none",
+      merge_disposition: "superseded",
+    })
+    expect(deps.db.query("SELECT kind FROM team_event WHERE kind = 'merge.disposed'").get()).toEqual({ kind: "merge.disposed" })
+  })
+
+  test("requires evidence for an explicit terminal disposition", async () => {
+    await executeTeamCreate(deps, { name: "missing-evidence" }, lead)
+    await executeTeamSpawn(deps, { name: "alice", agent: "build", prompt: "failed task" }, lead)
+    await executeTeamShutdown(deps, { member: "alice" }, lead, undefined, noopPreserve)
+
+    await expect(executeTeamMerge(deps, { member: "alice", disposition: "superseded" }, lead, noopMerge, noopDelete, noopOverlap))
+      .rejects.toThrow("written evidence rationale")
+  })
+
+  test("persists a corrected baseline only after Git proof accepts it", async () => {
+    await executeTeamCreate(deps, { name: "corrected-baseline" }, lead)
+    await executeTeamSpawn(deps, { name: "alice", agent: "build", prompt: "correct baseline" }, lead)
+    await executeTeamShutdown(deps, { member: "alice" }, lead, undefined, noopPreserve)
+    deps.db.run("UPDATE team_member SET worktree_baseline_oid = '1111111' WHERE name = 'alice'")
+    const seenBaselines: Array<string | null> = []
+    const verify = async (_root: string, _identity: string, _source: string, baseline: string | null) => {
+      seenBaselines.push(baseline)
+      return { kind: "not-integrated" as const }
+    }
+
+    const result = await executeTeamMerge(
+      deps,
+      { member: "alice", baseline_oid: "2222222" },
+      lead,
+      noopMerge,
+      noopDelete,
+      noopOverlap,
+      undefined,
+      async (_root, sourceBranch) => ({ sourceBranch, sourceOid: "3333333" }),
+      verify,
+    )
+
+    expect(result).toContain("Merged alice's changes")
+    expect(seenBaselines).toEqual(["2222222"])
+    expect(deps.db.query("SELECT worktree_baseline_oid FROM team_member WHERE name = 'alice'").get())
+      .toEqual({ worktree_baseline_oid: "2222222" })
+    expect(deps.db.query("SELECT kind FROM team_event WHERE kind = 'merge.baseline_rebound'").get())
+      .toEqual({ kind: "merge.baseline_rebound" })
+  })
+
+  test("settles an error writer with no surviving evidence as explicitly evidence-missing", async () => {
+    await executeTeamCreate(deps, { name: "evidence-missing" }, lead)
+    await executeTeamSpawn(deps, { name: "alice", agent: "build", prompt: "failed before setup" }, lead)
+    deps.db.run("UPDATE team_member SET status = 'error', execution_status = 'failed', worktree_dir = NULL, worktree_branch = NULL, worktree_source_branch = NULL, worktree_baseline_oid = NULL WHERE name = 'alice'")
+
+    const result = await executeTeamMerge(deps, {
+      member: "alice",
+      disposition: "evidence_missing",
+      evidence: "The writer failed before repository setup; no branch, worktree, or baseline evidence survived.",
+    }, lead, noopMerge, noopDelete, noopOverlap)
+
+    expect(result).toContain("evidence_missing")
+    expect(deps.db.query("SELECT merge_disposition FROM team_member WHERE name = 'alice'").get()).toEqual({ merge_disposition: "evidence_missing" })
+  })
+
   test("returns conflict message on merge failure", async () => {
     await executeTeamCreate(deps, { name: "conflict-merge" }, lead)
     await executeTeamSpawn(deps, { name: "alice", agent: "build", prompt: "task" }, lead)

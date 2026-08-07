@@ -1050,6 +1050,26 @@ describe("team_cleanup", () => {
     expect(team.status).toBe("archived")
   })
 
+  test("cleanup accepts an explicitly evidenced superseded writer disposition", async () => {
+    insertMember(deps.db, "t1", "alice", "sess-alice", "shutdown", "idle")
+    deps.db.run("UPDATE team_member SET worktree_branch = 'obsolete-alice', merge_disposition = 'superseded', merge_disposition_evidence = 'Replacement work superseded this branch.' WHERE name = 'alice'")
+    deps.registry.register("t1", "alice", "sess-alice")
+
+    const result = await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete, false)
+    expect(result).toContain("cleaned up")
+    expect(deps.db.query("SELECT status FROM team WHERE id = 't1'").get()).toEqual({ status: "archived" })
+  })
+
+  test("cleanup rejects a disposition without durable evidence", async () => {
+    insertMember(deps.db, "t1", "alice", "sess-alice", "shutdown", "idle")
+    deps.db.run("UPDATE team_member SET worktree_branch = 'obsolete-alice', merge_disposition = 'superseded' WHERE name = 'alice'")
+    deps.registry.register("t1", "alice", "sess-alice")
+
+    const result = await executeTeamCleanup(deps, { force: false }, "lead-sess", undefined, noopMerge, noopDelete, false)
+    expect(result).toContain("Terminal writer disposition is incomplete")
+    expect(deps.db.query("SELECT status FROM team WHERE id = 't1'").get()).toEqual({ status: "active" })
+  })
+
   // --- Worktree cleanup tests ---
 
   test("removes worktrees and lists branches for merging on cleanup", async () => {

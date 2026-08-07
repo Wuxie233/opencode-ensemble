@@ -36,7 +36,16 @@ export function requireLead(
   sessionId: string,
 ): { teamId: string; teamName: string } {
   const teamInfo = findTeamBySession(deps.db, deps.registry, sessionId)
-  if (!teamInfo) throw new Error("This session is not in a team. Use team_create first.")
+  if (!teamInfo) {
+    const inactiveMember = deps.db.query(
+      `SELECT tm.team_id, t.name AS team_name
+       FROM team_member tm
+       JOIN team t ON tm.team_id = t.id
+       WHERE tm.session_id = ? AND t.status = 'active' LIMIT 1`,
+    ).get(sessionId) as { team_id: string; team_name: string } | null
+    if (inactiveMember) throw new Error("Only the team lead can use this tool.")
+    throw new Error("This session is not in a team. Use team_create first.")
+  }
   if (teamInfo.role !== "lead") throw new Error("Only the team lead can use this tool.")
   return { teamId: teamInfo.teamId, teamName: teamInfo.teamName }
 }

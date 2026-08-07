@@ -19,6 +19,7 @@ import type {
 import { log } from "../log"
 import { immediateTransaction } from "../db"
 import { appendTeamEvent } from "../team-event"
+import type { MergeDisposition } from "../team-event"
 import { recoverMemberRepositoryBinding, repositoryBindingOps } from "../repository-binding"
 
 /**
@@ -27,7 +28,7 @@ import { recoverMemberRepositoryBinding, repositoryBindingOps } from "../reposit
  */
 export async function executeTeamMerge(
   deps: ToolDeps,
-  args: { member: string },
+  args: { member: string; disposition?: "superseded" | "evidence_missing"; evidence?: string; baseline_oid?: string },
   sessionId: string,
   merge: MergeBranchFn = mergeBranch,
   delBranch: DeleteBranchFn = deleteBranch,
@@ -39,7 +40,8 @@ export async function executeTeamMerge(
   const teamInfo = requireLead(deps, sessionId)
   const member = deps.db.query(
     `SELECT status, worktree_dir, worktree_branch, worktree_source_branch,
-            worktree_baseline_oid, merge_state, merged_source_branch, merged_source_oid
+            worktree_baseline_oid, merge_state, merged_source_branch, merged_source_oid,
+            merge_disposition, merge_disposition_evidence
      FROM team_member WHERE team_id = ? AND name = ?`,
   ).get(teamInfo.teamId, args.member) as {
     status: string
@@ -50,11 +52,43 @@ export async function executeTeamMerge(
     merge_state: string
     merged_source_branch: string | null
     merged_source_oid: string | null
+    merge_disposition: MergeDisposition
+    merge_disposition_evidence: string | null
   } | null
   if (!member) throw new Error(`Teammate "${args.member}" not found in team "${teamInfo.teamName}"`)
 
   if (member.status !== "shutdown" && member.status !== "error") {
     throw new Error(`Teammate "${args.member}" is still active (status: ${member.status}). Shut them down first with team_shutdown.`)
+  }
+
+  if (args.disposition) {
+    const disposition = args.disposition
+    const evidence = args.evidence?.trim()
+    if (!evidence) throw new Error(`A written evidence rationale is required when settling "${args.member}" as ${args.disposition}.`)
+    if (member.merge_state === "merging") {
+      return `Merge for "${args.member}" was already started. Inspect git diff before recording a terminal disposition.`
+    }
+    if (member.merge_state === "merged") {
+      return `Teammate "${args.member}" already has a verified merge settlement; no alternate disposition was recorded.`
+    }
+    if (args.disposition === "evidence_missing" && member.status !== "error") {
+      throw new Error(`Evidence-missing settlement is only valid for an error teammate; "${args.member}" has status ${member.status}.`)
+    }
+    if (member.merge_disposition !== "none") {
+      return `Teammate "${args.member}" already has terminal disposition ${member.merge_disposition}. No changes were made.`
+    }
+    immediateTransaction(deps.db, () => {
+      deps.db.run(
+        "UPDATE team_member SET merge_disposition = ?, merge_disposition_evidence = ?, time_updated = ? WHERE team_id = ? AND name = ? AND merge_state = 'none' AND merge_disposition = 'none'",
+        [disposition, evidence, Date.now(), teamInfo.teamId, args.member],
+      )
+      appendTeamEvent(deps.db, {
+        teamId: teamInfo.teamId,
+        kind: "merge.disposed",
+        payload: { member_name: args.member, disposition, evidence },
+      })
+    })
+    return `Recorded terminal disposition ${disposition} for "${args.member}". No Git integration was claimed; the branch remains preserved for audit and cleanup.`
   }
 
   const failedWriter = member.status === "error" && (
@@ -90,11 +124,12 @@ export async function executeTeamMerge(
   let branch = member.worktree_branch
   let sourceOid: string | null = null
   let verifiedEmpty = false
+  const requestedBaseline = args.baseline_oid ?? member.worktree_baseline_oid
   if (failedWriter) {
     const evidence = await verifyFailedWriter({
       repositoryRoot,
       gitIdentity: binding.gitIdentity,
-      baselineOid: member.worktree_baseline_oid,
+      baselineOid: requestedBaseline,
       sourceBranch: member.worktree_source_branch,
       preservedBranch: member.worktree_branch,
       worktreeDir: member.worktree_dir,
@@ -125,7 +160,7 @@ export async function executeTeamMerge(
     repositoryRoot,
     gitIdentity,
     sourceOid,
-    member.worktree_baseline_oid,
+    requestedBaseline,
   )
   if (integrated.kind === "unverifiable") {
     return `Cannot verify merge safety for ${args.member}: ${integrated.reason}. No merge state was recorded.`
@@ -135,8 +170,10 @@ export async function executeTeamMerge(
   let startedEventId: string | undefined
   const claimed = immediateTransaction(deps.db, () => {
     const result = deps.db.run(
-      "UPDATE team_member SET merge_state = 'merging', merged_source_branch = ? WHERE team_id = ? AND name = ? AND merge_state = 'none'",
-      [branch, teamInfo.teamId, args.member],
+      `UPDATE team_member SET merge_state = 'merging', merged_source_branch = ?,
+              worktree_baseline_oid = COALESCE(?, worktree_baseline_oid)
+       WHERE team_id = ? AND name = ? AND merge_state = 'none'`,
+      [branch, args.baseline_oid ?? null, teamInfo.teamId, args.member],
     )
     if (result.changes !== 1) return false
     startedEventId = appendTeamEvent(deps.db, {
@@ -144,13 +181,21 @@ export async function executeTeamMerge(
       kind: "merge.started",
       payload: { member_name: args.member },
     })
+    if (args.baseline_oid && args.baseline_oid !== member.worktree_baseline_oid) {
+      appendTeamEvent(deps.db, {
+        teamId: teamInfo.teamId,
+        kind: "merge.baseline_rebound",
+        payload: { member_name: args.member, baseline_oid: args.baseline_oid },
+        causeEventId: startedEventId,
+      })
+    }
     return true
   })
   if (!claimed) return `Merge for "${args.member}" is already being handled.`
   log(`merge:start member=${args.member} branch=${branch}`)
 
   if (verifiedEmpty || alreadyIntegrated) {
-    recordMergeCompletion(deps, teamInfo.teamId, args.member, branch, immutableSourceOid, startedEventId)
+    recordMergeCompletion(deps, teamInfo.teamId, args.member, branch, immutableSourceOid, verifiedEmpty ? "verified_empty" : "already_integrated", startedEventId)
     const recordedBranch = member.worktree_branch
     const deleted = recordedBranch ? await delBranch(recordedBranch, repositoryRoot, immutableSourceOid) : false
     if (deleted) {
@@ -198,7 +243,7 @@ export async function executeTeamMerge(
   }
 
   // Record integration before branch deletion so a retry cannot reapply the squash.
-  recordMergeCompletion(deps, teamInfo.teamId, args.member, branch, immutableSourceOid, startedEventId)
+  recordMergeCompletion(deps, teamInfo.teamId, args.member, branch, immutableSourceOid, "merged", startedEventId)
   const recordedBranch = member.worktree_branch
   const deleted = recordedBranch ? await delBranch(recordedBranch, repositoryRoot, immutableSourceOid) : false
   if (deleted) {
@@ -215,13 +260,14 @@ function recordMergeCompletion(
   memberName: string,
   sourceBranch: string,
   sourceOid: string,
+  disposition: "merged" | "verified_empty" | "already_integrated",
   causeEventId?: string,
 ): void {
   immediateTransaction(deps.db, () => {
     const merged = deps.db.run(
-      `UPDATE team_member SET merge_state = 'merged', merged_source_branch = ?, merged_source_oid = ?
+      `UPDATE team_member SET merge_state = 'merged', merged_source_branch = ?, merged_source_oid = ?, merge_disposition = ?
        WHERE team_id = ? AND name = ? AND merge_state = 'merging'`,
-      [sourceBranch, sourceOid, teamId, memberName],
+      [sourceBranch, sourceOid, disposition, teamId, memberName],
     )
     if (merged.changes !== 1) throw new Error(`Merge state for "${memberName}" changed before completion could be recorded.`)
     appendTeamEvent(deps.db, {
