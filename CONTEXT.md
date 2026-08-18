@@ -1,6 +1,6 @@
 # OpenCode Ensemble
 
-OpenCode Ensemble coordinates one lead session and multiple teammate sessions around shared work. This glossary fixes the Simplified Chinese language used by the private dashboard customization.
+OpenCode Ensemble coordinates one lead session and multiple teammate sessions around shared work. This glossary fixes the Simplified Chinese language used by the dashboard.
 
 ## Language
 

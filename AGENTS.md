@@ -1,28 +1,24 @@
 # opencode-ensemble — Agent Guidelines
 
-## Private Customization
+## Maintenance Boundary
 
-This checkout is the user's private customization source. `origin` points to
-`Wuxie233/opencode-ensemble`; `upstream` points to the official
-`hueyexe/opencode-ensemble` repository. Keep private behavior in small tested
-commits and never patch the installed npm cache.
+This checkout is the independent `Wuxie233/opencode-ensemble` fork. `origin`
+points here; `upstream` is the official `hueyexe/opencode-ensemble` repository
+and is kept as a read-only reference. Keep local behavior in small tested
+commits and never patch an installed npm cache.
 
-This fork has diverged far enough from upstream that it is treated as an
-independent product, not a patch series awaiting rebase. Do not plan work around
-upstream parity, do not file issues or open PRs against `hueyexe/*`, and do not
-weaken private behavior to stay mergeable upstream. `upstream` is kept only as a
-read-only reference for occasionally reading how the official implementation
-solved something. All feedback, issues, and iteration belong on `origin`.
+The fork has diverged far enough that it is treated as an independent product,
+not a patch series awaiting rebase. Do not plan work around upstream parity, do
+not file issues or open PRs against `hueyexe/*`, and do not weaken local
+behavior to stay mergeable upstream. All feedback, issues, and iteration belong
+on `origin`.
 
-The active OpenCode configuration loads `/root/CODE/opencode-ensemble/dist/index.js`.
-Build it locally after verified source changes, but do not commit `dist/`.
-OpenCode must be restarted manually by the user before plugin code or config
-changes take effect.
+Load the local `dist/index.js` after a verified `bun run build`. Do not commit
+`dist/`. Restart OpenCode before plugin code or config changes take effect.
 
-The private dashboard uses Simplified Chinese for fixed UI copy. Preserve
-project, team, member, task, prompt, message, model, branch, path, command,
-output, and raw runtime-error content verbatim. The canonical terminology is in
-`CONTEXT.md`.
+The dashboard uses Simplified Chinese for fixed UI copy. Preserve project, team,
+member, task, prompt, message, model, branch, path, command, output, and raw
+runtime-error content verbatim. The canonical terminology is in `CONTEXT.md`.
 
 ## What This Is
 

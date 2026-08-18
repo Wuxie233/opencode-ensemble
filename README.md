@@ -4,26 +4,30 @@
 
 # OpenCode Ensemble
 
-[![npm version](https://img.shields.io/npm/v/@hueyexe/opencode-ensemble.svg)](https://www.npmjs.com/package/@hueyexe/opencode-ensemble)
-[![npm downloads](https://img.shields.io/npm/dm/@hueyexe/opencode-ensemble.svg)](https://www.npmjs.com/package/@hueyexe/opencode-ensemble)
 [![tests](https://img.shields.io/badge/tests-964%20passing-brightgreen.svg)]()
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue.svg)]()
 [![OpenCode SDK](https://img.shields.io/badge/deps-OpenCode%20SDK%20only-blue.svg)]()
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
-Run parallel AI agents in OpenCode. Each agent gets its own session, context window, and task. They coordinate through messaging and a shared task board.
+This repository is the independently maintained fork at [Wuxie233/opencode-ensemble](https://github.com/Wuxie233/opencode-ensemble). It started from [`hueyexe/opencode-ensemble`](https://github.com/hueyexe/opencode-ensemble) and is no longer kept mergeable with upstream.
 
-Plugin built on the public OpenCode SDK. No internal dependencies.
+The original product runs parallel agents in OpenCode. Each agent gets its own session, context window, and task. They coordinate through messaging and a shared task board. Plugin built on the public OpenCode SDK, with no internal dependencies.
+
+The bet in this fork is narrower: raw parallelism is not enough. Agents that work at the same time still need a coordination protocol — addressable peers, isolated writers, recoverable lifecycle, and state a human can inspect after a crash. Workflow conventions sit on top of that runtime; they are not the runtime. The lead owns integration and the final result. Writers stay in their own worktrees. Reviewers stay read-only. A teammate that dies mid-task should leave a branch and a structured result, not a hole in the working tree.
 
 ## Quick Start
 
+This fork is loaded from a local build, not from the upstream npm package:
+
 ```json
 {
-  "plugin": ["@hueyexe/opencode-ensemble@0.16.0"]
+  "plugin": ["/absolute/path/to/opencode-ensemble/dist/index.js"]
 }
 ```
 
-Add to your `opencode.json`, restart OpenCode, and ask it to do something that benefits from parallel work. The agent handles the rest. See [Install](#install) for full setup including worktree permissions.
+Build with `bun run build`, restart OpenCode, and ask it to do something that benefits from parallel work. See [Install](#install) for worktree permissions and runtime requirements.
+
+The original package name `@hueyexe/opencode-ensemble` still appears in some docs as historical context. New installs of this fork should not point at that npm spec.
 
 ## What actually happens
 
